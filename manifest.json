@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "Online Video Downloader",
+  "version": "1.0.0",
+  "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
+
+  "permissions": [
+    "webRequest",
+    "declarativeNetRequest",
+    "downloads",
+    "offscreen",
+    "storage",
+    "scripting",
+    "tabs",
+    "activeTab",
+    "notifications"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "lib/browser-compat.js",
+        "lib/byte-utils.js",
+        "lib/http-utils.js",
+        "lib/constants.js",
+        "lib/message-types.js",
+        "lib/video-utils.js",
+        "lib/ui-dom-utils.js",
+        "lib/video-source-utils.js",
+        "lib/mp4-muxer.js",
+        "lib/bilibili-muxer.js",
+        "lib/wbi-signer.js",
+        "lib/bilibili-quality-utils.js",
+        "lib/bilibili-quality-store.js",
+        "lib/settings-store.js",
+        "lib/hls-pipeline.js",
+        "lib/mpd-parser.js",
+        "lib/ovd-logger.js",
+        "lib/youtube-download-mode-store.js",
+        "lib/youtube-stream-utils.js",
+        "content/source-handlers.js",
+        "content/progress-reporter.js",
+        "content/youtube-download-options.js",
+        "content/youtube-download-errors.js",
+        "content/strategies/blob-strategy.js",
+        "content/strategies/youtube-capture-strategy.js",
+        "content/strategies/youtube-parse-download-strategy.js",
+        "content/strategies/bilibili-strategy.js",
+        "content/strategies/hls-strategy.js",
+        "content/strategies/dash-strategy.js",
+        "content/strategies/generic-strategy.js",
+        "content/stream-transfer-manager.js",
+        "content/download-coordinator.js",
+        "content/message-router.js",
+        "content/content-main.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["injected/*.js", "lib/*", "icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}

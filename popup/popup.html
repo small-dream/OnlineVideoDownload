@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-shell">
+    <main class="main-view" id="mainView">
+      <div id="videoList" class="video-list">
+        <div class="empty-state" id="emptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <p>未检测到视频</p>
+          <p class="hint">请在包含视频的页面打开扩展</p>
+        </div>
+      </div>
+    </main>
+
+    <section class="settings-view" id="settingsView" hidden>
+      <div class="settings-header">
+        <button class="icon-btn" id="closeSettingsBtn" title="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+        <div>
+          <h1>设置</h1>
+          <p class="subtitle" id="subtitle">正在检测视频...</p>
+        </div>
+      </div>
+
+      <div class="settings-list">
+        <label class="settings-row">
+          <span>并发下载数</span>
+          <input type="number" id="popupConcurrentLimit" min="1" max="5" value="3">
+        </label>
+        <label class="settings-row">
+          <span>下载完成通知</span>
+          <input type="checkbox" id="popupDownloadNotification" checked>
+        </label>
+        <label class="settings-row">
+          <span>YouTube 默认模式</span>
+          <select id="popupYoutubeDefaultMode">
+            <option value="capture">录制模式</option>
+            <option value="parse">解析下载</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>文件命名</span>
+          <select id="popupFilenameFormat">
+            <option value="title">仅标题</option>
+            <option value="title-quality">标题 + 画质</option>
+            <option value="title-date">标题 + 日期</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>下载目录</span>
+          <input type="text" id="popupDownloadSubdir" placeholder="留空为默认目录">
+        </label>
+        <label class="settings-row">
+          <span>历史保留</span>
+          <select id="popupHistoryRetention">
+            <option value="7">7 天</option>
+            <option value="30">30 天</option>
+            <option value="90">90 天</option>
+            <option value="0">永久</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>调试日志</span>
+          <input type="checkbox" id="popupDebugLogging">
+        </label>
+      </div>
+    </section>
+
+    <section class="history-view" id="historyView" hidden>
+      <div class="settings-header">
+        <button class="icon-btn" id="closeHistoryBtn" title="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+        <div>
+          <h1>下载历史</h1>
+          <p class="subtitle" id="historySubtitle">正在加载...</p>
+        </div>
+        <button class="icon-btn danger-icon-btn history-clear-btn" id="clearHistoryBtn" title="清空下载历史" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 6h18"/>
+            <path d="M8 6V4h8v2"/>
+            <path d="M19 6l-1 14H6L5 6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="history-list" id="historyList"></div>
+      <div class="empty-state compact-empty" id="historyEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 8v4l3 3"/>
+          <circle cx="12" cy="12" r="10"/>
+        </svg>
+        <p>暂无下载历史</p>
+      </div>
+    </section>
+
+    <section class="tasks-view" id="tasksView" hidden>
+      <div class="settings-header">
+        <button class="icon-btn" id="closeTasksBtn" title="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+        <div>
+          <h1>下载任务</h1>
+          <p class="subtitle" id="tasksSubtitle">正在加载...</p>
+        </div>
+      </div>
+      <div class="task-list" id="taskList"></div>
+      <div class="empty-state compact-empty" id="tasksEmpty" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 5v14"/>
+          <path d="M5 12h14"/>
+        </svg>
+        <p>暂无下载任务</p>
+      </div>
+    </section>
+
+    <div class="action-bar" id="actionBar">
+      <button class="icon-btn" id="tasksBtn" title="下载任务">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16"/>
+          <path d="M4 12h10"/>
+          <path d="M4 17h7"/>
+          <path d="M17 14v6"/>
+          <path d="M14 17l3 3 3-3"/>
+        </svg>
+        <span class="action-label">任务</span>
+        <span class="task-entry-badge" id="taskEntryBadge" hidden>0</span>
+      </button>
+      <button class="icon-btn" id="historyBtn" title="下载历史">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 3-6.7"/>
+          <path d="M3 4v6h6"/>
+          <path d="M12 7v5l3 2"/>
+        </svg>
+        <span class="action-label">历史</span>
+      </button>
+      <button class="icon-btn" id="settingsBtn" title="设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6h8"/>
+          <path d="M16 6h4"/>
+          <path d="M4 12h3"/>
+          <path d="M11 12h9"/>
+          <path d="M4 18h11"/>
+          <path d="M19 18h1"/>
+          <circle cx="14" cy="6" r="2"/>
+          <circle cx="9" cy="12" r="2"/>
+          <circle cx="17" cy="18" r="2"/>
+        </svg>
+        <span class="action-label">设置</span>
+      </button>
+      <button class="icon-btn danger-icon-btn clear-list-action" id="clearListBtn" title="清空检测列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6h10"/>
+          <path d="M4 12h8"/>
+          <path d="M4 18h7"/>
+          <path d="M16 14l4 4"/>
+          <path d="M20 14l-4 4"/>
+        </svg>
+        <span class="action-label">清列表</span>
+      </button>
+    </div>
+  </div>
+
+  <script src="../lib/video-utils.js"></script>
+  <script src="../lib/video-source-utils.js"></script>
+  <script src="../lib/message-types.js"></script>
+  <script src="../lib/youtube-download-mode-store.js"></script>
+  <script src="../lib/youtube-stream-utils.js"></script>
+  <script src="../lib/bilibili-quality-utils.js"></script>
+  <script src="../lib/bilibili-quality-store.js"></script>
+  <script src="../lib/settings-store.js"></script>
+  <script src="../lib/ui-dom-utils.js"></script>
+  <script src="../content/youtube-download-options.js"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

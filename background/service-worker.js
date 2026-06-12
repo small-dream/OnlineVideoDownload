@@ -1,0 +1,1281 @@
+// background/service-worker.js
+// Service Worker 主入口：统一消息路由、下载状态管理、流数据抓取中转。
+
+import { VideoRegistry } from './video-registry.js';
+import { RequestInterceptor } from './request-interceptor.js';
+import { Downloader } from './downloader.js';
+import { DownloadStateStore } from './download-state-store.js';
+import { DownloadHistoryStore } from './download-history-store.js';
+import { cleanupAllRules, injectHeaders } from './header-injector.js';
+import {
+  browserInfo,
+  resumeDownloadAsync,
+  safeRuntimeMessage,
+  safeTabMessage,
+  sendTabMessageAsync,
+  supportsDownloadResume,
+} from '../lib/browser-compat.module.js';
+
+import '../lib/byte-utils.js';
+import '../lib/http-utils.js';
+import '../lib/constants.js';
+import '../lib/download-path.js';
+import '../lib/message-types.js';
+import '../lib/settings-store.js';
+
+const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
+const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
+const constants = globalThis.__OVD_CONSTANTS__ || {};
+const downloadPathUtils = globalThis.__OVD_DOWNLOAD_PATH__ || {};
+const messageRuntime = globalThis.__OVD_MESSAGE_TYPES__ || {};
+const messageTypes = messageRuntime.MESSAGE_TYPES || {};
+const assertValidMessage = messageRuntime.assertValidMessage || ((message) => message);
+const toErrorResponse = messageRuntime.toErrorResponse || ((error) => ({ ok: false, error: error?.message || String(error) }));
+const toMessageResponse = messageRuntime.toMessageResponse || ((result) => ({ ok: true, ...(result || {}) }));
+const MSG = messageTypes;
+
+function parseContentRangeTotalFallback(contentRange) {
+  const match = String(contentRange || '').match(/\/(\d+)$/);
+  return match ? Number(match[1]) || 0 : 0;
+}
+
+function inferTotalBytesFromResponseFallback(response, loadedBytesBefore = 0, fallbackTotal = 0) {
+  const contentRangeTotal = parseContentRangeTotalFallback(response?.headers?.get?.('content-range'));
+  if (contentRangeTotal > 0) {
+    return contentRangeTotal;
+  }
+
+  const contentLength = Number(response?.headers?.get?.('content-length')) || 0;
+  if ((response?.status || 0) === 206 && loadedBytesBefore > 0 && contentLength > 0) {
+    return loadedBytesBefore + contentLength;
+  }
+
+  return contentLength || fallbackTotal || 0;
+}
+
+function createRangeRequestHeadersFallback(headers, start = 0) {
+  const requestHeaders = headers ? { ...headers } : {};
+  const offset = Math.max(0, Number(start) || 0);
+  if (offset > 0) {
+    requestHeaders.Range = `bytes=${offset}-`;
+  } else if ('Range' in requestHeaders) {
+    delete requestHeaders.Range;
+  }
+  return requestHeaders;
+}
+
+function uint8ArrayToBase64Fallback(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+const createRangeRequestHeaders = httpUtils.createRangeRequestHeaders || createRangeRequestHeadersFallback;
+const inferTotalBytesFromResponse = httpUtils.inferTotalBytesFromResponse || inferTotalBytesFromResponseFallback;
+const uint8ArrayToBase64 = byteUtils.uint8ArrayToBase64 || uint8ArrayToBase64Fallback;
+const BLOB_TRANSFER_CHUNK_SIZE = constants.BLOB_TRANSFER_CHUNK_SIZE || 256 * 1024;
+const DOWNLOAD_RESUME_RETRY_DELAYS = constants.DOWNLOAD_RESUME_RETRY_DELAYS || [1500, 4000, 8000];
+const OBJECT_URL_REVOKE_DELAY = constants.OBJECT_URL_REVOKE_DELAY || 60000;
+const STREAM_FETCH_RETRY_DELAYS = constants.STREAM_FETCH_RETRY_DELAYS || [0, 1000, 2500, 5000];
+
+console.log(`[OVD] Service Worker 启动 browser=${browserInfo.name}`);
+cleanupAllRules();
+
+const registry = new VideoRegistry();
+const downloader = new Downloader();
+const downloadStore = new DownloadStateStore();
+const historyStore = new DownloadHistoryStore();
+const downloadResumeAttempts = new Map();
+const downloadResumeTimers = new Map();
+const lastKnownTabUrls = new Map();
+
+historyStore.init().then(async () => {
+  try {
+    const items = await chrome.storage.local.get(['ovd.generalSettings']);
+    const retentionDays = items?.['ovd.generalSettings']?.historyRetentionDays ?? 30;
+    if (retentionDays > 0) {
+      await historyStore.prune(retentionDays);
+    }
+  } catch (_err) {}
+}).catch((err) => {
+  console.warn('[OVD] download history store init failed:', err);
+});
+
+async function onVideoDetected(tabId) {
+  try {
+    await notifyVisibleVideoCount(tabId);
+  } catch (err) {
+    console.warn(`[OVD] failed to update visible video count tab=${tabId}: ${err.message}`);
+  }
+}
+
+const interceptor = new RequestInterceptor(registry, onVideoDetected);
+interceptor.start();
+
+chrome.downloads.onChanged.addListener(async (delta) => {
+  const downloadId = delta.id;
+  if (downloadStore.isDeletedDownload(downloadId)) {
+    clearDownloadResumeTracking(downloadId);
+    return;
+  }
+  const tabId = downloadStore.getTabId(downloadId);
+
+  if ((delta.bytesReceived != null || delta.totalBytes != null) && tabId) {
+    const item = await getDownloadItem(downloadId);
+    if (item && item.totalBytes > 0) {
+      const percent = Math.round((item.bytesReceived / item.totalBytes) * 100);
+      downloadStore.update(downloadId, { percent, state: 'downloading' });
+      broadcastTaskUpdate(downloadStore.updateTaskByDownloadId(downloadId, {
+        percent,
+        status: 'running',
+      }));
+      broadcast(tabId, {
+        type: MSG.DOWNLOAD_PROGRESS || 'DOWNLOAD_PROGRESS',
+        downloadId,
+        percent,
+        bytesReceived: item.bytesReceived,
+        totalBytes: item.totalBytes,
+      });
+    }
+  }
+
+  if (!delta.state) return;
+  const nextState = delta.state.current;
+
+  if (nextState === 'interrupted') {
+    const reason = delta.error?.current || 'unknown';
+    console.warn(`[OVD] 下载中断/取消 downloadId=${downloadId} state=${nextState} reason=${reason}`);
+    const resumed = await tryAutoResumeDownload(downloadId, tabId, reason);
+    if (!resumed) {
+      downloadStore.markFailed(downloadId);
+      broadcastTaskUpdate(downloadStore.updateTaskByDownloadId(downloadId, {
+        error: reason,
+        percent: 0,
+        status: 'failed',
+      }));
+      downloadStore.cleanupRules(downloadId);
+      clearDownloadResumeTracking(downloadId);
+    }
+    return;
+  }
+
+  if (nextState !== 'complete') return;
+
+  console.log(`[OVD] 下载完成 downloadId=${downloadId}`);
+  clearDownloadResumeTracking(downloadId);
+  downloadStore.markComplete(downloadId);
+  const completedTask = downloadStore.updateTaskByDownloadId(downloadId, {
+    percent: 100,
+    status: 'complete',
+  });
+  broadcastTaskUpdate(completedTask);
+  downloadStore.scheduleRuleCleanup(downloadId, 3000);
+  downloadStore.scheduleDelete(downloadId, 30000);
+
+  try {
+    const item = await getDownloadItem(downloadId);
+    const stateInfo = downloadStore._states.get(downloadId);
+    const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
+    const videos = tabId ? registry.getForTab(tabId) : [];
+    const video = videos.find((v) => v.url === stateInfo?.videoUrl);
+    await historyStore.addRecord({
+      taskId: completedTask?.taskId || '',
+      url: completedTask?.videoUrl || stateInfo?.videoUrl || '',
+      title: getTaskDisplayTitle(completedTask, video?.title || item?.filename || ''),
+      type: completedTask?.sourceId || video?.type || 'direct',
+      filename: item?.filename || '',
+      size: item?.fileSize ?? item?.totalBytes ?? null,
+      downloadId,
+      tabUrl: tab?.url || '',
+      status: 'complete',
+    });
+  } catch (err) {
+    console.warn(`[OVD] failed to persist download history: ${err.message}`);
+  }
+
+  if (tabId) {
+    broadcast(tabId, {
+      type: MSG.DOWNLOAD_PROGRESS || 'DOWNLOAD_PROGRESS',
+      downloadId,
+      percent: 100,
+    });
+  }
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  handleMessage(msg, sender)
+    .then((response) => sendResponse(toMessageResponse(response)))
+    .catch((err) => {
+      console.error('[OVD] Message handling failed:', err);
+      sendResponse(toErrorResponse(err, 'Message handling failed'));
+    });
+
+  return true;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  registry.clearTab(tabId);
+  const interruptedTasks = downloadStore.markTabInterrupted(tabId);
+  interruptedTasks.forEach((task) => broadcastTaskUpdate(task));
+  downloadStore.clearTab(tabId, { onlyRequiresTabContext: true });
+  lastKnownTabUrls.delete(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading' && changeInfo.url) {
+    const previousUrl = lastKnownTabUrls.get(tabId) || '';
+    if (shouldPreserveVideosOnPageChange(previousUrl, changeInfo.url, registry.getForTab(tabId))) {
+      lastKnownTabUrls.set(tabId, changeInfo.url);
+      void notifyVisibleVideoCount(tabId);
+      console.log(`[OVD] preserve tab=${tabId} video registry on same YouTube tab update url=${changeInfo.url}`);
+      return;
+    }
+
+    registry.clearTab(tabId);
+    lastKnownTabUrls.set(tabId, changeInfo.url);
+  }
+});
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clearDownloadResumeTracking(downloadId) {
+  const timer = downloadResumeTimers.get(downloadId);
+  if (timer) {
+    clearTimeout(timer);
+    downloadResumeTimers.delete(downloadId);
+  }
+  downloadResumeAttempts.delete(downloadId);
+}
+
+async function tryAutoResumeDownload(downloadId, tabId, reason) {
+  if (!supportsDownloadResume?.()) {
+    return false;
+  }
+
+  const attempt = downloadResumeAttempts.get(downloadId) || 0;
+  if (attempt >= DOWNLOAD_RESUME_RETRY_DELAYS.length) {
+    return false;
+  }
+
+  const item = await getDownloadItem(downloadId);
+  if (!item?.canResume) {
+    return false;
+  }
+
+  const retryDelay = DOWNLOAD_RESUME_RETRY_DELAYS[attempt];
+  downloadResumeAttempts.set(downloadId, attempt + 1);
+  downloadStore.update(downloadId, { state: 'retrying' });
+
+  if (tabId) {
+    broadcast(tabId, {
+      type: MSG.DOWNLOAD_PROGRESS || 'DOWNLOAD_PROGRESS',
+      downloadId,
+      percent: downloadStore.getStatesForTab(tabId)?.[downloadId]?.percent || 0,
+      state: 'retrying',
+    });
+  }
+
+  console.warn(`[OVD] scheduling download resume downloadId=${downloadId} attempt=${attempt + 1} reason=${reason} delayMs=${retryDelay}`);
+  const timer = setTimeout(async () => {
+    downloadResumeTimers.delete(downloadId);
+    try {
+      await resumeDownloadAsync(downloadId);
+      console.log(`[OVD] resumed interrupted download downloadId=${downloadId} attempt=${attempt + 1}`);
+    } catch (err) {
+      console.warn(`[OVD] resume attempt failed downloadId=${downloadId} attempt=${attempt + 1}: ${err.message}`);
+    }
+  }, retryDelay);
+
+  downloadResumeTimers.set(downloadId, timer);
+  return true;
+}
+
+async function handleMessage(msg, sender) {
+  assertValidMessage(msg);
+  const tabId = sender.tab?.id ?? msg.tabId;
+
+  if (msg.type === (MSG.FETCH_MEDIA_STREAMS || 'FETCH_MEDIA_STREAMS') && !tabId) {
+    throw new Error('Unable to resolve tabId for media stream fetch');
+  }
+
+  if (msg.type === (MSG.SET_TAB_MUTED || 'SET_TAB_MUTED') && !tabId) {
+    throw new Error('Unable to resolve tabId for mute update');
+  }
+
+  switch (msg.type) {
+    case MSG.VIDEO_DETECTED || 'VIDEO_DETECTED':
+      return handleVideoDetected(msg.payload, tabId);
+
+    case MSG.GET_VIDEOS || 'GET_VIDEOS':
+      return getVideosForTab(tabId ?? msg.tabId);
+
+    case MSG.GET_VIDEOS_FOR_TAB || 'GET_VIDEOS_FOR_TAB':
+      return getVideosForTab(msg.tabId);
+
+    case MSG.DOWNLOAD_VIDEO || 'DOWNLOAD_VIDEO':
+      return handleDownloadVideo(msg.payload, msg.tabId ?? tabId, msg);
+
+    case MSG.GET_DOWNLOAD_STATES || 'GET_DOWNLOAD_STATES':
+      return { states: downloadStore.getStatesForTab(msg.tabId) };
+
+    case MSG.GET_DOWNLOAD_TASKS || 'GET_DOWNLOAD_TASKS':
+      return { tasks: downloadStore.getTasks({ tabId: msg.tabId ?? tabId }) };
+
+    case MSG.RETRY_DOWNLOAD_TASK || 'RETRY_DOWNLOAD_TASK':
+      return retryDownloadTask(msg.taskId);
+
+    case MSG.DELETE_DOWNLOAD_TASK || 'DELETE_DOWNLOAD_TASK':
+      return deleteDownloadTask(msg.taskId);
+
+    case MSG.DOWNLOAD_BLOB_DATA || 'DOWNLOAD_BLOB_DATA':
+      return downloadBlobData(msg, tabId);
+
+    case MSG.HLS_PROGRESS_UPDATE || 'HLS_PROGRESS_UPDATE':
+      if (hasTaskIdentity(msg)) {
+        broadcastTaskUpdate(downloadStore.upsertTask({
+          ...(msg.taskMeta || {}),
+          percent: msg.percent || 0,
+          phase: msg.phase || '',
+          status: msg.percent >= 100 ? 'complete' : 'running',
+          tabId,
+          videoUrl: msg.videoUrl || msg.m3u8Url || msg.taskMeta?.videoUrl || '',
+        }));
+      }
+      if (tabId) {
+        broadcast(tabId, {
+          type: MSG.HLS_PROGRESS || 'HLS_PROGRESS',
+          percent: msg.percent || 0,
+          phase: msg.phase || '',
+          videoUrl: msg.videoUrl || msg.m3u8Url || '',
+        });
+      }
+      return {};
+
+    case MSG.FETCH_MEDIA_STREAMS || 'FETCH_MEDIA_STREAMS':
+      if (!tabId) {
+        return { ok: false, error: '无法获取 tabId' };
+      }
+      return fetchMediaStreams(msg.videoUrl, msg.audioUrl, msg.headers, tabId, msg.transferId);
+
+    case MSG.BILIBILI_MUXER_LOG || 'BILIBILI_MUXER_LOG':
+      logMuxerMessage(tabId, msg.level, msg.message);
+      return {};
+
+    case MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS':
+      if (tabId) {
+        broadcast(tabId, msg);
+      }
+      return {};
+
+    case MSG.SOURCE_DOWNLOAD_PROGRESS || 'SOURCE_DOWNLOAD_PROGRESS':
+    case MSG.SOURCE_DOWNLOAD_STATUS || 'SOURCE_DOWNLOAD_STATUS':
+    case MSG.SOURCE_DOWNLOAD_STARTED || 'SOURCE_DOWNLOAD_STARTED': {
+      const sourceTask = updateSourceDownloadTask(msg, tabId);
+      if (sourceTask) {
+        safeRuntimeMessage(msg);
+      }
+      return {};
+    }
+
+    case MSG.SOURCE_DOWNLOAD_RESULT || 'SOURCE_DOWNLOAD_RESULT': {
+      const sourceTask = updateSourceDownloadTask(msg, tabId);
+      if (!sourceTask) {
+        return {};
+      }
+      if (msg.ok) {
+        try {
+          const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
+          await historyStore.addRecord({
+            taskId: sourceTask?.taskId || '',
+            url: sourceTask?.videoUrl || msg.videoUrl || '',
+            title: getTaskDisplayTitle(sourceTask, msg.title || msg.filename || ''),
+            type: sourceTask?.sourceId || msg.sourceId || 'unknown',
+            filename: msg.filename || '',
+            size: msg.size ?? null,
+            downloadId: msg.downloadId ?? null,
+            tabUrl: tab?.url || '',
+            status: 'complete',
+          });
+        } catch (err) {
+          console.warn(`[OVD] failed to persist source download history: ${err.message}`);
+        }
+      }
+      safeRuntimeMessage(msg);
+      return {};
+    }
+
+    case MSG.SET_TAB_MUTED || 'SET_TAB_MUTED':
+      return setTabMuted(tabId, !!msg.muted);
+
+    case MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS': {
+      const clearTabId = tabId ?? msg.tabId;
+      if (clearTabId) {
+        const previousUrl = lastKnownTabUrls.get(clearTabId) || '';
+        const nextUrl = msg.url || '';
+        lastKnownTabUrls.set(clearTabId, nextUrl || previousUrl);
+
+        if (shouldPreserveVideosOnPageChange(previousUrl, nextUrl, registry.getForTab(clearTabId))) {
+          const count = await notifyVisibleVideoCount(clearTabId);
+          console.log(`[OVD] preserve tab=${clearTabId} video registry on same YouTube video URL change count=${count} url=${nextUrl || '-'}`);
+          return { ok: true, count, preserved: true };
+        }
+
+        registry.clearTab(clearTabId);
+        safeTabMessage(clearTabId, { type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON', count: 0 });
+        console.log(`[OVD] 清理 tab=${clearTabId} 的视频注册表（SPA 导航）`);
+      }
+      return { ok: true };
+    }
+
+    case MSG.GET_DOWNLOAD_HISTORY || 'GET_DOWNLOAD_HISTORY':
+      return { records: await getDownloadHistoryRecords() };
+
+    case MSG.CLEAR_DOWNLOAD_HISTORY || 'CLEAR_DOWNLOAD_HISTORY':
+      await historyStore.clear();
+      return { ok: true };
+
+    case MSG.DELETE_DOWNLOAD_HISTORY_RECORD || 'DELETE_DOWNLOAD_HISTORY_RECORD':
+      await historyStore.deleteRecord(msg.id);
+      return { ok: true };
+
+    case MSG.OPEN_DOWNLOAD_FOLDER || 'OPEN_DOWNLOAD_FOLDER':
+      return openDownloadFolder(msg.downloadId);
+
+    default:
+      throw new Error(`Unknown message type: ${msg.type}`);
+  }
+}
+
+function isYouTubeWatchPageUrl(url = '') {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes('youtu.be')) {
+      return !!parsed.pathname.split('/').filter(Boolean)[0];
+    }
+
+    if (!parsed.hostname.includes('youtube.com')) {
+      return false;
+    }
+
+    if (parsed.pathname === '/watch') {
+      return !!parsed.searchParams.get('v');
+    }
+
+    return (
+      parsed.pathname.startsWith('/shorts/') ||
+      parsed.pathname.startsWith('/live/') ||
+      parsed.pathname.startsWith('/embed/')
+    );
+  } catch (err) {
+    console.warn(`[OVD] failed to parse YouTube watch URL: ${err.message}`);
+    return false;
+  }
+}
+
+function getYouTubeVideoIdFromPageUrl(url = '') {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes('youtu.be')) {
+      return parsed.pathname.split('/').filter(Boolean)[0] || '';
+    }
+
+    if (!parsed.hostname.includes('youtube.com')) {
+      return '';
+    }
+
+    if (parsed.pathname === '/watch') {
+      return parsed.searchParams.get('v') || '';
+    }
+
+    if (
+      parsed.pathname.startsWith('/shorts/') ||
+      parsed.pathname.startsWith('/live/') ||
+      parsed.pathname.startsWith('/embed/')
+    ) {
+      return parsed.pathname.split('/').filter(Boolean)[1] || '';
+    }
+  } catch (err) {
+    console.warn(`[OVD] failed to parse YouTube video id from page URL: ${err.message}`);
+  }
+
+  return '';
+}
+
+function shouldPreserveVideosOnPageChange(previousUrl = '', nextUrl = '', existingVideos = []) {
+  const previousVideoId = getYouTubeVideoIdFromPageUrl(previousUrl);
+  const nextVideoId = getYouTubeVideoIdFromPageUrl(nextUrl);
+  if (!nextVideoId || previousVideoId !== nextVideoId) {
+    return false;
+  }
+
+  return existingVideos.some((video) => (
+    video?.type === 'youtube-adaptive' &&
+    (video.videoId === nextVideoId || getYouTubeVideoIdFromPageUrl(video.url || '') === nextVideoId)
+  ));
+}
+
+function isYouTubePageUrl(url = '') {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.includes('youtube.com') || parsed.hostname.includes('youtu.be');
+  } catch (err) {
+    console.warn(`[OVD] failed to parse YouTube page URL: ${err.message}`);
+    return false;
+  }
+}
+
+function shouldHideVideoFromYouTubeList(video, tabUrl = '', hasYouTubeAdaptive = false) {
+  if (isYouTubePageUrl(tabUrl) && !isYouTubeWatchPageUrl(tabUrl)) {
+    return true;
+  }
+
+  if (!hasYouTubeAdaptive || !isYouTubeWatchPageUrl(tabUrl)) {
+    return false;
+  }
+
+  if (video?.type === 'audio') {
+    return true;
+  }
+
+  if (video?.type === 'blob') {
+    return String(video?.url || '').startsWith('blob:https://www.youtube.com/');
+  }
+
+  return false;
+}
+
+async function getVisibleVideosForTab(tabId) {
+  if (!tabId) {
+    return { tabTitle: '', tabUrl: '', videos: [] };
+  }
+
+  let tabTitle = '';
+  let tabUrl = '';
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabTitle = tab?.title || '';
+    tabUrl = tab?.url || '';
+  } catch (err) {
+    console.warn(`[OVD] failed to get tab metadata tab=${tabId}: ${err.message}`);
+  }
+
+  registry.enrichTitles(tabId, tabTitle);
+  const videos = registry.getForTab(tabId);
+  const hasYouTubeAdaptive = videos.some((video) => video?.type === 'youtube-adaptive');
+  const filteredVideos = videos.filter((video) => !shouldHideVideoFromYouTubeList(video, tabUrl, hasYouTubeAdaptive));
+
+  return {
+    tabTitle,
+    tabUrl,
+    videos: filteredVideos,
+  };
+}
+
+async function notifyVisibleVideoCount(tabId) {
+  if (!tabId) {
+    return 0;
+  }
+
+  const { videos } = await getVisibleVideosForTab(tabId);
+  safeTabMessage(tabId, { type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON', count: videos.length });
+  return videos.length;
+}
+
+async function handleVideoDetected(payload, tabId) {
+  if (!payload?.url || !tabId) {
+    throw new Error('Missing video payload or tabId');
+  }
+
+  lastKnownTabUrls.set(tabId, payload.url);
+
+  if (payload.url.startsWith('blob:')) {
+    console.log(`[OVD] 忽略 blob URL tab=${tabId} url=${payload.url}`);
+    return { ok: false };
+  }
+
+  const registryResult = registry.add(tabId, payload);
+  const count = await notifyVisibleVideoCount(tabId);
+
+  if (registryResult === 'new') {
+    console.log(`[OVD] 页面上报新视频 type=${payload.type} tab=${tabId} url=${payload.url}`);
+  } else if (registryResult === 'updated') {
+    console.log(`[OVD] 页面上报更新视频 type=${payload.type} tab=${tabId} url=${payload.url}`);
+  }
+
+  return { count };
+}
+
+async function getVideosForTab(tabId) {
+  const { videos } = await getVisibleVideosForTab(tabId);
+  return { videos };
+}
+
+function getTaskTitle(videoInfo = {}) {
+  return videoInfo.title || videoInfo.filename || videoInfo.url || 'Download task';
+}
+
+function getTaskDisplayTitle(task = null, fallback = '') {
+  return task?.title || task?.filename || task?.videoUrl || fallback || 'Download task';
+}
+
+function findTaskForHistoryRecord(record = {}) {
+  if (record.taskId) {
+    const task = downloadStore.getTask(record.taskId);
+    if (task) {
+      return task;
+    }
+  }
+
+  if (record.downloadId != null) {
+    return downloadStore
+      .getTasks({ limit: 200 })
+      .find((task) => task.downloadId === record.downloadId) || null;
+  }
+
+  return null;
+}
+
+async function getDownloadHistoryRecords() {
+  const records = await historyStore.getAll();
+  return records.map((record) => {
+    const task = findTaskForHistoryRecord(record);
+    if (!task) {
+      return record;
+    }
+    return {
+      ...record,
+      title: getTaskDisplayTitle(task, record.title || record.filename || ''),
+    };
+  });
+}
+
+function updateTaskBadge() {
+  try {
+    const runningCount = downloadStore
+      .getTasks({ limit: 200 })
+      .filter((task) => ['running', 'retrying'].includes(task.status)).length;
+    if (runningCount > 0) {
+      chrome.action?.setBadgeText?.({ text: String(Math.min(runningCount, 99)) });
+      chrome.action?.setBadgeBackgroundColor?.({ color: '#0d8fd3' });
+    } else {
+      chrome.action?.setBadgeText?.({ text: '' });
+    }
+  } catch (err) {
+    console.warn(`[OVD] failed to update task badge: ${err.message}`);
+  }
+}
+
+function isTabContextRequiredForVideo(videoInfo = {}) {
+  const type = String(videoInfo?.type || '').trim();
+  if (type === 'blob') return true;
+  if (type === 'bilibili-dash') return true;
+  return false;
+}
+
+function broadcastTaskUpdate(task = null) {
+  updateTaskBadge();
+  if (!task) {
+    return;
+  }
+  safeRuntimeMessage({
+    task,
+    type: MSG.DOWNLOAD_TASKS_UPDATED || 'DOWNLOAD_TASKS_UPDATED',
+  });
+}
+
+function hasTaskIdentity(input = {}) {
+  const taskMeta = input.taskMeta || {};
+  return Boolean(
+    input.downloadId != null ||
+    input.taskId ||
+    input.taskKey ||
+    input.traceId ||
+    input.videoUrl ||
+    input.m3u8Url ||
+    taskMeta.taskId ||
+    taskMeta.taskKey ||
+    taskMeta.traceId ||
+    taskMeta.videoUrl
+  );
+}
+
+function updateSourceDownloadTask(msg = {}, tabId = null) {
+  const status = msg.type === (MSG.SOURCE_DOWNLOAD_RESULT || 'SOURCE_DOWNLOAD_RESULT')
+    ? (msg.ok ? 'complete' : 'failed')
+    : 'running';
+  const task = downloadStore.updateSourceTask({
+    ...msg,
+    error: msg.error || '',
+    status,
+  }, tabId);
+  broadcastTaskUpdate(task);
+  return task;
+}
+
+async function retryDownloadTask(taskId) {
+  const task = downloadStore.getTask(taskId);
+  if (!task) {
+    return { ok: false, error: 'Download task not found' };
+  }
+  if (!task.videoInfo) {
+    return { ok: false, error: 'Original download metadata is missing' };
+  }
+  if (!task.tabId) {
+    return { ok: false, error: 'Original tab is missing' };
+  }
+
+  const retryingTask = downloadStore.upsertTask({
+    error: '',
+    message: 'Retrying...',
+    percent: 0,
+    status: 'retrying',
+    taskId,
+  });
+  broadcastTaskUpdate(retryingTask);
+
+  const isContentTask = task.strategyId && task.strategyId !== 'browser-download' && task.strategyId !== 'youtube-adaptive-background';
+  if (isContentTask) {
+    try {
+      const response = await sendTabMessageAsync(task.tabId, {
+        meta: task.videoInfo,
+        type: MSG.SOURCE_DOWNLOAD || 'SOURCE_DOWNLOAD',
+      });
+      if (response?.ok === false) {
+        throw new Error(response.error || 'Retry failed to start');
+      }
+      const nextTask = downloadStore.upsertTask({
+        error: '',
+        message: 'Retry started',
+        percent: 0,
+        sourceId: response.sourceId || task.sourceId,
+        status: 'running',
+        strategyId: response.strategyId || task.strategyId,
+        taskId,
+        taskKey: response.taskKey || task.taskKey,
+        traceId: response.traceId || task.traceId,
+      });
+      broadcastTaskUpdate(nextTask);
+      return { ok: true, task: nextTask };
+    } catch (err) {
+      const failedTask = downloadStore.upsertTask({
+        error: err.message,
+        status: 'failed',
+        taskId,
+      });
+      broadcastTaskUpdate(failedTask);
+      return { ok: false, error: err.message };
+    }
+  }
+
+  return handleDownloadVideo(task.videoInfo, task.tabId, { taskId });
+}
+
+async function deleteDownloadTask(taskId) {
+  const task = downloadStore.getTask(taskId);
+  if (!task) {
+    return { ok: false, error: 'Download task not found' };
+  }
+
+  const downloadId = task.downloadId;
+  downloadStore.deleteTask(taskId, { tombstone: true });
+  broadcastTaskUpdate({ ...task, deleted: true });
+  if (downloadId != null) {
+    clearDownloadResumeTracking(downloadId);
+  }
+  if (downloadId != null && ['running', 'retrying'].includes(task.status)) {
+    await cancelBrowserDownload(downloadId);
+  }
+  return { ok: true };
+}
+
+async function cancelBrowserDownload(downloadId) {
+  const numericDownloadId = Number(downloadId);
+  if (!Number.isFinite(numericDownloadId)) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    try {
+      chrome.downloads.cancel(numericDownloadId, () => resolve());
+    } catch (_err) {
+      resolve();
+    }
+  });
+}
+
+async function handleDownloadVideo(payload, tabId, taskOptions = {}) {
+  const options = typeof taskOptions === 'string' ? { taskId: taskOptions } : (taskOptions || {});
+  const videoUrl = payload?.url || '';
+  console.log(`[OVD] 收到下载请求 type=${payload?.type} tabId=${tabId} url=${videoUrl}`);
+  const requiresTabContext = isTabContextRequiredForVideo(payload);
+
+  const initialTask = downloadStore.upsertTask({
+    sourceId: options.sourceId || payload?.type || 'download',
+    status: 'running',
+    strategyId: options.strategyId || 'browser-download',
+    requiresTabContext,
+    tabId,
+    taskId: options.taskId || null,
+    taskKey: options.taskKey || '',
+    title: options.title || getTaskTitle(payload),
+    traceId: options.traceId || '',
+    videoInfo: options.videoInfo || payload || null,
+    videoUrl: options.videoUrl || videoUrl,
+  });
+  broadcastTaskUpdate(initialTask);
+
+  const taskMeta = {
+    sourceId: initialTask.sourceId,
+    strategyId: initialTask.strategyId,
+    taskId: initialTask.taskId,
+    taskKey: initialTask.taskKey,
+    title: initialTask.title,
+    traceId: initialTask.traceId,
+    videoInfo: initialTask.videoInfo,
+    videoUrl: initialTask.videoUrl,
+  };
+
+  let result;
+  try {
+    result = await downloader.download(payload, tabId, {
+      onTaskProgress: (percent, progress = {}) => {
+        const task = downloadStore.upsertTask({
+          ...progress,
+          percent,
+          taskId: initialTask.taskId,
+        });
+        broadcastTaskUpdate(task);
+      },
+      taskMeta,
+    });
+  } catch (err) {
+    const failedTask = downloadStore.upsertTask({
+      error: err.message,
+      sourceId: options.sourceId || payload?.type || 'download',
+      status: 'failed',
+      strategyId: options.strategyId || 'browser-download',
+      tabId,
+      taskId: initialTask.taskId,
+      taskKey: options.taskKey || '',
+      title: options.title || getTaskTitle(payload),
+      traceId: options.traceId || '',
+      videoInfo: options.videoInfo || payload || null,
+      videoUrl: options.videoUrl || videoUrl,
+    });
+    broadcastTaskUpdate(failedTask);
+    throw err;
+  }
+
+  if (result.needsBlobFetch) {
+    if (!tabId) {
+      return { ok: false, error: '无法获取 tabId，无法下载 blob 视频' };
+    }
+
+    console.log(`[OVD] blob 下载委托给 content script tab=${tabId} url=${result.url}`);
+    try {
+      const response = await sendTabMessageAsync(tabId, {
+        type: MSG.FETCH_BLOB || 'FETCH_BLOB',
+        blobUrl: result.url,
+        filename: result.filename,
+      });
+
+      if (response?.ok) {
+        broadcastTaskUpdate(downloadStore.upsertTask({
+          message: 'Blob processing delegated to page',
+          sourceId: options.sourceId || payload?.type || 'blob',
+          status: 'running',
+          strategyId: options.strategyId || 'browser-download',
+          requiresTabContext: true,
+          tabId,
+          taskId: initialTask.taskId,
+          taskKey: options.taskKey || '',
+          title: options.title || getTaskTitle(payload),
+          traceId: options.traceId || '',
+          videoInfo: options.videoInfo || payload || null,
+          videoUrl: options.videoUrl || videoUrl,
+        }));
+        return {};
+      }
+
+      const error = response?.error || 'blob download failed';
+      broadcastTaskUpdate(downloadStore.upsertTask({
+        error,
+        sourceId: options.sourceId || payload?.type || 'blob',
+        status: 'failed',
+        strategyId: options.strategyId || 'browser-download',
+        requiresTabContext: true,
+        tabId,
+        taskId: initialTask.taskId,
+        taskKey: options.taskKey || '',
+        title: options.title || getTaskTitle(payload),
+        traceId: options.traceId || '',
+        videoInfo: options.videoInfo || payload || null,
+        videoUrl: options.videoUrl || videoUrl,
+      }));
+      return { ok: false, error };
+    } catch (err) {
+      broadcastTaskUpdate(downloadStore.upsertTask({
+        error: err.message,
+        sourceId: options.sourceId || payload?.type || 'blob',
+        status: 'failed',
+        strategyId: options.strategyId || 'browser-download',
+        requiresTabContext: true,
+        tabId,
+        taskId: initialTask.taskId,
+        taskKey: options.taskKey || '',
+        title: options.title || getTaskTitle(payload),
+        traceId: options.traceId || '',
+        videoInfo: options.videoInfo || payload || null,
+        videoUrl: options.videoUrl || videoUrl,
+      }));
+      return { ok: false, error: err.message };
+    }
+  }
+
+  downloadStore.registerResult(result, {
+    sourceId: options.sourceId || payload?.type || 'download',
+    strategyId: options.strategyId || 'browser-download',
+    requiresTabContext: result.requiresTabContext ?? requiresTabContext,
+    tabId,
+    taskId: initialTask.taskId,
+    title: options.title || getTaskTitle(payload),
+    videoInfo: options.videoInfo || payload || null,
+    videoUrl: options.videoUrl || videoUrl,
+  });
+  const downloadId = result.downloadId ?? result.results?.[0]?.downloadId ?? null;
+  const task = downloadStore.upsertTask({
+    downloadId,
+    filename: result.filename || '',
+    percent: downloadId == null ? 100 : 0,
+    sourceId: options.sourceId || payload?.type || 'download',
+    status: downloadId == null ? 'complete' : 'running',
+    strategyId: options.strategyId || 'browser-download',
+    requiresTabContext: result.requiresTabContext ?? requiresTabContext,
+    tabId,
+    taskId: initialTask.taskId,
+    taskKey: options.taskKey || '',
+    title: options.title || getTaskTitle(payload),
+    traceId: options.traceId || '',
+    videoInfo: options.videoInfo || payload || null,
+    videoUrl: options.videoUrl || videoUrl,
+  });
+  broadcastTaskUpdate(task);
+  return result;
+}
+
+async function downloadBlobData(message = {}, tabId) {
+  const objectUrl = message.objectUrl;
+  const filename = message.filename;
+  const finalFilename = await downloadPathUtils.applyDownloadSubdir?.(filename || 'video.mp4');
+
+  return new Promise((resolve) => {
+    chrome.downloads.download({
+      url: objectUrl,
+      filename: finalFilename,
+      saveAs: false,
+    }, (downloadId) => {
+      if (chrome.runtime.lastError) {
+        const task = downloadStore.upsertTask({
+          error: chrome.runtime.lastError.message,
+          filename: finalFilename,
+          sourceId: message.sourceId || 'blob',
+          status: 'failed',
+          strategyId: message.strategyId || 'browser-download',
+          requiresTabContext: true,
+          tabId,
+          taskKey: message.taskKey || '',
+          title: message.title || filename || '',
+          traceId: message.traceId || '',
+          videoInfo: message.videoInfo || null,
+          videoUrl: message.videoUrl || '',
+        });
+        broadcastTaskUpdate(task);
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+
+      const task = downloadStore.upsertTask({
+        downloadId,
+        filename: finalFilename,
+        sourceId: message.sourceId || 'blob',
+        status: 'running',
+        strategyId: message.strategyId || 'browser-download',
+        requiresTabContext: true,
+        tabId,
+        taskKey: message.taskKey || '',
+        title: message.title || filename || '',
+        traceId: message.traceId || '',
+        videoInfo: message.videoInfo || null,
+        videoUrl: message.videoUrl || '',
+      });
+      downloadStore.registerDownload(downloadId, {
+        sourceId: task.sourceId,
+        strategyId: task.strategyId,
+        requiresTabContext: true,
+        tabId,
+        taskId: task.taskId,
+        title: task.title,
+        videoInfo: task.videoInfo,
+        videoUrl: task.videoUrl,
+      });
+      broadcastTaskUpdate(downloadStore.updateTaskByDownloadId(downloadId, {
+        filename: finalFilename,
+        status: 'running',
+      }));
+
+      setTimeout(() => {
+        if (tabId) {
+          safeTabMessage(tabId, {
+            type: MSG.REVOKE_OBJECT_URL || 'REVOKE_OBJECT_URL',
+            objectUrl,
+          });
+        }
+      }, OBJECT_URL_REVOKE_DELAY);
+
+      resolve({ ok: true, downloadId });
+    });
+  });
+}
+
+async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId) {
+  const cleanups = [];
+  let videoLoaded = 0;
+  let audioLoaded = 0;
+  let videoTotal = 0;
+  let audioTotal = 0;
+  let lastBroadcastPercent = 0;
+
+  function onStreamProgress(label, loadedBytes, totalBytes) {
+    if (label === 'video') {
+      videoLoaded = loadedBytes;
+      videoTotal = totalBytes;
+    } else {
+      audioLoaded = loadedBytes;
+      audioTotal = totalBytes;
+    }
+
+    const combinedLoaded = videoLoaded + audioLoaded;
+    const combinedTotal = videoTotal + audioTotal;
+    if (combinedTotal <= 0) {
+      return;
+    }
+
+    const percent = Math.min(100, Math.round((combinedLoaded / combinedTotal) * 100));
+    if (percent === lastBroadcastPercent) {
+      return;
+    }
+
+    lastBroadcastPercent = percent;
+    broadcast(tabId, {
+      type: MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS',
+      loadedBytes: combinedLoaded,
+      percent,
+      phase: 'fetching',
+      totalBytes: combinedTotal,
+      transferId,
+    });
+  }
+
+  try {
+    const urls = [...new Set([videoUrl, audioUrl].filter(Boolean))];
+    for (const url of urls) {
+      const cleanup = await injectHeaders(url, headers || {});
+      cleanups.push(cleanup);
+    }
+
+    const [videoBuffer, audioBuffer] = await Promise.all([
+      fetchStreamBufferResumable(videoUrl, 'video', headers, onStreamProgress),
+      fetchStreamBufferResumable(audioUrl, 'audio', headers, onStreamProgress),
+    ]);
+
+    const chunkSize = BLOB_TRANSFER_CHUNK_SIZE;
+    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_START || 'MEDIA_STREAM_START', transferId });
+
+    for (const [label, buffer] of [['video', videoBuffer], ['audio', audioBuffer]]) {
+      const bytes = new Uint8Array(buffer);
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        const chunk = bytes.slice(offset, offset + chunkSize);
+        await sendTabMessageAsync(tabId, {
+          type: MSG.MEDIA_STREAM_CHUNK || 'MEDIA_STREAM_CHUNK',
+          transferId,
+          label,
+          chunkBase64: uint8ArrayToBase64(chunk),
+        });
+      }
+    }
+
+    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_FINISH || 'MEDIA_STREAM_FINISH', transferId });
+    return { ok: true };
+  } finally {
+    for (const cleanup of cleanups) {
+      try {
+        await cleanup();
+      } catch (err) {
+        console.warn(`[OVD] failed to cleanup injected headers for stream fetch: ${err.message}`);
+      }
+    }
+  }
+}
+
+async function setTabMuted(tabId, muted) {
+  if (!tabId) {
+    return { ok: false, error: '无法获取 tabId' };
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  const previousMuted = !!tab?.mutedInfo?.muted;
+
+  if (previousMuted !== muted) {
+    await chrome.tabs.update(tabId, { muted });
+  }
+
+  return { ok: true, previousMuted };
+}
+
+async function fetchStreamBuffer(url, label, headers) {
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: headers ? { ...headers } : {},
+      credentials: 'omit',
+    });
+  } catch (err) {
+    throw new Error(`${label}流抓取失败: ${err.message}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`${label}流返回异常: HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  console.log(`[OVD] ${label}流获取完成 size=${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+  return buffer;
+}
+
+async function fetchStreamBufferResumable(url, label, headers, onProgress = null) {
+  const chunks = [];
+  let loadedBytes = 0;
+  let totalBytes = 0;
+  const PROGRESS_REPORT_INTERVAL = 256 * 1024;
+  let lastReportedBytes = 0;
+
+  for (let attemptIndex = 0; attemptIndex < STREAM_FETCH_RETRY_DELAYS.length; attemptIndex++) {
+    const retryDelay = STREAM_FETCH_RETRY_DELAYS[attemptIndex];
+    if (retryDelay > 0) {
+      console.warn(`[OVD] stream retry label=${label} attempt=${attemptIndex} loaded=${(loadedBytes / 1024 / 1024).toFixed(2)} MB`);
+      await delay(retryDelay);
+    }
+
+    const rangeStart = loadedBytes;
+
+    try {
+      const response = await fetch(url, {
+        headers: createRangeRequestHeaders(headers, rangeStart),
+        credentials: 'omit',
+      });
+
+      if (rangeStart > 0 && response.status === 200) {
+        console.warn(`[OVD] stream resume unsupported, restarting label=${label}`);
+        chunks.length = 0;
+        loadedBytes = 0;
+      }
+
+      if (!response.ok) {
+        throw new Error(`${label} stream returned HTTP ${response.status} ${response.statusText}`);
+      }
+
+      totalBytes = inferTotalBytesFromResponse(response, rangeStart, totalBytes);
+
+      if (!response.body || typeof response.body.getReader !== 'function') {
+        const buffer = await response.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        if (rangeStart > 0 && response.status !== 206) {
+          chunks.length = 0;
+          loadedBytes = 0;
+        }
+        chunks.push(bytes);
+        loadedBytes += bytes.byteLength;
+        break;
+      }
+
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        if (value?.length) {
+          chunks.push(value);
+          loadedBytes += value.length;
+          if (onProgress && loadedBytes - lastReportedBytes >= PROGRESS_REPORT_INTERVAL) {
+            lastReportedBytes = loadedBytes;
+            onProgress(label, loadedBytes, totalBytes);
+          }
+        }
+      }
+
+      break;
+    } catch (err) {
+      if (attemptIndex === STREAM_FETCH_RETRY_DELAYS.length - 1) {
+        throw new Error(`${label} stream fetch failed: ${err.message}`);
+      }
+    }
+  }
+
+  const merged = new Uint8Array(totalBytes || loadedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  console.log(`[OVD] ${label} resumable stream complete size=${(merged.byteLength / 1024 / 1024).toFixed(2)} MB`);
+  return merged.buffer;
+}
+
+function getDownloadItem(downloadId) {
+  return new Promise((resolve) => {
+    chrome.downloads.search({ id: downloadId }, (items) => resolve(items?.[0] || null));
+  });
+}
+
+async function openDownloadFolder(downloadId) {
+  const numericDownloadId = Number(downloadId);
+  if (!Number.isFinite(numericDownloadId)) {
+    return { ok: false, error: '缺少下载记录 ID，无法打开文件夹' };
+  }
+
+  const item = await getDownloadItem(numericDownloadId);
+  if (!item) {
+    return { ok: false, error: '浏览器下载记录不存在，可能已被清除' };
+  }
+
+  return new Promise((resolve) => {
+    try {
+      chrome.downloads.show(numericDownloadId);
+      resolve({ ok: true });
+    } catch (err) {
+      resolve({ ok: false, error: err?.message || '无法打开下载文件夹' });
+    }
+  });
+}
+
+function logMuxerMessage(tabId, level, message) {
+  const prefix = `[OVD][Muxer][tab=${tabId ?? 'unknown'}][${level || 'log'}]`;
+  const line = `${prefix} ${message || ''}`;
+  if (level === 'warn') console.warn(line);
+  else if (level === 'error') console.error(line);
+  else console.log(line);
+}
+
+function broadcast(tabId, message) {
+  if (tabId) {
+    safeTabMessage(tabId, message);
+  }
+  safeRuntimeMessage(message);
+}
