@@ -38,7 +38,7 @@
 git clone https://github.com/small-dream/OnlineVideoDownload.git
 ```
 
-或直接下载 ZIP 并解压。
+或从 [GitHub Releases](../../releases/latest) 下载最新打包好的 ZIP 并解压。
 
 ### 第 2 步：加载扩展
 
