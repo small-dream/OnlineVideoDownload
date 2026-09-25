@@ -31,6 +31,7 @@
     pendingPlayerResponse: null,
     pendingReplayTimer: null,
     reportedBlobUrls: new Set(),
+    reportedHlsVideoIds: new Map(),
     stopWatching: null,
   };
 
@@ -65,6 +66,7 @@
     state.lastSourceHitLogKeys.clear();
     state.androidFallbackAttempted.clear();
     state.reportedBlobUrls.clear();
+    state.reportedHlsVideoIds.clear();
   }
 
   function cachePendingPlayerResponse(playerResponse, sourceTag = 'page') {
@@ -420,6 +422,7 @@
     }
 
     const results = [];
+    const manifests = [];
     let lastError = null;
 
     // 先试"不要求 pot"的客户端；如果它们给不出像样的清晰度（例如只回 360p progressive），
@@ -476,13 +479,26 @@
             data?.streamingData?.formats || [],
             data?.streamingData?.adaptiveFormats || []
           );
+          const manifestUrls = innertubeClients.getManifestUrls?.(data) || {};
           const directVideoHeight = Math.max(metrics.maxDirectVideoHeight || 0, metrics.maxDirectCombinedHeight || 0);
           const hasDirectVideo = metrics.directVideoCount > 0 || metrics.directCombinedCount > 0;
           const hasDirectAudio = metrics.directAudioCount > 0 || metrics.directCombinedCount > 0;
           console.log(
             `[OVD][YT-DEBUG] direct client ok key=${client.key} formats=${formatCount} maxDirectHeight=${directVideoHeight} `
             + `directVideo=${metrics.directVideoCount} directAudio=${metrics.directAudioCount} status=${data?.playabilityStatus?.status || '-'}`
+            + ` hls=${manifestUrls.hlsManifestUrl ? 'yes' : 'no'} dash=${manifestUrls.dashManifestUrl ? 'yes' : 'no'}`
           );
+
+          // HLS 是"预合并"的（音视频同一路），且 web 家族的 HLS 不要求 pot，
+          // 高清晰度被强制走 SABR 时它是唯一还能直接下载的路径
+          if (manifestUrls.hlsManifestUrl) {
+            manifests.push({
+              clientKey: client.key,
+              hlsManifestUrl: manifestUrls.hlsManifestUrl,
+              preferHls: !!client.preferHls,
+              requiresPot: !!client.requiresPot,
+            });
+          }
 
           if (!hasDirectVideo || !hasDirectAudio) {
             console.warn(
@@ -517,7 +533,7 @@
       `[OVD][YT-DEBUG] direct client picked key=${best.clientKey} maxDirectHeight=${best.maxDirectHeight} `
       + `candidates=${results.map((item) => `${item.clientKey}:${item.maxDirectHeight}p`).join(',')}`
     );
-    return best;
+    return { ...best, manifests };
   }
 
   function scheduleYouTubeAndroidFallback(videoId, reason, metrics = null) {
@@ -545,7 +561,7 @@
     });
 
     const task = fetchYouTubeDirectClientPlayerResponse(videoId)
-      .then(({ clientKey, playerResponse }) => {
+      .then(({ clientKey, manifests = [], playerResponse }) => {
         const directMetrics = getYouTubePlayerMetricsFromFormats(
           playerResponse?.streamingData?.formats || [],
           playerResponse?.streamingData?.adaptiveFormats || []
@@ -572,6 +588,28 @@
         }
 
         processYouTubePlayerResponse(playerResponse, { clientKey, sourceTag: 'direct-client' });
+
+        // 如果某个客户端给了 HLS 清单，额外上报一个 HLS 条目：
+        // YouTube 的 HLS 是预合并的（144p~1080p 一体），且不要求 pot，
+        // 走已有的 HLS 下载链路（页面上下文抓取 + 分片合并）即可拿到高清晰度文件。
+        const bestManifest = manifests.find((item) => item.preferHls) || manifests[0] || null;
+        if (bestManifest?.hlsManifestUrl && state.reportedHlsVideoIds.get(videoId) !== bestManifest.hlsManifestUrl) {
+          state.reportedHlsVideoIds.set(videoId, bestManifest.hlsManifestUrl);
+          console.log(
+            `[OVD][YT-DEBUG] report HLS manifest videoId=${videoId} clientKey=${bestManifest.clientKey} url=${bestManifest.hlsManifestUrl.substring(0, 160)}`
+          );
+          sendToExtension({
+            duration: playerResponse?.videoDetails?.lengthSeconds
+              ? parseInt(playerResponse.videoDetails.lengthSeconds, 10)
+              : null,
+            requestHeaders: { Referer: getCurrentYouTubePageUrl(playerResponse) },
+            thumbnail: playerResponse?.videoDetails?.thumbnail?.thumbnails?.slice(-1)?.[0]?.url || '',
+            title: playerResponse?.videoDetails?.title || document.title,
+            type: 'hls',
+            url: bestManifest.hlsManifestUrl,
+            videoId,
+          });
+        }
       })
       .catch((error) => {
         console.warn(`[OVD][YT-DEBUG] direct client final failure videoId=${videoId}: ${error.message}`);
