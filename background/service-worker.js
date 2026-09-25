@@ -1342,6 +1342,10 @@ async function downloadBlobData(message = {}, tabId, frameId = null) {
 
   const finalFilename = await downloadPathUtils.applyDownloadSubdir?.(filename || 'video.mp4');
   const saveAs = await resolveSaveAs();
+  console.log(
+    `[OVD] 保存内容侧 blob filename="${finalFilename}" sourceId=${message.sourceId || 'blob'} `
+    + `task=${traceId || '-'}`
+  );
 
   return new Promise((resolve) => {
     chrome.downloads.download({

@@ -328,10 +328,13 @@ export function decideCombinedDownloadRoute({ contentType = '', status = 0 } = {
   if (numericStatus >= 400) {
     return 'merge';
   }
-  if (/^text\/|^application\/(?:xml|xhtml\+xml)/i.test(String(contentType).trim())) {
-    return 'self-save';
+  // 只有在探测**明确确认**是媒体类型时才交给下载管理器：
+  // 现场环境里 CDN 会把有效媒体标成 text/plain（浏览器就存成 xxx.mp4.txt），
+  // 类型未知（status=0，探测被 CORS/网络挡住）也不再赌，由扩展自己保存。
+  if (/^(?:video|audio)\//i.test(String(contentType).trim())) {
+    return 'download-manager';
   }
-  return 'download-manager';
+  return 'self-save';
 }
 
 /**

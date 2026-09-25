@@ -145,6 +145,9 @@ async function submitBlobDownloadFromOffscreen(blob, filename, mimeType, taskMet
   );
   const downloadFilename = await downloadPathUtils.applyDownloadSubdir?.(finalFilename);
   const saveAs = await resolveSaveAs();
+  console.log(
+    `[OVD] 保存 blob 文件 filename="${downloadFilename}" mime=${mimeType || blob?.type || '(none)'} size=${blob?.size ?? 0}`
+  );
 
   const downloadResult = await new Promise((resolve) => {
     chrome.downloads.download({
@@ -229,7 +232,10 @@ async function submitOpfsDownloadFromOffscreen(opfsName, filename, mimeType, tas
     return downloadResult;
   }
 
-  console.log(`[OVD] OPFS 文件已提交下载 downloadId=${downloadResult.downloadId} name=${opfsName} size=${openResult.byteLength || 0}`);
+  console.log(
+    `[OVD] OPFS 文件已提交下载 downloadId=${downloadResult.downloadId} name=${opfsName} `
+    + `size=${openResult.byteLength || 0} mime=${mimeType || '(none)'} filename="${downloadFilename}"`
+  );
   rememberDownloadFilename(downloadResult.downloadId, downloadFilename);
 
   return {
