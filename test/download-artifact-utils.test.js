@@ -28,6 +28,24 @@ async function loadStrategy() {
 // 现场问题：`Learn 10 phrases …_2160p.mp4.txt`（服务器错误页被存成文件）
 // ---------------------------------------------------------------
 
+test('decideCombinedDownloadRoute：MIME 不可信时自己保存，直链被拒时走合并', async () => {
+  const { decideCombinedDownloadRoute } = await loadStrategy();
+
+  // CDN 把有效媒体标成 text/plain（现场）：不能交给下载管理器（会存成 .mp4.txt）
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'text/plain', status: 206 }), 'self-save');
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'application/xml', status: 200 }), 'self-save');
+
+  // 正常媒体：交给下载管理器（省内存、可续传）
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'video/mp4', status: 206 }), 'download-manager');
+  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 200 }), 'download-manager');
+  // 探测失败（网络/CORS，status=0）也按正常下载处理，不误拦
+  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 0 }), 'download-manager');
+
+  // 直链被拒：改走合并路径
+  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 403 }), 'merge');
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'text/plain', status: 404 }), 'merge');
+});
+
 test('isBrokenTextStubDownload 识别 .txt 残片', () => {
   const utils = loadUtils();
 

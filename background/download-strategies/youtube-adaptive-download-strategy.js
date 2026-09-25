@@ -1,6 +1,6 @@
 import { injectHeaders } from '../header-injector.js';
 import { submitDirectDownload } from './direct-download-strategy.js';
-import { submitBlobDownloadFromOffscreen } from '../offscreen-download.js';
+import { submitBlobDownloadFromOffscreen, submitOpfsDownloadFromOffscreen } from '../offscreen-download.js';
 import { downloadStreamToOpfs, isStreamingMergeSupported, mergeOpfsStreamsAndDownload } from '../streaming-merge.js';
 import '../../lib/byte-utils.js';
 import '../../lib/http-utils.js';
@@ -316,6 +316,106 @@ async function saveBlobViaBrowserDownload(blob, filename, context = {}, meta = {
 }
 
 /**
+ * 直链该怎么下（纯函数，便于单测）：
+ * - `merge`：直链被拒（4xx/5xx），改走自适应流合并
+ * - `self-save`：服务器把媒体标成 text/* —— 交给下载管理器会被存成 `xxx.mp4.txt`，
+ *   所以由扩展自己取回数据、用 video/mp4 保存
+ * - `download-manager`：正常情况，交给浏览器下载管理器（省内存、可续传）
+ * @returns {'download-manager'|'self-save'|'merge'}
+ */
+export function decideCombinedDownloadRoute({ contentType = '', status = 0 } = {}) {
+  const numericStatus = Number(status) || 0;
+  if (numericStatus >= 400) {
+    return 'merge';
+  }
+  if (/^text\/|^application\/(?:xml|xhtml\+xml)/i.test(String(contentType).trim())) {
+    return 'self-save';
+  }
+  return 'download-manager';
+}
+
+/**
+ * 单字节 Range 探测直链的响应状态与 MIME（不拦截、不删除任何东西）。
+ * 探测失败（网络/CORS）返回 status=0，调用方按"正常下载"处理。
+ */
+async function probeDirectStream(url, headers = {}) {
+  try {
+    const corsOrigin = chrome?.runtime?.getURL ? chrome.runtime.getURL('').replace(/\/$/, '') : '';
+    const cleanupRules = await injectHeaders(url, headers, { corsOrigin });
+    try {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { ...headers, Range: 'bytes=0-1' },
+      });
+      try {
+        await response.body?.cancel?.();
+      } catch (_err) {}
+      return {
+        contentType: response.headers?.get?.('content-type') || '',
+        status: Number(response.status) || 0,
+      };
+    } finally {
+      await cleanupRules().catch(() => {});
+    }
+  } catch (err) {
+    console.warn(`[OVD][BG] 直链探测异常（按正常下载处理）: ${err.message}`);
+    return { contentType: '', status: 0 };
+  }
+}
+
+/**
+ * 服务器 MIME 不可信时（媒体被标成 text/plain）由扩展自己保存：
+ * 小文件整段取回 → Blob；大文件流式落盘 OPFS → offscreen 保存，MIME 固定为 video/mp4。
+ */
+async function selfSaveDirectStream({ context, filename, headers, stream }) {
+  const totalBytesHint = Number(stream?.contentLength) || parseTotalBytesHintFromUrl(stream?.url || '');
+  const durationSeconds = Number(context?.duration) || 0;
+  const estimatedBytes = totalBytesHint
+    || (streamUtils.estimateStreamBytes?.(stream, durationSeconds) || 0);
+
+  if (estimatedBytes > STREAM_MERGE_THRESHOLD_BYTES && isStreamingMergeSupported()) {
+    const opfsResult = await downloadStreamToOpfs({
+      headers,
+      label: 'video',
+      onProgress: (label, loaded, total) => {
+        if (Number(total) > 0) {
+          context.onTaskProgress?.(Math.min(96, Math.round((loaded / total) * 96)), {
+            phase: 'fetching',
+            status: 'running',
+          });
+        }
+      },
+      prefix: 'ovd-direct',
+      url: stream.url,
+    });
+    const opfsName = opfsResult.name;
+    const saved = await submitOpfsDownloadFromOffscreen(opfsName, filename, 'video/mp4', context.taskMeta || {});
+    if (!saved?.ok) {
+      await globalThis.__OVD_OPFS_SINK__?.removeFile?.(opfsName).catch?.(() => {});
+      throw new Error(saved?.error || '保存文件失败');
+    }
+    context.onTaskProgress?.(100, { phase: 'complete', status: 'running' });
+    return saved;
+  }
+
+  const buffer = await fetchAdaptiveMediaBuffer(stream, 'video', headers, (label, loaded, total) => {
+    if (Number(total) > 0) {
+      context.onTaskProgress?.(Math.min(96, Math.round((loaded / total) * 96)), {
+        phase: 'fetching',
+        status: 'running',
+      });
+    }
+  });
+  const blob = new Blob([buffer], { type: 'video/mp4' });
+  const saved = await submitBlobDownloadFromOffscreen(blob, filename, 'video/mp4', context.taskMeta || {});
+  if (!saved?.ok) {
+    throw new Error(saved?.error || '保存文件失败');
+  }
+  context.onTaskProgress?.(100, { phase: 'complete', status: 'running' });
+  return saved;
+}
+
+/**
  * 大文件路径：视频/音频分别流式下载到 OPFS，再按片段读样本做"流式合并"，
  * 合并输出也落盘，最后由 offscreen 生成对象 URL 交给浏览器保存。
  * 峰值内存 ≈ 一个下载分块 + 一个 moof + 一个媒体片段，与文件体积解耦。
@@ -503,14 +603,49 @@ export function createYouTubeAdaptiveDownloadStrategy() {
       const target = selectTarget(videoInfo, downloadOptions);
 
       if (target.kind === 'combined') {
-        // 注意：不要用"预检响应是 text/plain"来拦下载——现场环境里 CDN 会把
-        // 有效媒体标成 text/plain，拦了等于把能用的文件拒之门外。
-        // 文件名修正交给 downloads.onDeterminingFilename（见 download-filename-registry）。
-        return submitDirectDownload({
-          headers: videoInfo?.requestHeaders || {},
-          filenameNoExt: buildDirectFilename(videoInfo, target.stream),
-          type: 'video',
-          url: target.stream.url,
+        const headers = videoInfo?.requestHeaders || {};
+        const probe = await probeDirectStream(target.stream.url, headers);
+        const route = decideCombinedDownloadRoute(probe);
+        const filenameNoExt = buildDirectFilename(videoInfo, target.stream);
+        const ext = inferMediaExtension(target.stream.url, target.stream.mimeType) || '.mp4';
+        const filename = filenameNoExt.endsWith(ext) ? filenameNoExt : `${filenameNoExt}${ext}`;
+
+        // 正常情况交给下载管理器；服务器把媒体标成 text/* 时自己取回并按 video/mp4 保存
+        // （否则浏览器会按 MIME 存成 `xxx.mp4.txt`）；直链被拒时改走合并路径。
+        if (route === 'download-manager') {
+          return submitDirectDownload({
+            headers,
+            filenameNoExt,
+            type: 'video',
+            url: target.stream.url,
+          });
+        }
+
+        if (route === 'self-save') {
+          console.warn(
+            `[OVD][BG] 直链 MIME=${probe.contentType || '-'}（服务器未标注为媒体），`
+            + '改为扩展取回并以 video/mp4 保存，避免出现 .txt'
+          );
+          return selfSaveDirectStream({
+            context: { ...context, duration: videoInfo?.duration },
+            filename,
+            headers,
+            stream: target.stream,
+          });
+        }
+
+        const fallbackTarget = selectTarget(videoInfo, { ...downloadOptions, preferCombined: false });
+        console.warn(
+          `[OVD][BG] 直链探测 status=${probe.status || '-'}：改走 ${fallbackTarget.kind} 路径`
+        );
+        if (fallbackTarget.kind === 'adaptive') {
+          return mergeAdaptiveStreams(videoInfo, fallbackTarget, context);
+        }
+        return selfSaveDirectStream({
+          context: { ...context, duration: videoInfo?.duration },
+          filename,
+          headers,
+          stream: target.stream,
         });
       }
 
