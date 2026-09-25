@@ -15,6 +15,7 @@
 
   const pageScripts = [
     'lib/message-types.js',
+    'lib/youtube-innertube-clients.js',
     'injected/page-core.js',
     'injected/page-http-utils.js',
     'injected/page-youtube-parser.js',

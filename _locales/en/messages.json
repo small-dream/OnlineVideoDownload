@@ -622,5 +622,8 @@
   },
   "yt_videoFallback": {
     "message": "YouTube video"
+  },
+  "youtube_switchToParse": {
+    "message": "Switch to parse mode to pick quality and merge audio/video"
   }
 }

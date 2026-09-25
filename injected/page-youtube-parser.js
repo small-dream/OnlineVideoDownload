@@ -369,6 +369,11 @@
       return false;
     }
 
+    // 直下客户端的流就是要用来下载的那一份，不能被"上一次报告的分辨率更高"挡掉
+    if (sourceTag === 'direct-client') {
+      return false;
+    }
+
     const previousScore =
       ((state.lastReportedMetrics.maxDirectVideoHeight || 0) * 1000) +
       ((state.lastReportedMetrics.directVideoCount || 0) * 10) +
@@ -385,62 +390,42 @@
     return nextScore <= previousScore;
   }
 
-  async function fetchYouTubeAndroidPlayerResponse(videoId) {
+  /**
+   * 依次用「不要求 pot 的客户端」调 Innertube 播放接口，取一份**可直接下载**的流。
+   * 现场日志：web 客户端给的地址在 SW / 页面上下文 / 下载管理器三条路上都是 403；
+   * TVHTML5 / WEB_EMBEDDED_PLAYER 在 yt-dlp 的 GVS 策略里不要求 pot，地址可直接下载。
+   * @returns {Promise<{clientKey: string, playerResponse: Object}>}
+   */
+  async function fetchYouTubeDirectClientPlayerResponse(videoId) {
     const apiKey = getYtcfgValue('INNERTUBE_API_KEY');
     if (!videoId || !apiKey) {
       throw new Error('Missing videoId or INNERTUBE_API_KEY');
     }
 
     const visitorData = getYtcfgValue('VISITOR_DATA');
-    const clientCandidates = [
-      {
-        clientName: 'ANDROID_VR',
-        clientNameHeader: '28',
-        clientVersion: '1.60.19',
-        osName: 'Android',
-        osVersion: '14',
-        platform: 'MOBILE',
-      },
-      {
-        clientName: 'ANDROID',
-        clientNameHeader: '3',
-        clientVersion: '19.09.37',
-        osName: 'Android',
-        osVersion: '14',
-        platform: 'MOBILE',
-      },
-    ];
+    const innertubeClients = window.__OVD_YT_INNERTUBE_CLIENTS__ || {};
+    const clientCandidates = innertubeClients.CLIENTS || [];
+    if (clientCandidates.length === 0) {
+      throw new Error('YouTube Innertube client list unavailable');
+    }
 
     let lastError = null;
     for (const client of clientCandidates) {
       try {
-        console.log(`[OVD][YT-DEBUG] android fallback request client=${client.clientName} videoId=${videoId}`);
+        console.log(
+          `[OVD][YT-DEBUG] direct client request key=${client.key} client=${client.clientName}@${client.clientVersion} requiresPot=${client.requiresPot ? 'yes' : 'no'} videoId=${videoId}`
+        );
         const response = await fetch(`/youtubei/v1/player?prettyPrint=false&key=${encodeURIComponent(apiKey)}`, {
           method: 'POST',
           credentials: 'include',
-          headers: {
+          headers: innertubeClients.buildPlayerRequestHeaders?.(client, visitorData) || {
             'content-type': 'application/json',
             ...(visitorData ? { 'x-goog-visitor-id': visitorData } : {}),
-            'x-youtube-client-name': client.clientNameHeader,
-            'x-youtube-client-version': client.clientVersion,
+            'x-youtube-client-name': String(client.clientNameHeader),
+            'x-youtube-client-version': String(client.clientVersion),
           },
-          body: JSON.stringify({
-            context: {
-              client: {
-                clientName: client.clientName,
-                clientVersion: client.clientVersion,
-                hl: 'zh-CN',
-                gl: 'US',
-                osName: client.osName,
-                osVersion: client.osVersion,
-                platform: client.platform,
-              },
-            },
-            playbackContext: {
-              contentPlaybackContext: {
-                html5Preference: 'HTML5_PREF_WANTS',
-              },
-            },
+          body: JSON.stringify(innertubeClients.buildPlayerRequestBody?.(client, videoId) || {
+            context: { client: { clientName: client.clientName, clientVersion: client.clientVersion, hl: 'zh-CN', gl: 'US' } },
             videoId,
           }),
         });
@@ -450,18 +435,27 @@
         }
 
         const data = await response.json();
-        if (data?.streamingData) {
-          return data;
+        const formatCount = innertubeClients.countStreamingFormats?.(data)
+          || ((data?.streamingData?.formats?.length || 0) + (data?.streamingData?.adaptiveFormats?.length || 0));
+        if (data?.streamingData && formatCount > 0) {
+          console.log(
+            `[OVD][YT-DEBUG] direct client ok key=${client.key} formats=${formatCount} status=${data?.playabilityStatus?.status || '-'}`
+          );
+          return { clientKey: client.key, playerResponse: data };
         }
 
-        throw new Error('No streamingData in fallback response');
+        throw new Error(
+          `No streamingData in direct client response (status=${data?.playabilityStatus?.status || '-'} reason=${data?.playabilityStatus?.reason || '-'})`
+        );
       } catch (error) {
         lastError = error;
-        console.warn(`[OVD][YT-DEBUG] android fallback failed client=${client.clientName} videoId=${videoId}: ${error.message}`);
+        console.warn(
+          `[OVD][YT-DEBUG] direct client failed key=${client.key} client=${client.clientName} videoId=${videoId}: ${error.message}`
+        );
       }
     }
 
-    throw lastError || new Error('Android fallback failed');
+    throw lastError || new Error('Direct client fallback failed');
   }
 
   function scheduleYouTubeAndroidFallback(videoId, reason, metrics = null) {
@@ -474,7 +468,7 @@
     }
 
     state.androidFallbackAttempted.add(videoId);
-    console.log('[OVD][YT-DEBUG] start android fallback', {
+    console.log('[OVD][YT-DEBUG] start direct client fallback', {
       adaptiveAudioCount: metrics?.adaptiveAudioCount || 0,
       adaptiveVideoCount: metrics?.adaptiveVideoCount || 0,
       directAudioCount: metrics?.directAudioCount || 0,
@@ -488,17 +482,37 @@
       videoId,
     });
 
-    const task = fetchYouTubeAndroidPlayerResponse(videoId)
-      .then((fallbackResponse) => {
-        console.log('[OVD][YT-DEBUG] android fallback response', {
-          adaptiveFormats: fallbackResponse?.streamingData?.adaptiveFormats?.length || 0,
-          formats: fallbackResponse?.streamingData?.formats?.length || 0,
-          videoId: fallbackResponse?.videoDetails?.videoId || videoId,
+    const task = fetchYouTubeDirectClientPlayerResponse(videoId)
+      .then(({ clientKey, playerResponse }) => {
+        const directMetrics = getYouTubePlayerMetricsFromFormats(
+          playerResponse?.streamingData?.formats || [],
+          playerResponse?.streamingData?.adaptiveFormats || []
+        );
+        console.log('[OVD][YT-DEBUG] direct client response', {
+          adaptiveFormats: playerResponse?.streamingData?.adaptiveFormats?.length || 0,
+          clientKey,
+          directAudioCount: directMetrics.directAudioCount,
+          directCombinedCount: directMetrics.directCombinedCount,
+          directVideoCount: directMetrics.directVideoCount,
+          formats: playerResponse?.streamingData?.formats?.length || 0,
+          videoId: playerResponse?.videoDetails?.videoId || videoId,
         });
-        processYouTubePlayerResponse(fallbackResponse, { sourceTag: 'android-fallback' });
+
+        // 该客户端必须给出"可直接下载"的地址（url，而不是 signatureCipher）才有意义，
+        // 否则保留原报告的流，避免把可下载列表换成一堆待签名条目
+        const hasDirectVideo = directMetrics.directVideoCount > 0 || directMetrics.directCombinedCount > 0;
+        const hasDirectAudio = directMetrics.directAudioCount > 0 || directMetrics.directCombinedCount > 0;
+        if (!hasDirectVideo || !hasDirectAudio) {
+          console.warn(
+            `[OVD][YT-DEBUG] direct client ${clientKey} 没有可直接下载的地址，保留原报告的流 videoId=${videoId}`
+          );
+          return;
+        }
+
+        processYouTubePlayerResponse(playerResponse, { clientKey, sourceTag: 'direct-client' });
       })
       .catch((error) => {
-        console.warn(`[OVD][YT-DEBUG] android fallback final failure videoId=${videoId}: ${error.message}`);
+        console.warn(`[OVD][YT-DEBUG] direct client final failure videoId=${videoId}: ${error.message}`);
       })
       .finally(() => {
         state.androidFallbackInflight.delete(videoId);
@@ -802,6 +816,9 @@
 
   function processYouTubePlayerResponse(playerResponse, options = {}) {
     const sourceTag = options?.sourceTag || 'page';
+    const clientKey = options?.clientKey || '';
+    // 备用客户端（直下客户端 / 旧 android 兜底）的回报：不受"是否更好"的去重限制
+    const isFallbackSource = sourceTag === 'android-fallback' || sourceTag === 'direct-client';
     const formats = playerResponse?.streamingData?.formats || [];
     const adaptiveFormats = playerResponse?.streamingData?.adaptiveFormats || [];
     const processLogKey = [
@@ -815,15 +832,16 @@
     const hasProcessLogValue =
       !!playerResponse?.streamingData ||
       !!playerResponse?.videoDetails ||
-      sourceTag === 'android-fallback';
+      isFallbackSource;
     const shouldLogProcess =
       hasProcessLogValue &&
-      (sourceTag === 'android-fallback' || state.lastProcessLogKey !== processLogKey);
+      (isFallbackSource || state.lastProcessLogKey !== processLogKey);
 
     if (shouldLogProcess) {
       state.lastProcessLogKey = processLogKey;
       console.log('[OVD][YT-DEBUG] processYouTubePlayerResponse', {
         adaptiveFormatsCount: adaptiveFormats.length,
+        clientKey,
         formatsCount: formats.length,
         hasStreamingData: !!playerResponse?.streamingData,
         hasVideoDetails: !!playerResponse?.videoDetails,
@@ -836,7 +854,7 @@
     if (!playerResponse?.streamingData) {
       const noStreamingLogKey = buildYouTubeNoStreamingLogKey(playerResponse, sourceTag);
       const shouldLogNoStreaming =
-        (sourceTag === 'android-fallback' ||
+        (isFallbackSource ||
           !!playerResponse?.videoDetails?.videoId ||
           !!playerResponse?.playabilityStatus?.status) &&
         state.lastNoStreamingLogKey !== noStreamingLogKey;
@@ -850,7 +868,7 @@
           sourceTag,
         });
       }
-      if (sourceTag !== 'android-fallback') {
+      if (!isFallbackSource) {
         const pageVideoId = getCurrentYouTubePageVideoId(playerResponse);
         const dataVideoId = playerResponse?.videoDetails?.videoId || '';
         if (!dataVideoId || dataVideoId === pageVideoId) {
@@ -882,7 +900,7 @@
 
     if (urlVideoId && dataVideoId && urlVideoId !== dataVideoId) {
       console.log(`[OVD][YT-DEBUG] stale player response url=${urlVideoId} data=${dataVideoId}`);
-      if (sourceTag !== 'android-fallback') {
+      if (!isFallbackSource) {
         scheduleCurrentVideoIdFallback('stale-player-response', 900, {
           staleDataVideoId: dataVideoId,
         });
@@ -956,7 +974,7 @@
     const metrics = getYouTubePlayerMetricsFromFormats(formats, adaptiveFormats);
     const fallbackReason = getYouTubeAndroidFallbackReason(metrics);
     const summaryLogKey = buildYouTubeMetricsLogKey(currentVideoId, metrics, sourceTag);
-    if (sourceTag === 'android-fallback' || state.lastSummaryLogKey !== summaryLogKey) {
+    if (isFallbackSource || state.lastSummaryLogKey !== summaryLogKey) {
       state.lastSummaryLogKey = summaryLogKey;
       console.log('[OVD][YT-DEBUG] stream summary', {
         adaptiveAudioCount: metrics.adaptiveAudioCount,
@@ -977,7 +995,7 @@
     }
 
     if (shouldSkipDuplicateYouTubeReport(currentVideoId, metrics, sourceTag)) {
-      if (sourceTag === 'android-fallback') {
+      if (isFallbackSource) {
         const fallbackDuplicateKey = `${summaryLogKey}|duplicate-fallback`;
         if (state.duplicateLogKey !== fallbackDuplicateKey) {
           state.duplicateLogKey = fallbackDuplicateKey;
@@ -1021,24 +1039,29 @@
       url: currentPageUrl,
       videoId: currentVideoId,
       videoStreams,
+      ...(clientKey ? { clientKey, streamSource: sourceTag } : {}),
     });
 
-    if (sourceTag !== 'android-fallback' && shouldTryAndroidPlayerFallback(metrics)) {
+    if (!isFallbackSource) {
+      // 无论启发式是否命中，都取一次"直下客户端"的流：
+      // web 客户端返回的地址缺少 pot、`n` 也未做 nsig 转换，拿去请求会被 googlevideo 403，
+      // TVHTML5 / WEB_EMBEDDED_PLAYER 这类客户端给的是可直接下载的地址（见 lib/youtube-innertube-clients.js）。
+      const decideReason = shouldTryAndroidPlayerFallback(metrics)
+        ? (fallbackReason || 'unknown')
+        : 'direct-client-preferred';
       if (!state.androidFallbackAttempted.has(currentVideoId) && !state.androidFallbackInflight.has(currentVideoId)) {
-        state.fallbackDecisionLogKey = `${currentVideoId}|${fallbackReason || 'unknown'}|start`;
-        console.log(
-          `[OVD][YT-DEBUG] scheduling android fallback videoId=${currentVideoId} reason=${fallbackReason || 'unknown'}`
-        );
+        state.fallbackDecisionLogKey = `${currentVideoId}|${decideReason}|start`;
+        console.log(`[OVD][YT-DEBUG] scheduling direct client fallback videoId=${currentVideoId} reason=${decideReason}`);
       } else {
-        const skipKey = `${currentVideoId}|${fallbackReason || 'unknown'}|skip`;
+        const skipKey = `${currentVideoId}|${decideReason}|skip`;
         if (state.fallbackDecisionLogKey !== skipKey) {
           state.fallbackDecisionLogKey = skipKey;
           console.log(
-            `[OVD][YT-DEBUG] android fallback already inflight or attempted videoId=${currentVideoId} reason=${fallbackReason || 'unknown'}`
+            `[OVD][YT-DEBUG] direct client fallback already inflight or attempted videoId=${currentVideoId} reason=${decideReason}`
           );
         }
       }
-      scheduleYouTubeAndroidFallback(currentVideoId, fallbackReason, metrics);
+      scheduleYouTubeAndroidFallback(currentVideoId, decideReason, metrics);
     }
   }
 

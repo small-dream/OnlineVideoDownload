@@ -622,5 +622,8 @@
   },
   "yt_videoFallback": {
     "message": "YouTube 视频"
+  },
+  "youtube_switchToParse": {
+    "message": "切到「解析下载」可选清晰度并合并音视频"
   }
 }
