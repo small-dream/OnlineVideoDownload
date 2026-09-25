@@ -227,6 +227,14 @@
       .filter((format) => !format?.url && (format?.signatureCipher || format?.cipher))
       .map((format) => Number(format.height) || 0)
       .filter(Boolean);
+    // SABR-only：既没有 url 也没有 signatureCipher，只有 serverAbrStreamingUrl，
+    // 这类高清晰度流不能用普通 GET 下载，也是"清晰度列表只剩 360p"的常见原因
+    const sabrOnlyVideo = video.filter(
+      (format) => !format?.url && !(format?.signatureCipher || format?.cipher) && !!format?.serverAbrStreamingUrl
+    );
+    const sabrOnlyAudio = audio.filter(
+      (format) => !format?.url && !(format?.signatureCipher || format?.cipher) && !!format?.serverAbrStreamingUrl
+    );
 
     return {
       adaptiveAudioCount: audio.length,
@@ -240,6 +248,8 @@
       maxDirectVideoHeight: directVideoHeights.length ? Math.max(...directVideoHeights) : 0,
       opaqueAdaptiveAudioCount: audio.filter((format) => !format?.url && !(format?.signatureCipher || format?.cipher)).length,
       opaqueAdaptiveVideoCount: video.filter((format) => !format?.url && !(format?.signatureCipher || format?.cipher)).length,
+      sabrOnlyAudioCount: sabrOnlyAudio.length,
+      sabrOnlyVideoCount: sabrOnlyVideo.length,
     };
   }
 
@@ -409,53 +419,105 @@
       throw new Error('YouTube Innertube client list unavailable');
     }
 
+    const results = [];
     let lastError = null;
-    for (const client of clientCandidates) {
-      try {
-        console.log(
-          `[OVD][YT-DEBUG] direct client request key=${client.key} client=${client.clientName}@${client.clientVersion} requiresPot=${client.requiresPot ? 'yes' : 'no'} videoId=${videoId}`
-        );
-        const response = await fetch(`/youtubei/v1/player?prettyPrint=false&key=${encodeURIComponent(apiKey)}`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: innertubeClients.buildPlayerRequestHeaders?.(client, visitorData) || {
-            'content-type': 'application/json',
-            ...(visitorData ? { 'x-goog-visitor-id': visitorData } : {}),
-            'x-youtube-client-name': String(client.clientNameHeader),
-            'x-youtube-client-version': String(client.clientVersion),
-          },
-          body: JSON.stringify(innertubeClients.buildPlayerRequestBody?.(client, videoId) || {
-            context: { client: { clientName: client.clientName, clientVersion: client.clientVersion, hl: 'zh-CN', gl: 'US' } },
-            videoId,
-          }),
-        });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status} ${response.statusText}`);
-        }
+    // 先试"不要求 pot"的客户端；如果它们给不出像样的清晰度（例如只回 360p progressive），
+    // 再继续试其余客户端，最后按"可直接下载的最高分辨率"挑最好的一份 ——
+    // 现场问题：只用了第一个成功的客户端，导致清晰度列表只剩 360p。
+    const potFreeClients = clientCandidates.filter((client) => !client.requiresPot);
+    const fallbackClients = clientCandidates.filter((client) => client.requiresPot);
+    const clientGroups = [potFreeClients.length > 0 ? potFreeClients : clientCandidates];
+    if (potFreeClients.length > 0 && fallbackClients.length > 0) {
+      clientGroups.push(fallbackClients);
+    }
 
-        const data = await response.json();
-        const formatCount = innertubeClients.countStreamingFormats?.(data)
-          || ((data?.streamingData?.formats?.length || 0) + (data?.streamingData?.adaptiveFormats?.length || 0));
-        if (data?.streamingData && formatCount > 0) {
+    for (const group of clientGroups) {
+      const bestInGroup = innertubeClients.pickBestClientResult?.(results) || null;
+      // 已经有 720p 以上的可直接下载视频流就不必再试要求 pot 的客户端
+      if (bestInGroup && (bestInGroup.maxDirectHeight || 0) >= 720) {
+        break;
+      }
+
+      for (const client of group) {
+        try {
           console.log(
-            `[OVD][YT-DEBUG] direct client ok key=${client.key} formats=${formatCount} status=${data?.playabilityStatus?.status || '-'}`
+            `[OVD][YT-DEBUG] direct client request key=${client.key} client=${client.clientName}@${client.clientVersion} requiresPot=${client.requiresPot ? 'yes' : 'no'} videoId=${videoId}`
           );
-          return { clientKey: client.key, playerResponse: data };
-        }
+          const response = await fetch(`/youtubei/v1/player?prettyPrint=false&key=${encodeURIComponent(apiKey)}`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: innertubeClients.buildPlayerRequestHeaders?.(client, visitorData) || {
+              'content-type': 'application/json',
+              ...(visitorData ? { 'x-goog-visitor-id': visitorData } : {}),
+              'x-youtube-client-name': String(client.clientNameHeader),
+              'x-youtube-client-version': String(client.clientVersion),
+            },
+            body: JSON.stringify(innertubeClients.buildPlayerRequestBody?.(client, videoId) || {
+              context: { client: { clientName: client.clientName, clientVersion: client.clientVersion, hl: 'zh-CN', gl: 'US' } },
+              videoId,
+            }),
+          });
 
-        throw new Error(
-          `No streamingData in direct client response (status=${data?.playabilityStatus?.status || '-'} reason=${data?.playabilityStatus?.reason || '-'})`
-        );
-      } catch (error) {
-        lastError = error;
-        console.warn(
-          `[OVD][YT-DEBUG] direct client failed key=${client.key} client=${client.clientName} videoId=${videoId}: ${error.message}`
-        );
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          const formatCount = innertubeClients.countStreamingFormats?.(data)
+            || ((data?.streamingData?.formats?.length || 0) + (data?.streamingData?.adaptiveFormats?.length || 0));
+          if (!data?.streamingData || formatCount === 0) {
+            throw new Error(
+              `No streamingData in direct client response (status=${data?.playabilityStatus?.status || '-'} reason=${data?.playabilityStatus?.reason || '-'})`
+            );
+          }
+
+          const metrics = getYouTubePlayerMetricsFromFormats(
+            data?.streamingData?.formats || [],
+            data?.streamingData?.adaptiveFormats || []
+          );
+          const directVideoHeight = Math.max(metrics.maxDirectVideoHeight || 0, metrics.maxDirectCombinedHeight || 0);
+          const hasDirectVideo = metrics.directVideoCount > 0 || metrics.directCombinedCount > 0;
+          const hasDirectAudio = metrics.directAudioCount > 0 || metrics.directCombinedCount > 0;
+          console.log(
+            `[OVD][YT-DEBUG] direct client ok key=${client.key} formats=${formatCount} maxDirectHeight=${directVideoHeight} `
+            + `directVideo=${metrics.directVideoCount} directAudio=${metrics.directAudioCount} status=${data?.playabilityStatus?.status || '-'}`
+          );
+
+          if (!hasDirectVideo || !hasDirectAudio) {
+            console.warn(
+              `[OVD][YT-DEBUG] direct client ${client.key} 没有可直接下载的地址（video=${hasDirectVideo} audio=${hasDirectAudio}）`
+            );
+            continue;
+          }
+
+          results.push({
+            clientKey: client.key,
+            directAudioCount: metrics.directAudioCount,
+            directVideoCount: metrics.directVideoCount,
+            maxDirectHeight: directVideoHeight,
+            playerResponse: data,
+            requiresPot: !!client.requiresPot,
+          });
+        } catch (error) {
+          lastError = error;
+          console.warn(
+            `[OVD][YT-DEBUG] direct client failed key=${client.key} client=${client.clientName} videoId=${videoId}: ${error.message}`
+          );
+        }
       }
     }
 
-    throw lastError || new Error('Direct client fallback failed');
+    const best = innertubeClients.pickBestClientResult?.(results) || results[0] || null;
+    if (!best) {
+      throw lastError || new Error('Direct client fallback failed');
+    }
+
+    console.log(
+      `[OVD][YT-DEBUG] direct client picked key=${best.clientKey} maxDirectHeight=${best.maxDirectHeight} `
+      + `candidates=${results.map((item) => `${item.clientKey}:${item.maxDirectHeight}p`).join(',')}`
+    );
+    return best;
   }
 
   function scheduleYouTubeAndroidFallback(videoId, reason, metrics = null) {
@@ -989,6 +1051,8 @@
         maxDirectVideoHeight: metrics.maxDirectVideoHeight,
         opaqueAdaptiveAudioCount: metrics.opaqueAdaptiveAudioCount,
         opaqueAdaptiveVideoCount: metrics.opaqueAdaptiveVideoCount,
+        sabrOnlyAudioCount: metrics.sabrOnlyAudioCount,
+        sabrOnlyVideoCount: metrics.sabrOnlyVideoCount,
         sourceTag,
         videoId: currentVideoId,
       });
