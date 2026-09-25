@@ -4,6 +4,27 @@
 
 export const NOTIFICATION_ICON_PATH = 'icons/icon128.png';
 
+/** 文案走 _locales；chrome.i18n 不可用时退回中文（见 lib/i18n.js 的同一约定） */
+function translate(key, fallback, subs) {
+  try {
+    const message = globalThis.chrome?.i18n?.getMessage?.(key, subs);
+    if (message) {
+      return message;
+    }
+  } catch (_err) {
+    // 忽略并退回中文
+  }
+  // fallback 也要走占位符替换，否则缺 chrome.i18n 时会把 $1 原样显示出来
+  if (fallback == null || !subs) {
+    return fallback;
+  }
+  const list = Array.isArray(subs) ? subs : [subs];
+  return String(fallback).replace(/\$(\d)/g, (match, index) => {
+    const value = list[Number(index) - 1];
+    return value == null ? match : String(value);
+  });
+}
+
 export function buildNotificationId(downloadId) {
   return `ovd-download-${downloadId}`;
 }
@@ -25,9 +46,12 @@ function formatBytes(bytes) {
 export function buildCompletionNotification({ filename = '', sizeBytes = null } = {}) {
   const name = filename || 'video';
   const sizeLabel = formatBytes(sizeBytes);
+  const body = sizeLabel
+    ? translate('notify_completeBody', '$1（$2）', [name, sizeLabel])
+    : name;
   return {
-    title: '下载完成',
-    message: sizeLabel ? `${name}（${sizeLabel}）` : name,
+    title: translate('notify_completeTitle', '下载完成'),
+    message: body,
   };
 }
 
@@ -35,8 +59,10 @@ export function buildFailureNotification({ filename = '', reason = '' } = {}) {
   const name = filename || 'video';
   const reasonLabel = String(reason || '').trim();
   return {
-    title: '下载失败',
-    message: reasonLabel ? `${name}：${reasonLabel}` : name,
+    title: translate('notify_failedTitle', '下载失败'),
+    message: reasonLabel
+      ? translate('notify_failedBody', '$1：$2', [name, reasonLabel])
+      : name,
   };
 }
 

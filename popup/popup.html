@@ -12,7 +12,7 @@
       <div class="list-header" id="listHeader" hidden>
         <label class="select-all-label">
           <input type="checkbox" id="selectAllCheckbox">
-          <span class="select-all-text">全选</span>
+          <span class="select-all-text" data-i18n="list_selectAll">全选</span>
         </label>
         <span class="list-count" id="listCount"></span>
         <button class="batch-btn" id="batchDownloadBtn" type="button" disabled>下载所选 (0)</button>
@@ -23,8 +23,8 @@
             <circle cx="11" cy="11" r="8"/>
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          <p>未检测到视频</p>
-          <p class="hint">请在包含视频的页面打开扩展</p>
+          <p data-i18n="list_none">未检测到视频</p>
+          <p class="hint" data-i18n="list_hint">请在包含视频的页面打开扩展</p>
         </div>
       </div>
     </main>
@@ -37,66 +37,66 @@
           </svg>
         </button>
         <div>
-          <h1>设置</h1>
-          <p class="subtitle" id="subtitle">正在检测视频...</p>
+          <h1 data-i18n="settings_title">设置</h1>
+          <p class="subtitle" id="subtitle" data-i18n="settings_subtitle">正在检测视频...</p>
         </div>
       </div>
 
       <div class="settings-list">
         <label class="settings-row">
-          <span>并发下载数</span>
+          <span data-i18n="settings_concurrent">并发下载数</span>
           <input type="number" id="popupConcurrentLimit" min="1" max="5" value="3">
         </label>
         <label class="settings-row">
-          <span>下载完成通知</span>
+          <span data-i18n="settings_notification">下载完成通知</span>
           <input type="checkbox" id="popupDownloadNotification" checked>
         </label>
         <label class="settings-row">
-          <span>YouTube 默认模式</span>
+          <span data-i18n="settings_youtubeMode">YouTube 默认模式</span>
           <select id="popupYoutubeDefaultMode">
-            <option value="capture">录制模式</option>
-            <option value="parse">解析下载</option>
+            <option value="capture" data-i18n="settings_youtubeCapture">录制模式</option>
+            <option value="parse" data-i18n="settings_youtubeParse">解析下载</option>
           </select>
         </label>
         <label class="settings-row">
-          <span>文件命名</span>
+          <span data-i18n="settings_filename">文件命名</span>
           <select id="popupFilenameFormat">
-            <option value="title">仅标题</option>
-            <option value="title-quality">标题 + 画质</option>
-            <option value="title-date">标题 + 日期</option>
+            <option value="title" data-i18n="settings_filenameTitle">仅标题</option>
+            <option value="title-quality" data-i18n="settings_filenameQuality">标题 + 画质</option>
+            <option value="title-date" data-i18n="settings_filenameDate">标题 + 日期</option>
           </select>
         </label>
         <label class="settings-row">
-          <span>下载目录</span>
-          <input type="text" id="popupDownloadSubdir" placeholder="留空为默认目录">
+          <span data-i18n="settings_subdir">下载目录</span>
+          <input type="text" id="popupDownloadSubdir" data-i18n-placeholder="settings_subdirPlaceholder" placeholder="留空为默认目录">
         </label>
         <label class="settings-row">
-          <span>最小时长（秒，0=不限）</span>
+          <span data-i18n="settings_minDuration">最小时长（秒，0=不限）</span>
           <input type="number" id="popupMinDuration" min="0" max="36000" step="5" value="0">
         </label>
         <label class="settings-row">
-          <span>最小体积（MB，0=不限）</span>
+          <span data-i18n="settings_minSize">最小体积（MB，0=不限）</span>
           <input type="number" id="popupMinSize" min="0" max="102400" step="1" value="0">
         </label>
         <label class="settings-row settings-row-stacked">
-          <span>域名黑名单</span>
-          <textarea id="popupDomainBlacklist" rows="2" placeholder="逗号或换行分隔，如 ads.example.com"></textarea>
+          <span data-i18n="settings_domainBlacklist">域名黑名单</span>
+          <textarea id="popupDomainBlacklist" rows="2" data-i18n-placeholder="settings_domainBlacklistPlaceholder" placeholder="逗号或换行分隔，如 ads.example.com"></textarea>
         </label>
         <label class="settings-row">
-          <span>每次询问保存位置</span>
+          <span data-i18n="settings_askSaveLocation">每次询问保存位置</span>
           <input type="checkbox" id="popupAskSaveLocation">
         </label>
         <label class="settings-row">
-          <span>历史保留</span>
+          <span data-i18n="settings_historyRetention">历史保留</span>
           <select id="popupHistoryRetention">
-            <option value="7">7 天</option>
-            <option value="30">30 天</option>
-            <option value="90">90 天</option>
-            <option value="0">永久</option>
+            <option value="7" data-i18n="settings_days7">7 天</option>
+            <option value="30" data-i18n="settings_days30">30 天</option>
+            <option value="90" data-i18n="settings_days90">90 天</option>
+            <option value="0" data-i18n="settings_forever">永久</option>
           </select>
         </label>
         <label class="settings-row">
-          <span>调试日志</span>
+          <span data-i18n="settings_debugLogging">调试日志</span>
           <input type="checkbox" id="popupDebugLogging">
         </label>
       </div>
@@ -110,10 +110,10 @@
           </svg>
         </button>
         <div>
-          <h1>下载历史</h1>
-          <p class="subtitle" id="historySubtitle">正在加载...</p>
+          <h1 data-i18n="history_title">下载历史</h1>
+          <p class="subtitle" id="historySubtitle" data-i18n="history_loading">正在加载...</p>
         </div>
-        <button class="icon-btn danger-icon-btn history-clear-btn" id="clearHistoryBtn" title="清空下载历史" disabled>
+        <button class="icon-btn danger-icon-btn history-clear-btn" id="clearHistoryBtn" data-i18n-title="history_clear" title="清空下载历史" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 6h18"/>
             <path d="M8 6V4h8v2"/>
@@ -127,7 +127,7 @@
           <path d="M12 8v4l3 3"/>
           <circle cx="12" cy="12" r="10"/>
         </svg>
-        <p>暂无下载历史</p>
+        <p data-i18n="history_empty">暂无下载历史</p>
       </div>
     </section>
 
@@ -139,7 +139,7 @@
           </svg>
         </button>
         <div>
-          <h1>下载任务</h1>
+          <h1 data-i18n="tasks_title">下载任务</h1>
           <p class="subtitle" id="tasksSubtitle">正在加载...</p>
         </div>
       </div>
@@ -149,12 +149,12 @@
           <path d="M12 5v14"/>
           <path d="M5 12h14"/>
         </svg>
-        <p>暂无下载任务</p>
+        <p data-i18n="tasks_empty">暂无下载任务</p>
       </div>
     </section>
 
     <div class="action-bar" id="actionBar">
-      <button class="icon-btn" id="tasksBtn" title="下载任务">
+      <button class="icon-btn" id="tasksBtn" data-i18n-title="tasks_title" title="下载任务">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 7h16"/>
           <path d="M4 12h10"/>
@@ -162,18 +162,18 @@
           <path d="M17 14v6"/>
           <path d="M14 17l3 3 3-3"/>
         </svg>
-        <span class="action-label">任务</span>
+        <span class="action-label" data-i18n="action_tasks">任务</span>
         <span class="task-entry-badge" id="taskEntryBadge" hidden>0</span>
       </button>
-      <button class="icon-btn" id="historyBtn" title="下载历史">
+      <button class="icon-btn" id="historyBtn" data-i18n-title="history_title" title="下载历史">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 12a9 9 0 1 0 3-6.7"/>
           <path d="M3 4v6h6"/>
           <path d="M12 7v5l3 2"/>
         </svg>
-        <span class="action-label">历史</span>
+        <span class="action-label" data-i18n="action_history">历史</span>
       </button>
-      <button class="icon-btn" id="settingsBtn" title="设置">
+      <button class="icon-btn" id="settingsBtn" data-i18n-title="action_settings" title="设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 6h8"/>
           <path d="M16 6h4"/>
@@ -185,9 +185,9 @@
           <circle cx="9" cy="12" r="2"/>
           <circle cx="17" cy="18" r="2"/>
         </svg>
-        <span class="action-label">设置</span>
+        <span class="action-label" data-i18n="action_settings">设置</span>
       </button>
-      <button class="icon-btn danger-icon-btn clear-list-action" id="clearListBtn" title="清空检测列表">
+      <button class="icon-btn danger-icon-btn clear-list-action" id="clearListBtn" data-i18n-title="action_clearList" title="清空检测列表">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 6h10"/>
           <path d="M4 12h8"/>
@@ -195,7 +195,7 @@
           <path d="M16 14l4 4"/>
           <path d="M20 14l-4 4"/>
         </svg>
-        <span class="action-label">清列表</span>
+        <span class="action-label" data-i18n="action_clearList">清列表</span>
       </button>
     </div>
   </div>
@@ -210,6 +210,7 @@
   <script src="../lib/bilibili-quality-utils.js"></script>
   <script src="../lib/bilibili-quality-store.js"></script>
   <script src="../lib/settings-store.js"></script>
+  <script src="../lib/i18n.js"></script>
   <script src="../lib/ui-dom-utils.js"></script>
   <script src="../content/youtube-download-options.js"></script>
   <script src="popup-error-messages.js"></script>
