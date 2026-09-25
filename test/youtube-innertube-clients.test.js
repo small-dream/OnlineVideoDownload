@@ -23,10 +23,18 @@ test('优先客户端是不要求 pot 的类型（TVHTML5 / WEB_EMBEDDED_PLAYER�
   assert.equal(preferred.requiresPot, false);
 
   const potFree = mod.CLIENTS.filter((client) => !client.requiresPot).map((client) => client.key);
-  assert.deepEqual(potFree, ['tv', 'web_embedded']);
+  assert.deepEqual(potFree, ['tv', 'web_embedded', 'web_safari', 'visionos']);
 
   // 列表顺序 = 尝试顺序：不要求 pot 的排前面
-  assert.deepEqual(mod.CLIENTS.map((client) => client.key), ['tv', 'web_embedded', 'ios', 'android']);
+  assert.deepEqual(
+    mod.CLIENTS.map((client) => client.key),
+    ['tv', 'web_embedded', 'web_safari', 'ios', 'android', 'mweb', 'visionos']
+  );
+
+  // Safari 客户端负责给"预合并 HLS"（web 家族的 HLS 不要求 pot）
+  const safari = mod.getClientByKey('web_safari');
+  assert.equal(safari.preferHls, true);
+  assert.match(safari.contextUserAgent, /Safari/);
 });
 
 test('客户端配置带齐 Innertube 需要的字段（版本号不能是过期的旧值）', () => {
@@ -102,6 +110,19 @@ test('countStreamingFormats 统计 formats + adaptiveFormats', () => {
       streamingData: { adaptiveFormats: [1, 2, 3], formats: [1] },
     }),
     4
+  );
+});
+
+test('getManifestUrls 取 HLS/DASH 清单地址，缺失时给空串', () => {
+  const mod = loadModule();
+
+  assert.deepEqual(mod.getManifestUrls(null), { dashManifestUrl: '', hlsManifestUrl: '' });
+  assert.deepEqual(mod.getManifestUrls({ streamingData: {} }), { dashManifestUrl: '', hlsManifestUrl: '' });
+  assert.deepEqual(
+    mod.getManifestUrls({
+      streamingData: { dashManifestUrl: 'https://x/dash.mpd', hlsManifestUrl: 'https://x/hls.m3u8' },
+    }),
+    { dashManifestUrl: 'https://x/dash.mpd', hlsManifestUrl: 'https://x/hls.m3u8' }
   );
 });
 
