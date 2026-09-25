@@ -72,7 +72,7 @@
 | # | 事项 | 说明 |
 |---|------|------|
 | 4.1 | 修复 MPD 测试零执行 | `test/mpd-parser.test.js:7` 的 6 个用例因 Node 无 DOMParser 全部 skip；引入 `@xmldom/xmldom` 或 happy-dom 让其真正运行，并补 `$Number%05d$`、`r="-1"`、mediaRange 回归用例 |
-| 4.2 | 补 bilibili-muxer 测试 | 手写二进制解析器是全仓库风险最高、覆盖为零的模块；用最小构造的 fMP4 fixture 验证 `parseFragment`/config 提取/mux 输出；同时修复 trun data-offset、多 traf/trun 的脆弱假设（`lib/bilibili-muxer.js:382`）与样本写入失败静默丢帧问题 | ✅ 主要项完成：`test/bilibili-muxer.test.js` 覆盖零拷贝不变量、样本解析正确性，以及**真实 moov（avcC/esds）fixture 的端到端合并**（输出重新解析验证双 trak + mdat）。仍缺：trun data-offset 回归、多 traf/trun、样本写入失败静默丢帧 |
+| 4.2 | 补 bilibili-muxer 测试 | 手写二进制解析器是全仓库风险最高、覆盖为零的模块；用最小构造的 fMP4 fixture 验证 `parseFragment`/config 提取/mux 输出；同时修复 trun data-offset、多 traf/trun 的脆弱假设（`lib/bilibili-muxer.js:382`）与样本写入失败静默丢帧问题 | ✅ 完成：`test/bilibili-muxer.test.js`（14 例）覆盖零拷贝不变量、样本解析正确性、**真实 moov（avcC/esds）fixture 的端到端合并**（输出重新解析验证双 trak + mdat），以及 trun data-offset（含越界报错）、多 traf/多 trun 解析、样本写入失败 fail-fast、空样本中止 |
 | 4.3 | 消除重复实现 | HLS 下载循环在 background/content 各一份（`hls-fetcher.js` vs `hls-strategy.js`）收敛为单一实现；`youtube-adaptive-download-strategy.js:70-130` 改用 `lib/http-utils.js`（两份逻辑已出现漂移） |
 | 4.4 | 国际化 | 引入 `_locales` + `chrome.i18n`，至少补英文（README 已有四语、UI 锁中文，发布商店受限） |
 | 4.5 | 死代码清理 | 未引用的 `background/download-strategies/dash-download-strategy.js`、`buildQualityHtml`、重复 labels 常量；同步更新 PRD 与 README 中名不符实的描述 |
