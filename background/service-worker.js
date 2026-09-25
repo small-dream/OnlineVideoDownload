@@ -33,6 +33,7 @@ import '../lib/message-types.js';
 import '../lib/settings-store.js';
 import '../lib/video-filter.js';
 import '../lib/opfs-sink.js';
+import '../lib/page-message-guard.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
@@ -118,6 +119,7 @@ const downloadQueue = new DownloadQueue({ limit: 3 });
 
 // OPFS 落盘能力（临时文件登记见 background/opfs-temp-registry.js）
 const opfsSink = globalThis.__OVD_OPFS_SINK__ || {};
+const pageMessageGuard = globalThis.__OVD_PAGE_MESSAGE_GUARD__ || {};
 downloadNotifications.attach();
 const tabBadge = createTabBadgeManager();
 
@@ -792,6 +794,14 @@ async function notifyVisibleVideoCount(tabId) {
 async function handleVideoDetected(payload, tabId, frameId = null) {
   if (!payload?.url || !tabId) {
     throw new Error('Missing video payload or tabId');
+  }
+
+  // 纵深防御：内容脚本已校验页面来源的消息，这里再挡一次，
+  // 防止任何来源把 file:/data:/chrome: 之类的地址塞进注册表。
+  const guardResult = pageMessageGuard.validateDetectedPayload?.(payload);
+  if (guardResult && !guardResult.ok) {
+    console.warn(`[OVD] 拒绝可疑的 VIDEO_DETECTED（${guardResult.reason}）url=${String(payload.url).slice(0, 80)}`);
+    return { ok: false, rejected: true };
   }
 
   const isBlobVideo = payload.url.startsWith('blob:');

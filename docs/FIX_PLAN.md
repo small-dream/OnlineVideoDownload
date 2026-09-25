@@ -76,8 +76,8 @@
 | 4.3 | 消除重复实现 | HLS 下载循环在 background/content 各一份（`hls-fetcher.js` vs `hls-strategy.js`）收敛为单一实现；`youtube-adaptive-download-strategy.js:70-130` 改用 `lib/http-utils.js`（两份逻辑已出现漂移） |
 | 4.4 | 国际化 | 引入 `_locales` + `chrome.i18n`，至少补英文（README 已有四语、UI 锁中文，发布商店受限） |
 | 4.5 | 死代码清理 | 未引用的 `background/download-strategies/dash-download-strategy.js`、`buildQualityHtml`、重复 labels 常量；同步更新 PRD 与 README 中名不符实的描述 |
-| 4.6 | 安全与权限收紧 | postMessage 增加 nonce/握手 token 校验（当前任意网页可伪造 OVD 消息触发带 Cookie 的下载）；收紧 `web_accessible_resources` 对 `<all_urls>` 暴露整个 `lib/*` 与 `injected/*` 的范围；manifest 增加 `minimum_chrome_version`（offscreen 需 109+） |
-| 4.7 | 文件名健壮性 | `sanitizeFilename` 处理 Windows 保留名（CON/PRN/NUL…）与尾部点/空格；重复文件名冲突策略 |
+| 4.6 | 安全与权限收紧 | postMessage 增加 nonce/握手 token 校验（当前任意网页可伪造 OVD 消息触发带 Cookie 的下载）；收紧 `web_accessible_resources` 对 `<all_urls>` 暴露整个 `lib/*` 与 `injected/*` 的范围；manifest 增加 `minimum_chrome_version`（offscreen 需 109+） | ✅ 页面消息按不可信数据处理（`lib/page-message-guard.js` 类型白名单 + http(s)/blob 协议白名单 + 长度上限，content 与 SW 双层校验）；WAR 收紧为 `injected/*.js` + `lib/message-types.js` + `icons/*`；`minimum_chrome_version: "109"`。注：MAIN world 无法对页面保密，因此不做「共享 token」式校验（可被页面监听窃取），改为限制页面消息能触发的动作面 |
+| 4.7 | 文件名健壮性 | `sanitizeFilename` 处理 Windows 保留名（CON/PRN/NUL…）与尾部点/空格；重复文件名冲突策略 | ✅ 保留名加 `_` 前缀、去尾部点/空格（截断后二次处理）、剔控制字符、按码点截断；重名冲突由 `chrome.downloads` 默认 uniquify 处理（已在文档写明） |
 | 4.8 | 浏览器矩阵决策 | 明确仅支持 Chromium（README/manifest 声明并移除误导性的 Firefox 检测），或引入 webextension-polyfill + 替代 offscreen 方案真正支持 Firefox |
 
 ## 里程碑建议

@@ -79,6 +79,43 @@ test('sanitizeFilename: truncates to 120 characters', () => {
   assert.equal(sanitizeFilename(long).length, 120);
 });
 
+// --- 4.7 文件名健壮性 ---
+
+test('sanitizeFilename: 规避 Windows 保留设备名（含带扩展名）', () => {
+  const { sanitizeFilename } = mod();
+  assert.equal(sanitizeFilename('CON'), '_CON');
+  assert.equal(sanitizeFilename('con.mp4'), '_con.mp4');
+  assert.equal(sanitizeFilename('NUL'), '_NUL');
+  assert.equal(sanitizeFilename('lpt1.ts'), '_lpt1.ts');
+  assert.equal(sanitizeFilename('COM9'), '_COM9');
+  // 仅是前缀的名称不受影响
+  assert.equal(sanitizeFilename('console.mp4'), 'console.mp4');
+  assert.equal(sanitizeFilename('com10.mp4'), 'com10.mp4');
+});
+
+test('sanitizeFilename: 去掉结尾的点与空格（Windows 会静默剥离）', () => {
+  const { sanitizeFilename } = mod();
+  assert.equal(sanitizeFilename('report.'), 'report');
+  assert.equal(sanitizeFilename('report...  '), 'report');
+  assert.equal(sanitizeFilename('trailing '), 'trailing');
+  assert.equal(sanitizeFilename('...'), 'video');
+});
+
+test('sanitizeFilename: 去掉控制字符', () => {
+  const { sanitizeFilename } = mod();
+  assert.equal(sanitizeFilename('a\u0000b\u001fc'), 'abc');
+});
+
+test('sanitizeFilename: 按码点截断，不切断 emoji 代理对', () => {
+  const { sanitizeFilename } = mod();
+  const emoji = '🎬'.repeat(200);
+  const result = sanitizeFilename(emoji);
+
+  assert.equal(Array.from(result).length, 120);
+  assert.equal(result.includes('\uFFFD'), false);
+  assert.equal(result.endsWith('🎬'), true);
+});
+
 test('sanitizeFilename: empty input returns fallback', () => {
   const { sanitizeFilename } = mod();
   assert.equal(sanitizeFilename(''), 'video');

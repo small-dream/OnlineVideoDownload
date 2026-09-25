@@ -122,6 +122,45 @@ test('ABORT_SOURCE_DOWNLOAD 中止 HLS 委托下载的 AbortController', async (
   assert.match(delegateResponse.error, /取消/);
 });
 
+test('伪造的页面检测消息（危险协议 / 未知类型）不会转发到后台', async () => {
+  let messageHandler = null;
+  const sent = [];
+  globalThis.__OVD_safeRuntimeMessage = () => {};
+  globalThis.window = {
+    addEventListener(type, handler) {
+      if (type === 'message') {
+        messageHandler = handler;
+      }
+    },
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage: (message) => sent.push(message),
+    },
+  };
+  // 页面往内容脚本方向的消息按不可信数据处理（4.6）
+  require(path.resolve(__dirname, '../lib/page-message-guard.js'));
+
+  const router = loadRouter().createMessageRouter({});
+  router.start();
+
+  const sendForged = (payload) => messageHandler({
+    data: { from: 'OVD_PAGE_SCRIPT', payload },
+    source: globalThis.window,
+  });
+
+  sendForged({ type: 'direct', url: 'file:///C:/Users/secret.mp4' });
+  sendForged({ type: 'direct', url: 'data:video/mp4;base64,AAAA' });
+  sendForged({ type: 'exec', url: 'https://evil.example/payload.mp4' });
+  sendForged({ type: 'direct', url: 'blob:no-origin-here' });
+  assert.equal(sent.length, 0, '可疑消息必须被丢弃');
+
+  sendForged({ title: '正常视频', type: 'direct', url: 'https://cdn.example.com/v.mp4' });
+  assert.equal(sent.length, 1, '合法检测结果仍应转发');
+  assert.equal(sent[0].type, 'VIDEO_DETECTED');
+});
+
 test('YouTube page stream progress keeps task metadata when forwarded', () => {
   const emittedMessages = [];
   let messageHandler = null;
