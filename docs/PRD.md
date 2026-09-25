@@ -1,7 +1,7 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.14.0
-> **最后更新**：2026-06-12
+> **版本**：1.15.0
+> **最后更新**：2026-09-24
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
 ---
@@ -37,8 +37,8 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 来源归属：
 
 - YouTube、Bilibili、blob 主要走 content / page 侧能力。
-- 直链、部分 DASH、可直接 SW 抓取的 HLS 主要走 background。
-- HLS 在 service worker 失败时会自动降级到 content 侧委托下载。
+- 直链、部分 DASH 主要走 background。
+- HLS 优先在 content（页面上下文）抓取：请求继承页面 Origin / Sec-Fetch / Referer / Cookie，规避 CDN 对扩展后台裸请求的 403 拦截；content 不可用或失败时回退到 service worker 抓取。
 
 ---
 
@@ -80,7 +80,8 @@ UI 要求：
 - 解析媒体分片列表与 `#EXT-X-MAP`
 - 支持 `#EXT-X-KEY` 的 AES-128 解密
 - 合并分片后触发单文件下载
-- 运行时优先尝试 service worker 抓取，失败时自动降级为 content 委托下载
+- 运行时优先委托 content（页面上下文）抓取，携带页面 Cookie 与来源信息；content 无响应或失败时自动回退到 service worker 抓取
+- 携带 Cookie 的跨域请求若被目标站 CORS 拒绝，自动退化为默认凭证模式重试
 - HLS 解析、解密、URL 处理逻辑必须复用统一的共享 pipeline
 
 ### 4.3 DASH 下载
@@ -196,6 +197,7 @@ UI 要求：
 - DRM 内容不可下载
 - Bilibili 高质量内容可能依赖登录态
 - YouTube `signatureCipher` 复杂场景仍可能受限
+- HLS 下载在页面上下文执行，关闭标签页会中断任务；content 不可用时自动回退到 service worker，部分 CDN 会对后台裸请求返回 403
 
 ---
 
@@ -203,6 +205,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.15.0 | 2026-09-24 | HLS 下载改为优先在页面上下文（content）执行：携带页面 Cookie/Origin/Referer 以规避 CDN（如 Cloudflare WAF）对扩展后台裸请求的 403 拦截，content 不可用或失败时回退到 service worker；委托下载回传真实 downloadId，DNR 规则按页面来源回显 CORS 响应头。 |
 | 1.14.0 | 2026-06-12 | 新增下载目录设置：支持配置子目录名（相对于 Chrome 默认下载目录），默认 `OnlineVideoDownload`。 |
 | 1.13.0 | 2026-06-12 | 移除独立 Options Page 与 `options_ui` 注册，设置和下载历史统一在 Popup 内管理。 |
 | 1.12.0 | 2026-06-12 | 下载历史支持单条删除（每行右侧删除按钮）和清空全部历史。 |

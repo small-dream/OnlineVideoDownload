@@ -217,8 +217,18 @@
             );
 
           case MSG.HLS_DOWNLOAD_DELEGATE || 'HLS_DOWNLOAD_DELEGATE':
+            if (!hlsDelegateHandler?.handle) {
+              sendResponse(toErrorResponse(new Error('HLS 委托下载不可用')));
+              break;
+            }
             return respondAsync(
-              hlsDelegateHandler.handle(msg.m3u8Url, msg.filename, msg.headers, msg.taskMeta || {}),
+              hlsDelegateHandler.handle(
+                msg.m3u8Url,
+                msg.filename,
+                msg.headers,
+                msg.taskMeta || {},
+                msg.options || {}
+              ),
               'HLS delegated download failed'
             );
 

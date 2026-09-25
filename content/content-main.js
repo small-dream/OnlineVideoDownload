@@ -66,11 +66,12 @@
    * 通过 service worker 下载 blob 数据，支持子目录设置。
    * 使用 chrome.downloads.download API（支持子目录路径），
    * 仅在 service worker 不可用时回退到 <a download> 方式。
+   * 返回 Promise<{ ok, downloadId } | undefined>，供 HLS 委托下载回传 downloadId。
    */
   function triggerBlobDownload(blob, filename, taskMeta = {}) {
     const objectUrl = URL.createObjectURL(blob);
 
-    sendMessageAsync({
+    return sendMessageAsync({
       filename: filename || 'video.ts',
       objectUrl,
       ...taskMeta,
@@ -78,7 +79,7 @@
     }).then((response) => {
       if (response?.ok) {
         // service worker 会通过 REVOKE_OBJECT_URL 消息清理 objectUrl
-        return;
+        return response;
       }
       console.warn(`[OVD] SW blob download failed: ${response?.error || 'unknown'}, fallback to <a download>`);
       URL.revokeObjectURL(objectUrl);
