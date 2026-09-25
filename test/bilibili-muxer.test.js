@@ -278,6 +278,34 @@ test('真实 moov fixture 可以端到端合并出带双轨 moov 的 MP4', async
   assert.equal(Array.isArray(traks) ? traks.length : 1, 2, '合并结果应包含视频与音频两条轨道');
 });
 
+// 回归：下载管线拼接分片给的是 Uint8Array，而 MP4 解析内部是 new DataView(buffer)，
+// 直接传视图会抛 "First argument to DataView constructor must be an ArrayBuffer"（现场 bug）。
+test('合并接受 Uint8Array 与带 byteOffset 的视图', async () => {
+  const muxer = loadMuxer();
+  const video = buildRealFmp4({ moov: makeVideoMoov(), fragmentCount: 4, sampleSize: 2048 });
+  const audio = buildRealFmp4({ moov: makeAudioMoov(), fragmentCount: 4, sampleSize: 512 });
+
+  const blobFromViews = await muxer.mergeFmp4Streams(new Uint8Array(video), new Uint8Array(audio));
+  assert.ok(blobFromViews.size > 0);
+
+  // 带偏移的视图：不能把视图背后的整个 buffer 当数据
+  const paddedVideo = new Uint8Array(video.byteLength + 8);
+  paddedVideo.set(new Uint8Array(video), 8);
+  const paddedAudio = new Uint8Array(audio.byteLength + 4);
+  paddedAudio.set(new Uint8Array(audio), 4);
+
+  const blobFromOffsetViews = await muxer.mergeFmp4Streams(
+    paddedVideo.subarray(8),
+    paddedAudio.subarray(4)
+  );
+  assert.equal(blobFromOffsetViews.size, blobFromViews.size, '带偏移视图应与紧凑视图产出同样结果');
+
+  await assert.rejects(
+    () => muxer.mergeFmp4Streams(null, new Uint8Array(audio)),
+    /视音频数据为空/
+  );
+});
+
 test('真实 fixture 多分片合并仍满足零拷贝（解析期内存与体积解耦）', async () => {
   const muxer = loadMuxer();
   const { __internals } = muxer;
