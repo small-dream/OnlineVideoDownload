@@ -104,3 +104,37 @@ test('countStreamingFormats 统计 formats + adaptiveFormats', () => {
     4
   );
 });
+
+test('pickBestClientResult 按"可直接下载的最高分辨率"选，而不是第一个成功', () => {
+  const mod = loadModule();
+
+  const picked = mod.pickBestClientResult([
+    // 先成功的客户端只有 360p progressive（现场问题：清晰度列表只剩 360p）
+    { clientKey: 'tv', directAudioCount: 1, directVideoCount: 0, maxDirectHeight: 360, requiresPot: false },
+    { clientKey: 'android', directAudioCount: 8, directVideoCount: 12, maxDirectHeight: 1080, requiresPot: true },
+    { clientKey: 'ios', directAudioCount: 6, directVideoCount: 9, maxDirectHeight: 720, requiresPot: true },
+  ]);
+
+  assert.equal(picked.clientKey, 'android');
+  assert.equal(picked.maxDirectHeight, 1080);
+});
+
+test('pickBestClientResult 同分时不要求 pot 的优先，且空输入安全', () => {
+  const mod = loadModule();
+
+  const sameQuality = [
+    { clientKey: 'android', directAudioCount: 4, directVideoCount: 6, maxDirectHeight: 1080, requiresPot: true },
+    { clientKey: 'tv', directAudioCount: 4, directVideoCount: 6, maxDirectHeight: 1080, requiresPot: false },
+  ];
+  assert.equal(mod.pickBestClientResult(sameQuality).clientKey, 'tv');
+  assert.equal(mod.pickBestClientResult([]), null);
+  assert.equal(mod.pickBestClientResult(null), null);
+});
+
+test('scorePlayerClientResult 分辨率权重高于条数', () => {
+  const mod = loadModule();
+
+  const lowButMany = { directAudioCount: 50, directVideoCount: 50, maxDirectHeight: 360 };
+  const highButFew = { directAudioCount: 1, directVideoCount: 1, maxDirectHeight: 720 };
+  assert.ok(mod.scorePlayerClientResult(highButFew) > mod.scorePlayerClientResult(lowButMany));
+});
