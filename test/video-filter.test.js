@@ -163,11 +163,14 @@ test('collapseDuplicateBlobEntries：同 frame 同名 blob 只保留最新一条
 // ---------------------------------------------------------------
 
 const YT_HLS_URL = 'https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1/id/gdpvo4w0mZc/itag/0/playlist/index.m3u8';
+// 现场上报的是 hls_variant（master 清单），必须同样识别
+const YT_HLS_VARIANT_URL = 'https://manifest.googlevideo.com/api/manifest/hls_variant/expire/1/id/gdpvo4w0mZc/itag/0/playlist/index.m3u8';
 
 test('isYouTubeHlsEntry / youtubeHlsVideoId 识别 YouTube HLS 清单', () => {
   const mod = loadModule();
 
   assert.equal(mod.isYouTubeHlsEntry({ type: 'hls', url: YT_HLS_URL }), true);
+  assert.equal(mod.isYouTubeHlsEntry({ type: 'hls', url: YT_HLS_VARIANT_URL }), true);
   assert.equal(mod.isYouTubeHlsEntry({ type: 'hls', url: 'https://cdn.example.com/x.m3u8' }), false);
   assert.equal(mod.isYouTubeHlsEntry({ type: 'youtube-adaptive', url: YT_HLS_URL }), false);
   assert.equal(mod.youtubeHlsVideoId({ url: YT_HLS_URL }), 'gdpvo4w0mZc');
@@ -230,6 +233,14 @@ test('mergeYouTubeHlsEntries：同一视频合并成一条，HLS 清单挂到 yo
   assert.equal(merged.length, 1, '同一视频只保留一行');
   assert.equal(merged[0].type, 'youtube-adaptive');
   assert.equal(merged[0].hlsManifestUrl, YT_HLS_URL);
+
+  // 现场实际形态：hls_variant master 清单同样要能合并
+  const mergedVariant = mod.mergeYouTubeHlsEntries([
+    { type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=gdpvo4w0mZc', videoId: 'gdpvo4w0mZc' },
+    { type: 'hls', url: YT_HLS_VARIANT_URL },
+  ]);
+  assert.equal(mergedVariant.length, 1);
+  assert.equal(mergedVariant[0].hlsManifestUrl, YT_HLS_VARIANT_URL);
 });
 
 test('mergeYouTubeHlsEntries：不相关条目与无对应 youtube 条目的 HLS 都保持原样', () => {
