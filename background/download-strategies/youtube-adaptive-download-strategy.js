@@ -2,6 +2,7 @@ import { injectHeaders } from '../header-injector.js';
 import { submitDirectDownload } from './direct-download-strategy.js';
 import { submitBlobDownloadFromOffscreen } from '../offscreen-download.js';
 import '../../lib/byte-utils.js';
+import '../../lib/http-utils.js';
 import '../../lib/constants.js';
 import '../../lib/message-types.js';
 import '../../lib/mp4-muxer.js';
@@ -67,81 +68,18 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseContentRangeTotal(contentRange) {
-  const match = String(contentRange || '').match(/\/(\d+)$/);
-  return match ? Number(match[1]) || 0 : 0;
-}
+// 这些工具已收敛到 lib/http-utils.js 与 lib/byte-utils.js（第四波 4.3），
+// 原先此处存在一份拷贝并与库实现漂移。
+const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
+const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 
-function parseTotalBytesHintFromUrl(url) {
-  if (typeof url !== 'string' || !url) {
-    return 0;
-  }
-
-  try {
-    const parsedUrl = new URL(url);
-    const clen = Number(parsedUrl.searchParams.get('clen')) || 0;
-    return clen > 0 ? clen : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function inferTotalBytesFromResponse(response, loadedBytesBefore = 0, fallbackTotal = 0, requestUrl = '') {
-  const contentRangeTotal = parseContentRangeTotal(response?.headers?.get?.('content-range'));
-  const urlTotal = parseTotalBytesHintFromUrl(requestUrl);
-  if (contentRangeTotal > 0) {
-    return Math.max(contentRangeTotal, urlTotal, fallbackTotal, 0);
-  }
-
-  const status = response?.status || 0;
-  const contentLength = Number(response?.headers?.get?.('content-length')) || 0;
-  if (status === 206 && loadedBytesBefore > 0 && contentLength > 0) {
-    return Math.max(loadedBytesBefore + contentLength, urlTotal, fallbackTotal, 0);
-  }
-
-  return Math.max(contentLength, urlTotal, fallbackTotal, 0);
-}
-
-function createRangeHeaderValue(start, end = null) {
-  const offset = Math.max(0, Number(start) || 0);
-  if (offset <= 0 && !Number.isFinite(end)) {
-    return '';
-  }
-
-  if (Number.isFinite(end) && Number(end) >= offset) {
-    return `bytes=${offset}-${Math.max(offset, Number(end) || 0)}`;
-  }
-
-  return `bytes=${offset}-`;
-}
-
-function buildRangeRequestHeaders(headers, rangeStart = 0, rangeEnd = null) {
-  const requestHeaders = {};
-  Object.entries(headers || {}).forEach(([name, value]) => {
-    if (String(name || '').toLowerCase() !== 'range') {
-      requestHeaders[name] = value;
-    }
-  });
-  const rangeValue = createRangeHeaderValue(rangeStart, rangeEnd);
-  if (rangeValue) {
-    requestHeaders.Range = rangeValue;
-  }
-  return requestHeaders;
-}
-
-function mergeUint8Chunks(chunks, totalBytes = 0) {
-  const size = totalBytes || chunks.reduce((sum, chunk) => sum + (chunk?.length || 0), 0);
-  const merged = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    if (!chunk?.length) {
-      continue;
-    }
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return merged.buffer;
-}
+const parseTotalBytesHintFromUrl = (url) => httpUtils.parseTotalBytesHintFromUrl?.(url) || 0;
+const inferTotalBytesFromResponse = (response, loadedBytesBefore = 0, fallbackTotal = 0, requestUrl = '') =>
+  httpUtils.inferTotalBytesFromResponse?.(response, loadedBytesBefore, fallbackTotal, requestUrl) || 0;
+const buildRangeRequestHeaders = (headers, rangeStart = 0, rangeEnd = null) =>
+  httpUtils.createRangeRequestHeaders?.(headers, rangeStart, rangeEnd) || { ...(headers || {}) };
+const mergeUint8Chunks = (chunks, totalBytes = 0) =>
+  byteUtils.concatUint8Arrays?.(chunks, totalBytes) || new Uint8Array(0);
 
 function getParallelFetchConfig(label) {
   const isAudioStream = label === 'audio';

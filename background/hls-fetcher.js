@@ -42,12 +42,10 @@ function getHlsPipeline() {
   return pipeline;
 }
 
-/** 视图已覆盖整个 buffer 时直接复用，避免 muxer 入参再复制一份全量数据 */
+/** muxer 入参转换已收敛到 lib/hls-pipeline.js#toMuxBuffer */
 function toMuxBuffer(bytes) {
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-    return bytes.buffer;
-  }
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const pipeline = globalThis.__OVD_HLS_PIPELINE__ || {};
+  return typeof pipeline.toMuxBuffer === 'function' ? pipeline.toMuxBuffer(bytes) : bytes.buffer;
 }
 
 export class HlsFetcher {
@@ -242,21 +240,14 @@ export class HlsFetcher {
     return merged;
   }
 
-  /** 解析解密密钥：优先支持 EXT-X-KEY 轮换 */
+  /** 解析解密密钥（实现已收敛到 lib/hls-pipeline.js#resolveHlsKeyInfo） */
   async _resolveKeyInfo(pipeline, playlist, playlistText, playlistUrl, headers) {
-    const keyEntries = playlist.keys || [];
-    if (keyEntries.length > 0 && typeof pipeline.resolveHlsKeys === 'function') {
-      return {
-        keys: await pipeline.resolveHlsKeys(keyEntries, headers, {}),
-        segments: playlist.segments,
-      };
+    if (typeof pipeline.resolveHlsKeyInfo === 'function') {
+      return pipeline.resolveHlsKeyInfo(playlist, playlistText, playlistUrl, headers, {});
     }
-
-    if (!playlist.isEncrypted) {
-      return null;
-    }
-
-    return pipeline.parseHlsEncryption(playlistText, playlistUrl, headers) || null;
+    return playlist.isEncrypted
+      ? (await pipeline.parseHlsEncryption?.(playlistText, playlistUrl, headers)) || null
+      : null;
   }
 
   /**
