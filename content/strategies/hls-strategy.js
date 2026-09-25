@@ -30,6 +30,7 @@
       emitRuntimeMessage = () => {},
       getFloatButton = () => null,
       hlsPipeline = {},
+      injectRequestHeaders = null,
       triggerBlobDownload = () => {},
     } = options;
 
@@ -316,7 +317,24 @@
      */
     async function fetchQualities(m3u8Url, headers = {}, requestOptions = {}) {
       const fetchOptions = requestOptions?.fetchOptions || { credentials: 'include' };
-      const text = await hlsPipeline.hlsFetchText(m3u8Url, headers, fetchOptions);
+      // 与下载路径一致：先借 background 的 DNR 规则注入 Referer/CORS，
+      // 否则 YouTube 等 CDN 的 Master Playlist 会因跨域被浏览器拒绝（下拉只剩"自动"）
+      const releaseHeaders = typeof injectRequestHeaders === 'function'
+        ? await injectRequestHeaders(m3u8Url, headers).catch((err) => {
+          console.warn(`[OVD] HLS 画质获取注入请求头失败: ${err.message}`);
+          return null;
+        })
+        : null;
+
+      let text;
+      try {
+        text = await hlsPipeline.hlsFetchText(m3u8Url, headers, fetchOptions);
+      } finally {
+        try {
+          await releaseHeaders?.();
+        } catch (_err) {}
+      }
+
       const master = hlsPipeline.parseHlsMasterPlaylist?.(text, m3u8Url) || null;
 
       if (!master?.isMaster) {

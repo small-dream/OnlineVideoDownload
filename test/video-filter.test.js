@@ -248,3 +248,27 @@ test('mergeYouTubeHlsEntries：不相关条目与无对应 youtube 条目的 HLS
   // 非数组输入安全
   assert.deepEqual(mod.mergeYouTubeHlsEntries(null), []);
 });
+
+// SW 侧顺序要求：必须先合并、再用合并后的列表构造过滤上下文，
+// 否则被吸收的 HLS 条目仍会让 hide 规则把带"需合并"选项的 youtube 行整行隐藏。
+test('合并后的列表不再包含 YouTube HLS 条目（hide 规则不会误伤 youtube 行）', () => {
+  const mod = loadModule();
+  const merged = mod.mergeYouTubeHlsEntries([
+    { type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=gdpvo4w0mZc', videoId: 'gdpvo4w0mZc' },
+    { type: 'hls', url: YT_HLS_URL },
+  ]);
+
+  assert.equal(mod.listYouTubeHlsVideoIds(merged).size, 0);
+  assert.equal(
+    mod.shouldHideRedundantDetection(
+      merged[0],
+      {
+        hasYouTubeAdaptive: true,
+        isYouTubePage: true,
+        isYouTubeWatchPage: true,
+        youtubeHlsVideoIds: mod.listYouTubeHlsVideoIds(merged),
+      }
+    ),
+    false
+  );
+});
