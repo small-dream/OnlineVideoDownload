@@ -24,7 +24,7 @@ async function resolveTabOrigin(tabId) {
  * 可避开 CDN（Cloudflare 等）针对扩展后台裸请求的 403 拦截。
  * 返回 null 表示委托不可用或失败，由调用方回退到 service worker 下载。
  */
-async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta }) {
+async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta, frameId = null }) {
   const tabId = context?.tabId;
   if (!tabId || !m3u8Url) {
     return null;
@@ -40,6 +40,7 @@ async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta }
   }
 
   try {
+    // 委托定向到检测出视频的 frame，避免多 frame 重复执行
     const response = await safeTabMessage(tabId, {
       type: MSG.HLS_DOWNLOAD_DELEGATE || 'HLS_DOWNLOAD_DELEGATE',
       m3u8Url,
@@ -47,7 +48,7 @@ async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta }
       headers,
       options: { fetchOptions: { credentials: 'include' } },
       taskMeta,
-    });
+    }, undefined, frameId != null ? { frameId } : undefined);
 
     if (!response) {
       console.warn(`[OVD] HLS 页面上下文下载不可用（tab=${tabId} 无响应），回退到后台下载`);
@@ -97,11 +98,15 @@ export function createHlsDownloadStrategy() {
         safeTabMessage(context.tabId, msg);
         safeRuntimeMessage(msg);
       };
-      const onProgress = (done, total) => {
+      const onProgress = (done, total, stats) => {
         emitProgress(Math.min(95, Math.round((done / total) * 95)), {
           done,
           phase: 'segments',
           total,
+          // 分片失败未超阈值时通过进度消息告知用户
+          ...(stats?.failedCount > 0
+            ? { failedCount: stats.failedCount, warning: `${stats.failedCount}/${total} 个分片下载失败` }
+            : {}),
         });
       };
 
@@ -110,6 +115,7 @@ export function createHlsDownloadStrategy() {
         headers: videoInfo?.requestHeaders || {},
         m3u8Url: videoInfo?.url,
         taskMeta: context.taskMeta || {},
+        frameId: videoInfo?.frameId,
       });
       if (delegated) {
         return delegated;

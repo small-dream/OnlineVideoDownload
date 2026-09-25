@@ -1789,10 +1789,52 @@ async function startBatchDownload() {
   selectedIndices.clear();
 }
 
+const TOAST_MAX_VISIBLE = 3;
+const TOAST_HIDE_DELAY_MS = { success: 2800, info: 3000, error: 6000 };
+const TOAST_FADE_MS = 240;
+
+function dismissToast(toast) {
+  if (!toast || toast.dataset.dismissing === '1') {
+    return;
+  }
+
+  toast.dataset.dismissing = '1';
+  clearTimeout(toast.__hideTimer);
+  toast.classList.remove('toast-visible');
+  setTimeout(() => toast.remove(), TOAST_FADE_MS);
+}
+
+function removeToastImmediately(toast) {
+  if (!toast) {
+    return;
+  }
+
+  clearTimeout(toast.__hideTimer);
+  toast.remove();
+}
+
 function showMessage(text, type = 'info') {
   if (type === 'error') {
     console.warn(`[OVD] ${text}`);
   }
+
+  const container = document.getElementById('toastContainer');
+  if (!container) {
+    return;
+  }
+
+  const normalizedType = Object.prototype.hasOwnProperty.call(TOAST_HIDE_DELAY_MS, type) ? type : 'info';
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${normalizedType}`;
+  toast.textContent = String(text ?? '');
+  container.appendChild(toast);
+
+  while (container.children.length > TOAST_MAX_VISIBLE) {
+    removeToastImmediately(container.firstElementChild);
+  }
+
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  toast.__hideTimer = setTimeout(() => dismissToast(toast), TOAST_HIDE_DELAY_MS[normalizedType]);
 }
 
 function routeHlsProgress(msg = {}) {

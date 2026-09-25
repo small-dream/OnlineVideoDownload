@@ -40,6 +40,14 @@ test('DASH merge progress and blob handoff keep task metadata', async () => {
 
   const strategy = loadDashStrategy().createDashStrategy({
     hlsPipeline: {
+      async downloadHlsSegments(urls, options) {
+        const buffers = [];
+        for (const url of urls) {
+          buffers.push(await options.fetchBuffer(url));
+          options.onProgress?.(buffers.length, urls.length, { failedCount: 0, retriedCount: 0 });
+        }
+        return { buffers, failedCount: 0, retriedCount: 0 };
+      },
       hlsFetchBuffer(url) {
         return Promise.resolve(url.includes('audio') ? bufferOf(3) : bufferOf(2));
       },
@@ -101,4 +109,50 @@ test('DASH merge progress and blob handoff keep task metadata', async () => {
     taskMeta,
   }]);
   assert.ok(progressMessages.some((item) => item.percent === 70 && item.payload.phase === 'merging'));
+});
+
+test('DASH 分片失败超阈值时中止下载且不触发 blob 下载', async () => {
+  let blobDownloads = 0;
+  const strategy = loadDashStrategy().createDashStrategy({
+    hlsPipeline: {
+      async downloadHlsSegments() {
+        const err = new Error('分片下载失败数超过阈值：1/1 个分片失败（最多允许 0 个），已中止下载');
+        err.code = 'HLS_SEGMENT_DOWNLOAD_FAILED';
+        throw err;
+      },
+      hlsFetchText() {
+        return Promise.resolve('<MPD></MPD>');
+      },
+    },
+    mpdParser: {
+      parseMpdManifest() {
+        return {
+          adaptations: [{ contentType: 'video' }],
+          duration: 10,
+        };
+      },
+      selectBestVideoRepresentation() {
+        return { id: 'video', segments: [{ url: 'https://cdn.example/video.m4s' }] };
+      },
+    },
+    triggerBlobDownload() {
+      blobDownloads++;
+    },
+  });
+
+  await assert.rejects(
+    () => strategy.download({
+      title: 'Demo',
+      type: 'dash',
+      url: 'https://example.com/manifest.mpd',
+    }, {
+      progressReporter: { progress() {}, status() {} },
+    }),
+    (err) => {
+      assert.equal(err.code, 'HLS_SEGMENT_DOWNLOAD_FAILED');
+      assert.match(err.message, /1\/1/);
+      return true;
+    }
+  );
+  assert.equal(blobDownloads, 0);
 });

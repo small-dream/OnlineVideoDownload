@@ -387,3 +387,227 @@ test('parseHlsEncryption forwards fetch options to the key request', async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------
+// parseHlsEncryption fail-fast
+// ---------------------------------------------------------------
+
+test('parseHlsEncryption returns null for METHOD=NONE', async () => {
+  const mod = loadModule();
+  const result = await mod.parseHlsEncryption(
+    '#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:1,\nseg.ts',
+    'https://cdn.example.com/video/index.m3u8',
+    {}
+  );
+  assert.equal(result, null);
+});
+
+test('parseHlsEncryption throws HLS_UNSUPPORTED_ENCRYPTION for SAMPLE-AES', async () => {
+  const mod = loadModule();
+  await assert.rejects(
+    () => mod.parseHlsEncryption(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin"\n#EXTINF:1,\nseg.ts',
+      'https://cdn.example.com/video/index.m3u8',
+      {}
+    ),
+    (err) => {
+      assert.equal(err.code, 'HLS_UNSUPPORTED_ENCRYPTION');
+      assert.match(err.message, /SAMPLE-AES/);
+      return true;
+    }
+  );
+});
+
+test('parseHlsEncryption throws HLS_KEY_FETCH_FAILED when AES-128 key URI is missing', async () => {
+  const mod = loadModule();
+  await assert.rejects(
+    () => mod.parseHlsEncryption(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128\n#EXTINF:1,\nseg.ts',
+      'https://cdn.example.com/video/index.m3u8',
+      {}
+    ),
+    (err) => {
+      assert.equal(err.code, 'HLS_KEY_FETCH_FAILED');
+      return true;
+    }
+  );
+});
+
+test('parseHlsEncryption throws HLS_KEY_FETCH_FAILED when the key request fails', async () => {
+  const mod = loadModule();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => ({ ok: false, status: 403 });
+
+  try {
+    await assert.rejects(
+      () => mod.parseHlsEncryption(
+        '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:1,\nseg.ts',
+        'https://cdn.example.com/video/index.m3u8',
+        {}
+      ),
+      (err) => {
+        assert.equal(err.code, 'HLS_KEY_FETCH_FAILED');
+        assert.match(err.message, /HTTP 403/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------
+// decryptHlsSegments fail-fast
+// ---------------------------------------------------------------
+
+function importAesKey(usages) {
+  return crypto.subtle.importKey('raw', new Uint8Array(16).fill(7), { name: 'AES-CBC' }, false, usages);
+}
+
+test('decryptHlsSegments decrypts AES-128-CBC buffers', async () => {
+  const mod = loadModule();
+  const key = await importAesKey(['encrypt', 'decrypt']);
+  const iv = new Uint8Array(16).fill(3).buffer;
+  const plain = new Uint8Array(32).fill(9).buffer;
+  const cipher = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, key, plain);
+
+  const result = await mod.decryptHlsSegments([cipher], { iv, key });
+  assert.deepEqual(new Uint8Array(result[0]), new Uint8Array(plain));
+});
+
+test('decryptHlsSegments throws HLS_SEGMENT_DECRYPT_FAILED instead of falling back to ciphertext', async () => {
+  const mod = loadModule();
+  const key = await importAesKey(['decrypt']);
+  // 长度不是 16 的倍数，AES-CBC 解密必失败
+  const corrupted = new Uint8Array(7).buffer;
+
+  await assert.rejects(
+    () => mod.decryptHlsSegments([corrupted], { iv: new Uint8Array(16).buffer, key }),
+    (err) => {
+      assert.equal(err.code, 'HLS_SEGMENT_DECRYPT_FAILED');
+      assert.equal(err.segmentIndex, 0);
+      return true;
+    }
+  );
+});
+
+// ---------------------------------------------------------------
+// downloadHlsSegments 重试与阈值中止
+// ---------------------------------------------------------------
+
+function segmentUrls(count) {
+  return Array.from({ length: count }, (_, i) => `https://cdn.example.com/seg${i}.ts`);
+}
+
+test('downloadHlsSegments retries a failed segment and succeeds', async () => {
+  const mod = loadModule();
+  let attempts = 0;
+
+  const result = await mod.downloadHlsSegments(segmentUrls(2), {
+    fetchBuffer: async (url) => {
+      if (url.includes('seg1')) {
+        attempts++;
+        if (attempts < 3) {
+          throw new Error('HTTP 500');
+        }
+      }
+      return new Uint8Array(4).buffer;
+    },
+    retryDelays: [0, 0, 0],
+  });
+
+  assert.equal(attempts, 3);
+  assert.equal(result.failedCount, 0);
+  assert.equal(result.retriedCount, 1);
+  assert.equal(result.buffers[1].byteLength, 4);
+});
+
+test('downloadHlsSegments gives up after 3 retries and counts the failure', async () => {
+  const mod = loadModule();
+  let attempts = 0;
+
+  // 20 个分片允许最多 2 个失败，此处仅 1 个彻底失败，不中止
+  const result = await mod.downloadHlsSegments(segmentUrls(20), {
+    fetchBuffer: async (url) => {
+      if (url.includes('seg0.ts')) {
+        attempts++;
+        throw new Error('HTTP 500');
+      }
+      return new Uint8Array(2).buffer;
+    },
+    retryDelays: [0, 0, 0],
+  });
+
+  assert.equal(attempts, 4);
+  assert.equal(result.failedCount, 1);
+  assert.equal(result.buffers[0].byteLength, 0);
+  assert.equal(result.buffers[1].byteLength, 2);
+});
+
+test('downloadHlsSegments aborts when the failure ratio exceeds the threshold', async () => {
+  const mod = loadModule();
+
+  // 20 个分片阈值 floor(20*0.1)=2，3 个失败必须中止
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(20), {
+      fetchBuffer: async (url) => {
+        if (/seg[0-2]\.ts/.test(url)) {
+          throw new Error('HTTP 500');
+        }
+        return new Uint8Array(2).buffer;
+      },
+      retryDelays: [0, 0, 0],
+    }),
+    (err) => {
+      assert.equal(err.code, 'HLS_SEGMENT_DOWNLOAD_FAILED');
+      assert.equal(err.failedCount, 3);
+      assert.equal(err.totalSegments, 20);
+      assert.match(err.message, /3\/20/);
+      return true;
+    }
+  );
+});
+
+test('downloadHlsSegments aborts on any failure when there are at most 10 segments', async () => {
+  const mod = loadModule();
+
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(5), {
+      fetchBuffer: async (url) => {
+        if (url.includes('seg4')) {
+          throw new Error('HTTP 404');
+        }
+        return new Uint8Array(2).buffer;
+      },
+      retryDelays: [0, 0, 0],
+    }),
+    (err) => {
+      assert.equal(err.code, 'HLS_SEGMENT_DOWNLOAD_FAILED');
+      assert.match(err.message, /1\/5/);
+      return true;
+    }
+  );
+});
+
+test('downloadHlsSegments reports progress with failure stats below the threshold', async () => {
+  const mod = loadModule();
+  const progress = [];
+
+  const result = await mod.downloadHlsSegments(segmentUrls(20), {
+    fetchBuffer: async (url) => {
+      if (url.includes('seg0.ts') || url.includes('seg1.ts')) {
+        throw new Error('HTTP 500');
+      }
+      return new Uint8Array(2).buffer;
+    },
+    onProgress: (done, total, stats) => progress.push({ done, total, ...stats }),
+    retryDelays: [0, 0, 0],
+  });
+
+  assert.equal(result.failedCount, 2);
+  assert.equal(progress.length, 20);
+  assert.equal(progress.at(-1).done, 20);
+  assert.equal(progress.at(-1).total, 20);
+  assert.equal(progress.at(-1).failedCount, 2);
+});

@@ -56,9 +56,70 @@ function isSameYouTubeVideo(left = {}, right = {}) {
   return !!leftVideoId && leftVideoId === rightVideoId;
 }
 
+function isNonEmptyObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
+/**
+ * 合并已注册条目与新上报信息：新值为空（空对象/空字符串/null/0）时保留旧值，
+ * 避免后到的空 requestHeaders 等冲掉已捕获的 Origin/Referer/Cookie。
+ */
+function mergeVideoInfo(existing = {}, info = {}) {
+  const merged = { ...existing, ...info };
+
+  if (!isNonEmptyObject(info.requestHeaders) && isNonEmptyObject(existing.requestHeaders)) {
+    merged.requestHeaders = existing.requestHeaders;
+  }
+
+  for (const key of ['title', 'mimeType', 'filename']) {
+    if ((info[key] == null || info[key] === '') && existing[key]) {
+      merged[key] = existing[key];
+    }
+  }
+
+  for (const key of ['fileSize', 'size', 'duration']) {
+    if (!(Number(info[key]) > 0) && Number(existing[key]) > 0) {
+      merged[key] = existing[key];
+    }
+  }
+
+  return merged;
+}
+
 export class VideoRegistry {
-  constructor() {
+  constructor(snapshotMirror = null) {
     this._store = new Map();
+    // SessionMirror 实例，检测列表镜像到 storage.session，SW 重启后 popup 仍可见
+    this._mirror = snapshotMirror;
+  }
+
+  /** 注册表镜像到 storage.session（去抖写入） */
+  _persist() {
+    if (!this._mirror) return;
+    const snapshot = {};
+    for (const [tabId, tabStore] of this._store) {
+      snapshot[tabId] = [...tabStore.values()];
+    }
+    this._mirror.scheduleSave(snapshot);
+  }
+
+  /** SW 启动时从快照恢复注册表 */
+  restoreAll(snapshot = {}) {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    for (const [tabId, videos] of Object.entries(snapshot)) {
+      const numericTabId = Number(tabId);
+      if (!Number.isFinite(numericTabId) || !Array.isArray(videos)) continue;
+      const tabStore = new Map();
+      for (const info of videos) {
+        const key = getVideoRegistryKey(info);
+        if (key) {
+          tabStore.set(key, info);
+        }
+      }
+      if (tabStore.size) {
+        this._store.set(numericTabId, tabStore);
+      }
+    }
   }
 
   /**
@@ -90,13 +151,17 @@ export class VideoRegistry {
     }
 
     if (existing) {
-      const merged = { ...existing, ...info, tabId, timestamp: existing.timestamp || Date.now() };
+      const merged = { ...mergeVideoInfo(existing, info), tabId, timestamp: existing.timestamp || Date.now() };
       const changed = JSON.stringify(existing) !== JSON.stringify(merged);
       if (existingKey !== registryKey) {
         tabStore.delete(existingKey);
       }
       tabStore.set(registryKey, merged);
-      return changed || existingKey !== registryKey ? 'updated' : 'unchanged';
+      const result = changed || existingKey !== registryKey ? 'updated' : 'unchanged';
+      if (result === 'updated') {
+        this._persist();
+      }
+      return result;
     }
 
     tabStore.set(registryKey, {
@@ -109,6 +174,7 @@ export class VideoRegistry {
       ...info,
     });
 
+    this._persist();
     return 'new';
   }
 
@@ -134,6 +200,27 @@ export class VideoRegistry {
    */
   clearTab(tabId) {
     this._store.delete(tabId);
+    this._persist();
+  }
+
+  /**
+   * 清理指定 tab 中某个 frame 上报的条目（iframe 导航/卸载时）
+   * @param {number} tabId
+   * @param {number} frameId
+   */
+  clearFrame(tabId, frameId) {
+    const tabStore = this._store.get(tabId);
+    if (!tabStore) return;
+
+    for (const [key, info] of tabStore) {
+      if (info?.frameId === frameId) {
+        tabStore.delete(key);
+      }
+    }
+    if (!tabStore.size) {
+      this._store.delete(tabId);
+    }
+    this._persist();
   }
 
   /**
@@ -150,6 +237,7 @@ export class VideoRegistry {
         info.title = pickDisplayName({ tabTitle, url, fallback: '' });
       }
     }
+    this._persist();
   }
 
   /**

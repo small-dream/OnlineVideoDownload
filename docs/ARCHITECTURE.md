@@ -97,11 +97,14 @@ Public surface:
 - `hlsFetch`
 - `hlsFetchText(url, headers, options)`
 - `hlsFetchBuffer(url, headers, options)`
+- `downloadHlsSegments(urls, options)`
 
 Notes:
 
 - `options.credentials` 用于页面上下文请求：content script 中带 Cookie 的跨域请求若被目标站 CORS 拒绝（TypeError），`hlsFetch` 会自动去掉 credentials 重试一次，保证兼容只返回 `Access-Control-Allow-Origin: *` 的 CDN。
 - `parseHlsEncryption(m3u8, baseUrl, headers, options)` 会把同样的 options 透传给密钥请求。
+- 加密相关错误均为 fail-fast：`parseHlsEncryption` 在密钥获取失败（`HLS_KEY_FETCH_FAILED`）或加密方式非 AES-128/NONE（`HLS_UNSUPPORTED_ENCRYPTION`）时抛错；`decryptHlsSegments` 解密失败抛 `HLS_SEGMENT_DECRYPT_FAILED`，绝不回退使用密文。
+- `downloadHlsSegments` 是 background/content 共用的分片下载循环：失败分片按 `HLS_SEGMENT_RETRY_DELAYS` 指数退避重试（最多 3 次），最终失败数超过 `HLS_MAX_FAILED_RATIO`（分片总数 ≤ 10 时零容忍）时抛 `HLS_SEGMENT_DOWNLOAD_FAILED` 中止任务，不产出含空洞的文件；未超阈值时通过 `onProgress(done, total, { failedCount, retriedCount })` 上报失败/重试统计。
 
 ### `lib/ovd-logger.js`
 
@@ -622,6 +625,14 @@ Manifest content-script order is now:
 
 This order is required because content modules communicate through `globalThis` factories.
 
+## Frame Scope (iframe 嵌入检测)
+
+Content scripts 以 `all_frames: true` 注入所有子框架，用于检测第三方页面嵌入的 YouTube embed / Vimeo 等播放器。约定：
+
+- `chrome.tabs.sendMessage` 默认广播到 tab 内所有 frame；委托类消息（`FETCH_BLOB`、`HLS_DOWNLOAD_DELEGATE`、`SOURCE_DOWNLOAD`、`MEDIA_STREAM_*`、`REVOKE_OBJECT_URL`）必须按 `frameId` 定向，由 `lib/browser-compat.js` 的 `safeTabMessage`/`sendTabMessageAsync` 自动从 `message.frameId` / `meta.frameId` / `taskMeta(.videoInfo).frameId` 提取，或通过显式 options 传入。
+- 注册表条目记录 `frameId`（`VIDEO_DETECTED` 来自 `sender.frameId`，webRequest 来自 `details.frameId`）；同 tab 多 frame 上报按 URL 去重合并为单条。
+- 子框架导航触发的 `CLEAR_TAB_VIDEOS` 只清理该 frame 的条目（`VideoRegistry.clearFrame`）；主框架导航仍为 tab 级清理。
+
 ## Page Script Injection Order
 
 The page-context loader injects child scripts in this order:
@@ -655,6 +666,7 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. |
 | 1.15.0 | 2026-09-24 | HLS downloads now run in the page context first: `hls-download-strategy` delegates to `HLS_DOWNLOAD_DELEGATE` so requests carry page cookies/origin/`Sec-Fetch` (fixes CDN WAF 403s seen from service-worker fetches), echoes the tab origin in CORS response headers via `injectHeaders(url, headers, { corsOrigin })`, adds optional `credentials` support to `hlsFetch`/`hlsFetchText`/`hlsFetchBuffer`/`parseHlsEncryption`, returns the real `downloadId` from the delegated blob download, and falls back to `HlsFetcher` when the content script is unavailable or fails. |
 | 1.14.1 | 2026-06-12 | Fixed subdirectory setting not working for content-script blob downloads (HLS, blob, DASH). `triggerBlobDownload` now delegates to service worker via `DOWNLOAD_BLOB_DATA` message so `chrome.downloads.download` handles the subdirectory path correctly; falls back to `<a download>` only when the service worker is unavailable. |
 | 1.14.0 | 2026-06-12 | Added `downloadSubdir` setting (default `OnlineVideoDownload`) to save downloads into a subdirectory under Chrome's default download folder. `Downloader._buildFilenameBase` and `downloadBlobData` now prepend the configured subdirectory. |

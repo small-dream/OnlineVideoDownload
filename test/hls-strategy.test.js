@@ -17,6 +17,14 @@ function createPipeline(overrides = {}) {
   const fetchCalls = [];
   const pipeline = {
     decryptHlsSegments: async (buffers) => buffers,
+    downloadHlsSegments: async (urls, options) => {
+      const buffers = [];
+      for (const url of urls) {
+        buffers.push(await options.fetchBuffer(url));
+        options.onProgress?.(buffers.length, urls.length, { failedCount: 0, retriedCount: 0 });
+      }
+      return { buffers, failedCount: 0, retriedCount: 0 };
+    },
     ensureExtension: (name, ext) => `${name}${ext}`,
     hlsFetchBuffer: async (url, headers, options) => {
       fetchCalls.push({ headers, options, url });
@@ -135,4 +143,60 @@ test('HLS 委托下载在 m3u8 无分片时报错', async () => {
     () => handler.handle('https://cdn.example.com/index.m3u8', 'video', {}, {}),
     /没有找到分片/
   );
+});
+
+test('HLS 委托下载在分片失败超阈值时中止且不触发浏览器下载', async () => {
+  const { pipeline } = createPipeline({
+    downloadHlsSegments: async () => {
+      const err = new Error('分片下载失败数超过阈值：1/1 个分片失败（最多允许 0 个），已中止下载');
+      err.code = 'HLS_SEGMENT_DOWNLOAD_FAILED';
+      throw err;
+    },
+  });
+  let blobDownloads = 0;
+  const handler = loadHlsStrategy().createHlsDelegateHandler({
+    hlsPipeline: pipeline,
+    triggerBlobDownload: () => {
+      blobDownloads++;
+      return Promise.resolve({ downloadId: 1, ok: true });
+    },
+  });
+
+  await assert.rejects(
+    () => handler.handle('https://cdn.example.com/index.m3u8', 'video', {}, {}),
+    (err) => {
+      assert.equal(err.code, 'HLS_SEGMENT_DOWNLOAD_FAILED');
+      assert.match(err.message, /1\/1/);
+      return true;
+    }
+  );
+  assert.equal(blobDownloads, 0);
+});
+
+test('HLS 委托下载在分片失败未超阈值时通过进度消息告知用户', async () => {
+  const { pipeline } = createPipeline({
+    downloadHlsSegments: async (urls, options) => {
+      const buffers = [];
+      for (const url of urls) {
+        buffers.push(await options.fetchBuffer(url));
+      }
+      buffers.push(new ArrayBuffer(0));
+      options.onProgress?.(urls.length, urls.length, { failedCount: 1, retriedCount: 0 });
+      return { buffers, failedCount: 1, retriedCount: 0 };
+    },
+  });
+  const progressMessages = [];
+  const handler = loadHlsStrategy().createHlsDelegateHandler({
+    emitRuntimeMessage: (message) => progressMessages.push(message),
+    hlsPipeline: pipeline,
+    triggerBlobDownload: () => Promise.resolve({ downloadId: 1, ok: true }),
+  });
+
+  const result = await handler.handle('https://cdn.example.com/index.m3u8', 'video', {}, {});
+
+  assert.equal(result.failedCount, 1);
+  const warning = progressMessages.find((message) => message.warning);
+  assert.ok(warning, 'expected a progress message carrying the failure warning');
+  assert.equal(warning.failedCount, 1);
+  assert.match(warning.warning, /1\/1 个分片下载失败/);
 });
