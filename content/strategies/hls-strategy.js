@@ -427,8 +427,8 @@
 
       try {
         const blob = await muxer.mergeFmp4Streams(
-          videoBytes.buffer.slice(videoBytes.byteOffset, videoBytes.byteOffset + videoBytes.byteLength),
-          audioBytes.buffer.slice(audioBytes.byteOffset, audioBytes.byteOffset + audioBytes.byteLength),
+          toMuxBuffer(videoBytes),
+          toMuxBuffer(audioBytes),
           (percent) => getFloatButton()?.showProgress(percent)
         );
         const mergedBuffer = await blob.arrayBuffer();
@@ -439,6 +439,14 @@
         console.warn(`[OVD] 独立音轨合并失败（${err.message}），改为单独保存音轨文件`);
         return saveAudioSeparately(audioBytes, audioPlaylist, filename, taskMeta, audioUrl);
       }
+    }
+
+    /** 视图已覆盖整个 buffer 时直接复用，避免 muxer 入参再复制一份全量数据 */
+    function toMuxBuffer(bytes) {
+      if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+        return bytes.buffer;
+      }
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     }
 
     /** 分离文件降级：音轨单独落盘，返回 { separate: true, filename } */
