@@ -64,7 +64,7 @@
 - 内容侧（页面上下文）路径仍是纯内存：OPFS 只有扩展 origin 可见。已在下载前用播放列表估算体积，预估超限直接跳过内容侧（`HLS_CONTENT_SIZE_SKIP`），因此"先下满 2 GB 再重下"的情况已消除；估算不准（例如服务器码率远低于标称）时仍可能落在回退路径上。
 - DASH / Bilibili 合并仍需整体持有两路数据（fMP4 muxer 接口限制），超过上限时已降级为分离文件，但没有流式 mux。
 - File System Access API（用户直接选保存位置并流式写入）未做：需要可见页面 + 用户手势，属 UX 变更。
-- `offscreen/offscreen.js` 的小文件中转（base64 分片）仍会再复制一份，仅在内存路径上。
+- `offscreen/offscreen.js` 的小文件中转（base64 分片）仍会再复制一份，仅在内存路径上。到这一步 P1 全部完成（muxer 零拷贝、OPFS 落盘、写入与下载重叠）。
 - HLS 直播续录、`EXT-X-PROGRAM-DATE-TIME` 对齐、DRM（SAMPLE-AES/CENC）仍然不支持。
 
 ## 第四波：工程健康

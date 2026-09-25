@@ -1036,7 +1036,11 @@ test('downloadHlsSegments 使用 sink 时按分片顺序写入并放弃整份 bu
   assert.equal(result.totalBytes, 36);
   assert.equal(sink.byteLength, 36);
   // 关键：驻留窗口不超过并发数，而不是随总分片数增长
-  assert.ok(maxInFlight.value <= 3, `驻留分片数应 ≤ 并发数，实际 ${maxInFlight.value}`);
+  // 写入与下载重叠后，未落盘窗口 = sinkWindow(默认=并发数) + 当前批次，仍是常数
+  assert.ok(
+    maxInFlight.value <= 6,
+    `驻留分片数应有界（≤ sinkWindow + 并发数），实际 ${maxInFlight.value}`
+  );
 });
 
 test('downloadHlsSegments 使用 sink 时跳过失败分片但保持后续顺序', async () => {
@@ -1098,4 +1102,102 @@ test('downloadHlsSegments 在写入 sink 前按分片顺序执行 transform', as
     { index: 2, value: 2 },
   ]);
   assert.deepEqual(writes, [[100], [101], [102]]);
+});
+
+// ---------------------------------------------------------------
+// P1：下载与 sink 落盘重叠（写入串行但不再挡住下载）
+// ---------------------------------------------------------------
+
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('downloadHlsSegments 让下载与 sink 写入重叠，同时保持写入串行', async () => {
+  const mod = loadModule();
+  let writesInProgress = 0;
+  let maxConcurrentWrites = 0;
+  let downloadsStartedDuringWrite = 0;
+  const writeOrder = [];
+
+  const sink = {
+    async write(chunk, meta) {
+      writesInProgress += 1;
+      maxConcurrentWrites = Math.max(maxConcurrentWrites, writesInProgress);
+      writeOrder.push(meta.index);
+      await sleepMs(5);
+      writesInProgress -= 1;
+    },
+  };
+
+  await mod.downloadHlsSegments(segmentUrls(20), {
+    concurrency: 5,
+    fetchBuffer: async () => {
+      if (writesInProgress > 0) {
+        downloadsStartedDuringWrite += 1;
+      }
+      await sleepMs(2);
+      return new Uint8Array(4).buffer;
+    },
+    retryDelays: [0],
+    sink,
+    sinkWindow: 5,
+  });
+
+  assert.ok(downloadsStartedDuringWrite > 0, '下载应与写入重叠，而不是写完才继续下');
+  assert.equal(maxConcurrentWrites, 1, '写入必须串行，避免顺序文件错位');
+  assert.deepEqual(writeOrder, Array.from({ length: 20 }, (_v, index) => index));
+});
+
+test('重叠写入明显快于逐批等待（同一负载对比）', async () => {
+  const mod = loadModule();
+
+  const run = async (sinkWindow) => {
+    const sink = { async write() { await sleepMs(6); } };
+    const startedAt = Date.now();
+    await mod.downloadHlsSegments(segmentUrls(10), {
+      concurrency: 5,
+      fetchBuffer: async () => {
+        // 抓取等待占主导：串行实现会把每个 batch 的这段等待叠加到写入之后
+        await sleepMs(20);
+        return new Uint8Array(4).buffer;
+      },
+      retryDelays: [0],
+      sink,
+      sinkWindow,
+    });
+    return Date.now() - startedAt;
+  };
+
+  const serial = await run(1);
+  const overlapped = await run(1000);
+
+  // 理论收益 = (批次数 - 1) × 单批抓取等待 ≈ 20ms，这里按下界断言，避免定时器抖动导致误报
+  assert.ok(
+    serial - overlapped >= 15,
+    `重叠应省下至少一批抓取等待（serial=${serial}ms overlapped=${overlapped}ms）`
+  );
+  assert.ok(overlapped <= serial, '重叠不应比串行更慢');
+});
+
+test('sink 写入失败会中止下载并透出错误码', async () => {
+  const mod = loadModule();
+
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(12), {
+      concurrency: 2,
+      fetchBuffer: async () => new Uint8Array(4).buffer,
+      retryDelays: [0],
+      sink: {
+        async write(_chunk, meta) {
+          if (meta.index === 2) {
+            const err = new Error('模拟磁盘写满');
+            err.code = 'OPFS_WRITE_FAILED';
+            throw err;
+          }
+        },
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'OPFS_WRITE_FAILED');
+      return true;
+    }
+  );
 });
