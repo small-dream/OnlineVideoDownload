@@ -4,6 +4,7 @@
   "name": "Online Video Downloader",
   "version": "1.0.0",
   "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
+  "default_locale": "zh_CN",
 
   "permissions": [
     "webRequest",

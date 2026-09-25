@@ -12,6 +12,9 @@ const bilibiliQualityStore = globalThis.__OVD_BILIBILI_QUALITY_STORE__ || {};
 const generalSettingsStore = globalThis.__OVD_GENERAL_SETTINGS_STORE__ || {};
 const popupErrorMessages = globalThis.__OVD_POPUP__ || {};
 const MSG = messageTypes;
+// 国际化：缺 key 时退回中文原文（见 lib/i18n.js）
+const i18n = globalThis.__OVD_I18N__ || {};
+const t = typeof i18n.t === 'function' ? i18n.t : (_key, fallback) => fallback;
 
 const {
   deriveTitleFromUrl,
@@ -58,10 +61,10 @@ const batchDownloadBtnEl = document.getElementById('batchDownloadBtn');
 const selectedIndices = new Set();
 
 const DOWNLOAD_DISPLAY_LABELS = Object.freeze({
-  completed: '已完成',
-  downloading: '下载中',
-  idle: '下载',
-  pending: '下载中',
+  completed: t('download_buttonCompleted', '已完成'),
+  downloading: t('download_buttonDownloading', '下载中'),
+  idle: t('download_button', '下载'),
+  pending: t('download_buttonDownloading', '下载中'),
 });
 
 let currentTabId = null;
@@ -288,13 +291,15 @@ batchDownloadBtnEl?.addEventListener('click', async () => {
   }
 
   const batchSize = selectedIndices.size;
-  showMessage(`开始批量下载 ${batchSize} 个视频。`, 'success');
+  showMessage(t('download_startedBatch', '开始批量下载 $1 个视频。', [String(batchSize)]), 'success');
   await startBatchDownload();
   videoListEl.querySelectorAll('.video-checkbox').forEach((checkbox) => {
     checkbox.checked = false;
   });
   updateBatchSelection();
 });
+
+globalThis.__OVD_I18N__?.applyI18n?.();
 
 init();
 
@@ -440,9 +445,9 @@ function wirePopupSettings() {
     el?.addEventListener('change', async () => {
       try {
         await generalSettingsStore.updateSettings?.({ [key]: readValue(el) });
-        showMessage('设置已保存。', 'success');
+        showMessage(t('settings_saved', '设置已保存。'), 'success');
       } catch (err) {
-        showMessage(`设置保存失败: ${err.message}`, 'error');
+        showMessage(t('settings_saveFailed', '设置保存失败: $1', [err.message]), 'error');
       }
     });
   });
@@ -507,7 +512,7 @@ async function loadHistory() {
 function renderHistory(records) {
   historyListEl.innerHTML = '';
   if (historySubtitleEl) {
-    historySubtitleEl.textContent = `共 ${records.length} 条记录`;
+    historySubtitleEl.textContent = t('history_count', '共 $1 条记录', [String(records.length)]);
   }
   if (clearHistoryBtnEl) {
     clearHistoryBtnEl.disabled = records.length === 0;
@@ -588,7 +593,7 @@ async function openHistoryDownload(downloadId) {
       throw new Error(response.error || '无法打开下载文件夹');
     }
   } catch (err) {
-    showMessage(`无法打开下载文件夹: ${err.message}`, 'error');
+    showMessage(t('history_openFailed', '无法打开下载文件夹: $1', [err.message]), 'error');
   }
 }
 
@@ -609,14 +614,14 @@ async function deleteHistoryRecord(recordId, itemEl) {
     itemEl.remove();
     const remaining = historyListEl.querySelectorAll('.history-item').length;
     if (historySubtitleEl) {
-      historySubtitleEl.textContent = `共 ${remaining} 条记录`;
+      historySubtitleEl.textContent = t('history_count', '共 $1 条记录', [String(remaining)]);
     }
     if (clearHistoryBtnEl) {
       clearHistoryBtnEl.disabled = remaining === 0;
     }
     setHidden(historyEmptyEl, remaining > 0);
   } catch (err) {
-    showMessage(`删除失败: ${err.message}`, 'error');
+    showMessage(t('history_deleteFailed', '删除失败: $1', [err.message]), 'error');
   }
 }
 
@@ -641,7 +646,7 @@ async function clearHistory() {
     if (clearHistoryBtnEl) {
       clearHistoryBtnEl.disabled = historyListEl.querySelectorAll('.history-item').length === 0;
     }
-    showMessage(`清空失败: ${err.message}`, 'error');
+    showMessage(t('history_clearFailed', '清空失败: $1', [err.message]), 'error');
   }
 }
 
@@ -1008,8 +1013,8 @@ function renderTasks(tasks = []) {
   if (tasksSubtitleEl) {
     const runningCount = tasks.filter((task) => task.status === 'running' || task.status === 'retrying').length;
     tasksSubtitleEl.textContent = runningCount > 0
-      ? `${runningCount} 个任务进行中`
-      : `共 ${tasks.length} 个任务`;
+      ? t('tasks_running', '$1 个任务进行中', [String(runningCount)])
+      : t('tasks_total', '共 $1 个任务', [String(tasks.length)]);
   }
   setHidden(tasksEmptyEl, tasks.length > 0);
 
@@ -1050,7 +1055,7 @@ function renderTasks(tasks = []) {
       const cancelButton = document.createElement('button');
       cancelButton.type = 'button';
       cancelButton.className = 'task-action-btn danger';
-      cancelButton.textContent = '取消';
+      cancelButton.textContent = t('tasks_cancel', '取消');
       cancelButton.addEventListener('click', () => cancelRunningTask(task, cancelButton));
       actions?.appendChild(cancelButton);
     }
@@ -1059,7 +1064,7 @@ function renderTasks(tasks = []) {
       const retryButton = document.createElement('button');
       retryButton.type = 'button';
       retryButton.className = 'task-action-btn';
-      retryButton.textContent = '重试';
+      retryButton.textContent = t('tasks_retry', '重试');
       retryButton.addEventListener('click', () => retryTask(task.taskId, retryButton));
       actions?.appendChild(retryButton);
     }
@@ -1068,7 +1073,7 @@ function renderTasks(tasks = []) {
       const openButton = document.createElement('button');
       openButton.type = 'button';
       openButton.className = 'task-action-btn secondary';
-      openButton.textContent = '打开位置';
+      openButton.textContent = t('tasks_openLocation', '打开位置');
       openButton.addEventListener('click', () => openHistoryDownload(task.downloadId));
       actions?.appendChild(openButton);
     }
@@ -1077,7 +1082,7 @@ function renderTasks(tasks = []) {
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
       deleteButton.className = 'task-action-btn danger';
-      deleteButton.textContent = '删除';
+      deleteButton.textContent = t('history_delete', '删除');
       deleteButton.addEventListener('click', () => deleteTask(task.taskId, deleteButton));
       actions?.appendChild(deleteButton);
     }
@@ -1088,11 +1093,11 @@ function renderTasks(tasks = []) {
 
 function getTaskStatusLabel(status) {
   const labels = {
-    complete: '已完成',
-    failed: '失败',
-    interrupted: '已中断',
-    retrying: '重试中',
-    running: '下载中',
+    complete: t('taskStatus_complete', '已完成'),
+    failed: t('taskStatus_failed', '失败'),
+    interrupted: t('taskStatus_interrupted', '已中断'),
+    retrying: t('taskStatus_retrying', '重试中'),
+    running: t('taskStatus_running', '下载中'),
   };
   return labels[status] || '下载中';
 }
@@ -1146,12 +1151,12 @@ async function cancelRunningTask(task = {}, button = null) {
     }
 
     showMessage(
-      cancelled ? '任务已取消。' : '该任务当前无法取消，可能已在写入文件。',
+      cancelled ? t('tasks_cancelled', '任务已取消。') : t('tasks_cancelUnavailable', '该任务当前无法取消，可能已在写入文件。'),
       cancelled ? 'success' : 'info'
     );
     await loadDownloadTasks({ renderTaskList: true });
   } catch (err) {
-    showMessage(`取消失败: ${err.message}`, 'error');
+    showMessage(t('tasks_cancelFailed', '取消失败: $1', [err.message]), 'error');
   } finally {
     if (button) {
       button.disabled = false;
@@ -1177,7 +1182,7 @@ async function retryTask(taskId, button) {
     }
     await loadDownloadTasks({ renderTaskList: true });
   } catch (err) {
-    showMessage(`重试失败: ${err.message}`, 'error');
+    showMessage(t('tasks_retryFailed', '重试失败: $1', [err.message]), 'error');
     await loadDownloadTasks({ renderTaskList: true });
   }
 }
@@ -1189,7 +1194,7 @@ async function deleteTask(taskId, button) {
   try {
     if (button) {
       button.disabled = true;
-      button.textContent = '删除中';
+      button.textContent = t('history_deleting', '删除中');
     }
     const response = await sendRuntimeMessageAsync({
       taskId,
@@ -1200,7 +1205,7 @@ async function deleteTask(taskId, button) {
     }
     await loadDownloadTasks({ renderTaskList: true });
   } catch (err) {
-    showMessage(`删除失败: ${err.message}`, 'error');
+    showMessage(t('history_deleteFailed', '删除失败: $1', [err.message]), 'error');
     await loadDownloadTasks({ renderTaskList: true });
   }
 }
@@ -1211,19 +1216,19 @@ function renderVideos(videos) {
   setHidden(listHeaderEl, videos.length === 0);
   if (listCountEl) {
     listCountEl.textContent = videos.length > 0
-      ? `检测到 ${videos.length} 个视频资源`
-      : '未检测到视频';
+      ? t('list_detected', '检测到 $1 个视频资源', [String(videos.length)])
+      : t('list_none', '未检测到视频');
   }
 
   if (videos.length === 0) {
-    subtitleEl.textContent = '未检测到视频';
+    subtitleEl.textContent = t('list_none', '未检测到视频');
     selectedIndices.clear();
     setHidden(emptyStateEl, false);
     updateBatchSelection();
     return;
   }
 
-  subtitleEl.textContent = `检测到 ${videos.length} 个视频资源`;
+  subtitleEl.textContent = t('list_detected', '检测到 $1 个视频资源', [String(videos.length)]);
   setHidden(emptyStateEl, true);
 
   videos.forEach((video, index) => {
@@ -1241,7 +1246,7 @@ function createVideoItem(video, index) {
     ? (getMediaFormatLabel?.(video) || getVideoTypeLabel(video.type))
     : getVideoTypeLabel(video.type);
   const typeClass = 'type-' + (video.type || 'direct').replace(/[^a-z-]/g, '');
-  const title = escapeHtml(video.title || deriveTitleFromUrl(video.url) || '未知视频');
+  const title = escapeHtml(video.title || deriveTitleFromUrl(video.url) || t('title_unknownVideo', '未知视频'));
   const isDrm = video.type === 'drm-detected';
   const durationText = formatDuration(video.duration || 0) || '--:--';
   const thumbnailUrl = normalizeAssetUrl(video.thumbnail || video.cover || video.poster || '');
@@ -1266,7 +1271,7 @@ function createVideoItem(video, index) {
         ${buildHlsControlsHtml(video, index)}
         ${buildMetaHtml(video)}
         <button class="dl-btn" data-index="${index}" ${isDrm ? 'disabled' : ''}>
-          <span class="dl-label">${isDrm ? '受保护' : '下载'}</span>
+          <span class="dl-label">${isDrm ? t('download_buttonProtected', '受保护') : t('download_button', '下载')}</span>
           ${isDrm ? '' : `
             <span class="dl-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1380,29 +1385,29 @@ function buildNoteHtml(video) {
     const qualityOptions = streamUtils.listAvailableVideoQualities?.(video) || [];
     const hasCipherOnly = qualityOptions.some((item) => item.hasSignatureCipherOnly && !item.hasDirectUrl);
     if (hasCipherOnly) {
-      return '<div class="note-text">部分高分辨率仍需要补充签名解析，扩展会继续尝试补全可下载地址。</div>';
+      return `<div class="note-text">${t('note_youtubeSignature', '部分高分辨率仍需要补充签名解析，扩展会继续尝试补全可下载地址。')}</div>`;
     }
     return '<div class="note-text">YouTube 下载模式可在设置中切换。</div>';
   }
 
   if (video.type === 'bilibili-meta') {
-    return '<div class="note-text">Bilibili 会在页面侧解析并合并音视频。</div>';
+    return `<div class="note-text">${t('note_bilibili', 'Bilibili 会在页面侧解析并合并音视频。')}</div>`;
   }
 
   if (video.type === 'blob') {
-    return '<div class="note-text">Blob 资源会先提取真实数据，再触发保存。</div>';
+    return `<div class="note-text">${t('note_blob', 'Blob 资源会先提取真实数据，再触发保存。')}</div>`;
   }
 
   if (video.type === 'hls') {
-    return '<div class="note-text">HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。</div>';
+    return `<div class="note-text">${t('note_hls', 'HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。')}</div>`;
   }
 
   if (video.type === 'audio') {
-    return '<div class="note-text">音频资源会走后台直链下载流程。</div>';
+    return `<div class="note-text">${t('note_audio', '音频资源会走后台直链下载流程。')}</div>`;
   }
 
   if (video.type === 'drm-detected') {
-    return '<div class="note-text">该资源受 DRM 保护，无法下载。</div>';
+    return `<div class="note-text">${t('note_drm', '该资源受 DRM 保护，无法下载。')}</div>`;
   }
 
   return '';
@@ -1438,11 +1443,11 @@ function getYouTubeQualityOptions(video) {
   qualityOptions.forEach((item) => {
     let suffix = '';
     if (!item.hasDirectUrl && item.hasSignatureCipherOnly) {
-      suffix = '（待签名解析）';
+      suffix = t('quality_needsSignature', '（待签名解析）');
     } else if (item.hasCombined) {
-      suffix = '（含音频）';
+      suffix = t('quality_withAudio', '（含音频）');
     } else if (item.hasAdaptive) {
-      suffix = '（需合并）';
+      suffix = t('quality_needsMerge', '（需合并）');
     }
 
     options.push({
@@ -1498,7 +1503,7 @@ function buildHlsControlsHtml(video, index) {
       <label class="control-group">
         <span class="control-label">清晰度</span>
         <select class="control-select hls-quality-select" data-index="${index}">
-          <option value="" selected>自动（最高画质）</option>
+          <option value="" selected>${t('quality_auto', '自动（最高画质）')}</option>
         </select>
       </label>
     </div>
@@ -1539,7 +1544,7 @@ function wireHlsControls(item, index) {
         return;
       }
 
-      qualitySelect.innerHTML = '<option value="">自动（最高画质）</option>';
+      qualitySelect.innerHTML = `<option value="">${t('quality_auto', '自动（最高画质）')}</option>`;
 
       for (const quality of response.qualities) {
         const option = document.createElement('option');
@@ -1589,7 +1594,7 @@ function buildBilibiliControlsHtml(video, index) {
       <label class="control-group">
         <span class="control-label">清晰度</span>
         <select class="control-select bilibili-quality-select" data-index="${index}">
-          <option value="" disabled selected>加载中…</option>
+          <option value="" disabled selected>${t('quality_loading', '加载中…')}</option>
         </select>
       </label>
     </div>
@@ -1793,7 +1798,7 @@ function handleSourceLifecycleMessage(msg) {
       applyItemProgress(entry.item, entry.button, 100);
     }
     releaseTrackedSourceTask(msg, true);
-    showMessage(`${sourceLabel} 下载完成。`, 'success');
+    showMessage(t('download_done', '$1 下载完成。', [sourceLabel]), 'success');
     return;
   }
 
@@ -1869,7 +1874,7 @@ function applyItemProgress(item, btn, percent) {
     setDownloadButtonState(btn, 'downloading');
     const label = btn.querySelector('.dl-label');
     if (label) {
-      label.textContent = `下载中 ${safePercent}%`;
+      label.textContent = t('download_percent', '下载中 $1%', [String(safePercent)]);
     }
     btn.setAttribute('aria-label', `下载中 ${safePercent}%`);
   }
@@ -1917,7 +1922,7 @@ async function triggerDownload(video, btn) {
 
       if (!response?.ok) {
         releaseTrackedSourceTask({ taskKey, traceId: pendingSourceTask.traceId }, false);
-        throw new Error(response?.error || `${sourceLabel} 下载失败`);
+        throw new Error(response?.error || t('download_failed', '$1 下载失败', [sourceLabel]));
       }
 
       pendingSourceTask.traceId = response.traceId || pendingSourceTask.traceId;
@@ -1925,7 +1930,7 @@ async function triggerDownload(video, btn) {
       trackSourceTask(pendingSourceTask);
 
       if (response.alreadyRunning) {
-        showMessage(`${sourceLabel} 下载任务已在执行中。`, 'info');
+        showMessage(t('download_alreadyRunning', '$1 下载任务已在执行中。', [sourceLabel]), 'info');
       } else if (response.started) {
         showMessage(buildSourceStartedMessage(sourceLabel, response.strategyId), 'success');
       }
@@ -1944,7 +1949,7 @@ async function triggerDownload(video, btn) {
     });
 
     if (!response?.ok) {
-      throw new Error(response?.error || '未知错误');
+      throw new Error(response?.error || t('error_unknown', '未知错误'));
     }
 
     const isHlsDownload = downloadVideo?.type === 'hls';
@@ -1966,7 +1971,7 @@ async function triggerDownload(video, btn) {
     releaseBackgroundHlsTask(downloadVideo.url);
     void loadDownloadTasks({ renderTaskList: !tasksViewEl?.hidden });
 
-    showMessage('下载已开始。', 'success');
+    showMessage(t('download_started', '下载已开始。'), 'success');
   } catch (err) {
     if (pendingSourceTask) {
       releaseTrackedSourceTask(pendingSourceTask, false);
@@ -1984,7 +1989,7 @@ async function triggerDownload(video, btn) {
       console.warn(`[OVD] 原始错误信息: ${err.message}`);
     }
 
-    showMessage(`错误: ${friendlyMessage}`, 'error');
+    showMessage(t('error_prefix', '错误: $1', [friendlyMessage]), 'error');
     setDownloadButtonState(btn, 'idle');
   }
 }
