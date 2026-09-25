@@ -3,6 +3,7 @@ import '../lib/constants.js';
 import '../lib/download-path.js';
 import '../lib/message-types.js';
 import { resolveSaveAs } from './save-location.js';
+import { rememberDownloadFilename } from './download-filename-registry.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const constants = globalThis.__OVD_CONSTANTS__ || {};
@@ -165,6 +166,8 @@ async function submitBlobDownloadFromOffscreen(blob, filename, mimeType, taskMet
     return downloadResult;
   }
 
+  rememberDownloadFilename(downloadResult.downloadId, downloadFilename);
+
   setTimeout(() => {
     void revokeOffscreenObjectUrl(transferId, objectUrl);
   }, OBJECT_URL_REVOKE_DELAY);
@@ -227,6 +230,7 @@ async function submitOpfsDownloadFromOffscreen(opfsName, filename, mimeType, tas
   }
 
   console.log(`[OVD] OPFS 文件已提交下载 downloadId=${downloadResult.downloadId} name=${opfsName} size=${openResult.byteLength || 0}`);
+  rememberDownloadFilename(downloadResult.downloadId, downloadFilename);
 
   return {
     downloadId: downloadResult.downloadId,

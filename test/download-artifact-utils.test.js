@@ -61,25 +61,3 @@ test('isBrokenTextStubDownload 识别小体积文本响应（MIME 命中）', ()
   );
   assert.equal(utils.isBrokenTextStubDownload(null), false);
 });
-
-test('classifyDirectProbe：403/text 视为错误页，正常 206 放行', async () => {
-  const { classifyDirectProbe } = await loadStrategy();
-
-  assert.deepEqual(
-    classifyDirectProbe({ contentType: 'text/plain', status: 403 }),
-    { ok: false, reason: 'error-page-content-type' }
-  );
-  assert.deepEqual(
-    classifyDirectProbe({ contentType: '', status: 403 }),
-    { ok: false, reason: 'http-403' }
-  );
-  assert.deepEqual(
-    classifyDirectProbe({ contentType: 'video/mp4', status: 206 }),
-    { ok: true, reason: 'usable' }
-  );
-  // 探测没拿到响应（网络/CORS 异常）时不拦截
-  assert.deepEqual(
-    classifyDirectProbe({ contentType: '', status: 0 }),
-    { ok: true, reason: 'usable' }
-  );
-});

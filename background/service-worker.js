@@ -36,6 +36,7 @@ import '../lib/video-filter.js';
 import '../lib/opfs-sink.js';
 import '../lib/page-message-guard.js';
 import '../lib/download-artifact-utils.js';
+import { peekDownloadFilename, stripSpuriousMimeSuffix, takeDownloadFilename } from './download-filename-registry.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
@@ -295,6 +296,28 @@ async function notifyDownloadComplete(downloadId, item = null) {
 const interceptor = new RequestInterceptor(registry, onVideoDetected);
 interceptor.start();
 
+/**
+ * 文件名纠偏：CDN 把媒体标成 text/plain 时，Chrome 会把 `xxx.mp4` 存成 `xxx.mp4.txt`。
+ * 这里把名字改回我们提交下载时想要的那个（只改名，绝不删文件；改不动就保持原样）。
+ */
+try {
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const intended = peekDownloadFilename(item?.id);
+    const proposed = String(item?.filename || '');
+    const corrected = intended || stripSpuriousMimeSuffix(proposed.split(/[\\/]/).pop() || proposed);
+    if (intended) {
+      takeDownloadFilename(item?.id);
+    }
+    if (!corrected || corrected === proposed) {
+      return;
+    }
+    console.log(`[OVD] 修正下载文件名 proposed="${proposed}" -> "${corrected}"`);
+    suggest({ conflictAction: 'uniquify', filename: corrected });
+  });
+} catch (err) {
+  console.warn(`[OVD] 注册文件名纠偏失败: ${err.message}`);
+}
+
 chrome.downloads.onChanged.addListener(async (delta) => {
   const downloadId = delta.id;
   // 等待启动恢复完成，确保 downloadId->tabId 映射已重建
@@ -348,23 +371,14 @@ chrome.downloads.onChanged.addListener(async (delta) => {
 
   if (nextState !== 'complete') return;
 
-  // 服务器回 text/plain 错误页时 Chrome 会存成 "xxx.mp4.txt"：
-  // 这种残片没有任何用处，直接删掉并按失败上报，避免用户以为下载成功了
+  // 有些站点/CDN 会把有效媒体标成 text/plain（浏览器因此把文件名存成 "xxx.mp4.txt"），
+  // 这里只记录提示、绝不动用户的文件：下载即用户资产，删了就找不回来。
   const completedItem = await getDownloadItem(downloadId);
   if (isBrokenTextStubDownload(completedItem)) {
-    const stubName = completedItem?.filename || '';
-    console.warn(`[OVD] 下载结果是错误页残片（text/plain），已删除 downloadId=${downloadId} file=${stubName}`);
-    clearDownloadResumeTracking(downloadId);
-    releaseOpfsTempFile(downloadId);
-    await eraseDownloadArtifact(downloadId);
-    const failedTask = downloadStore.updateTaskByDownloadId(downloadId, {
-      error: '服务器返回的是错误页（text/plain），已删除 .txt 残片；请改选其它清晰度或刷新页面后重试',
-      percent: 0,
-      status: 'failed',
-    });
-    broadcastTaskUpdate(failedTask);
-    void downloadNotifications.notifyFailed(downloadId, completedItem, 'SERVER_RETURNED_ERROR_PAGE').catch(() => {});
-    return;
+    console.warn(
+      `[OVD] 下载产物 MIME 异常（可能是服务器把媒体标成 text/plain）：`
+      + `downloadId=${downloadId} file=${completedItem?.filename || ''} mime=${completedItem?.mime || ''}`
+    );
   }
 
   console.log(`[OVD] 下载完成 downloadId=${downloadId}`);
@@ -1693,23 +1707,6 @@ function getDownloadItem(downloadId) {
   });
 }
 
-/** 删除下载记录与其落盘文件（用于清理错误页残片） */
-async function eraseDownloadArtifact(downloadId) {
-  await new Promise((resolve) => {
-    try {
-      chrome.downloads.removeFile(downloadId, () => resolve());
-    } catch (_err) {
-      resolve();
-    }
-  });
-  await new Promise((resolve) => {
-    try {
-      chrome.downloads.erase({ id: downloadId }, () => resolve());
-    } catch (_err) {
-      resolve();
-    }
-  });
-}
 
 // 一次逻辑下载（traceId）→ 已创建的 chrome downloadId，用于重发去重（见 downloadBlobData）
 const blobDownloadByTrace = new Map();

@@ -1,6 +1,7 @@
 import { injectHeaders } from '../header-injector.js';
 import { resolveSaveAs } from '../save-location.js';
 import { browserInfo } from '../../lib/browser-compat.module.js';
+import { rememberDownloadFilename } from '../download-filename-registry.js';
 
 export function extFromUrl(url) {
   try {
@@ -32,6 +33,9 @@ export async function submitDirectDownload({ url, filenameNoExt, headers, type }
       }
 
       console.log(`[OVD] download submitted downloadId=${downloadId} filename="${filename}"`);
+      // 登记拟用文件名：有些 CDN 会把媒体标成 text/plain，浏览器会追加 .txt，
+      // 由 downloads.onDeterminingFilename 改回我们想要的名字
+      rememberDownloadFilename(downloadId, filename);
       resolve({ cleanupRules, downloadId });
     });
   });
