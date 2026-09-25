@@ -155,9 +155,14 @@ async function handleOpfsOpen(message) {
     throw new Error(`OPFS 文件不存在: ${name}`);
   }
 
-  const objectUrl = URL.createObjectURL(file);
+  // 从 OPFS 取出的 File 类型是空的：不显式包装成带 MIME 的 Blob 时，
+  // 浏览器无法判断媒体类型，可能按错误类型给文件名追加扩展名（现场 .mp4.txt）
+  const typedBlob = message.mimeType ? new Blob([file], { type: String(message.mimeType) }) : file;
+  const objectUrl = URL.createObjectURL(typedBlob);
   opfsObjectUrls.set(name, { byteLength: file.size, objectUrl });
-  console.log(`[OVD] OPFS 文件已暴露为对象 URL name=${name} size=${file.size}`);
+  console.log(
+    `[OVD] OPFS 文件已暴露为对象 URL name=${name} size=${file.size} mime=${message.mimeType || '(none)'}`
+  );
 
   return { byteLength: file.size, name, objectUrl, ok: true };
 }

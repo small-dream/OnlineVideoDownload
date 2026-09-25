@@ -37,9 +37,11 @@ test('decideCombinedDownloadRoute：MIME 不可信时自己保存，直链被拒
 
   // 正常媒体：交给下载管理器（省内存、可续传）
   assert.equal(decideCombinedDownloadRoute({ contentType: 'video/mp4', status: 206 }), 'download-manager');
-  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 200 }), 'download-manager');
-  // 探测失败（网络/CORS，status=0）也按正常下载处理，不误拦
-  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 0 }), 'download-manager');
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'audio/mp4', status: 206 }), 'download-manager');
+  // 类型未确认（空/octet-stream/探测被挡）时由扩展自己保存，保证文件名正确
+  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 200 }), 'self-save');
+  assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 0 }), 'self-save');
+  assert.equal(decideCombinedDownloadRoute({ contentType: 'application/octet-stream', status: 200 }), 'self-save');
 
   // 直链被拒：改走合并路径
   assert.equal(decideCombinedDownloadRoute({ contentType: '', status: 403 }), 'merge');
