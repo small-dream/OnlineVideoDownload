@@ -66,15 +66,19 @@ export class HlsFetcher {
     let m3u8Content = await pipeline.hlsFetchText(m3u8Url, headers);
     let audioRenditionUrl = null;
     let selectedQuality = '';
+    let masterPlaylist = null;
+    let selectedVariant = null;
 
     if (m3u8Content.includes('#EXT-X-STREAM-INF')) {
       const master = pipeline.parseHlsMasterPlaylist?.(m3u8Content, m3u8Url)
         || { audioRenditions: [], isMaster: false, variants: [] };
+      masterPlaylist = master;
       const variant = pipeline.selectHlsVariant?.(master.variants, m3u8Url, {
         quality: options.quality || options.variantUrl || '',
       });
 
       if (variant) {
+        selectedVariant = variant;
         selectedQuality = variant.label || '';
         console.log(`[HLS] Master Playlist 选中画质=${selectedQuality} 带宽=${variant.bandwidth} url=${variant.url}`);
         const audioRendition = pipeline.findMatchingAudioRendition?.(master, variant);
@@ -117,9 +121,40 @@ export class HlsFetcher {
 
     // 需要把独立音轨合并进视频时必须整体持有视频数据（fMP4 muxer 接口所限）；
     // 其余情况走顺序写入 sink，避免再拼一份全量 Uint8Array。
-    const audioMergePlanned = !!audioRenditionUrl
+    const computeAudioMergePlanned = () => !!audioRenditionUrl
       && output.ext === '.mp4'
       && typeof globalThis.BilibiliMuxer?.mergeFmp4Streams === 'function';
+    let audioMergePlanned = computeAudioMergePlanned();
+
+    // 需要音轨合并就不能走 OPFS 流式落盘（muxer 要整体持有视频数据），
+    // 体积超内存上限时先尝试改选"预合并"变体，避免下载到一半才中止
+    if (audioMergePlanned && typeof pipeline.estimateHlsBytes === 'function') {
+      const averageBandwidth = Number(selectedVariant?.averageBandwidth) || 0;
+      const estimatedVideoBytes = pipeline.estimateHlsBytes(
+        playlist,
+        averageBandwidth || Number(selectedVariant?.bandwidth) || 0,
+        averageBandwidth > 0 ? { bandwidthFactor: 1 } : {}
+      );
+      const picked = pipeline.pickVariantForMemoryLimit?.(masterPlaylist, selectedVariant, {
+        estimatedBytes: estimatedVideoBytes,
+        limitBytes: constants.MAX_IN_PAGE_MERGE_BYTES,
+      });
+      if (picked?.changed && picked.muxed?.url) {
+        console.warn(
+          `[HLS] 预估 ${Math.round(estimatedVideoBytes / 1024 / 1024)} MB 超出内存合并上限，`
+          + `改选预合并变体 ${picked.muxed.label || picked.muxed.url}（走 OPFS 流式落盘）`
+        );
+        selectedVariant = picked.muxed;
+        m3u8Url = picked.muxed.url;
+        selectedQuality = picked.muxed.label || '';
+        audioRenditionUrl = null;
+        m3u8Content = await pipeline.hlsFetchText(m3u8Url, headers);
+        const nextPlaylist = pipeline.parseHlsPlaylist(m3u8Content, m3u8Url);
+        Object.assign(playlist, nextPlaylist);
+        // 换掉音轨后要重新判断：预合并变体不再需要 muxer，可走 OPFS 流式落盘
+        audioMergePlanned = computeAudioMergePlanned();
+      }
+    }
 
     // 大文件走 OPFS：小文件仍是纯内存（快），累计超过阈值后自动落盘，
     // 上限也从"浏览器内存"变成"磁盘空间"。
