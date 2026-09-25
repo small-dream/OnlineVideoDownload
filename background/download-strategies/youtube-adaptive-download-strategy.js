@@ -273,6 +273,53 @@ async function fetchAdaptiveMediaBuffer(stream, label, headers, onProgress = nul
   }
 }
 
+/**
+ * 直链探测结果的判定（纯函数，便于单测）：
+ * 4xx/5xx 或 text/* / xml 响应视为"服务器回的是错误页"。
+ * 探测本身没拿到响应（status=0）时视为可用，避免误拦。
+ * @returns {{ok: boolean, reason: string}}
+ */
+export function classifyDirectProbe({ contentType = '', status = 0 } = {}) {
+  const numericStatus = Number(status) || 0;
+  if (/text\/|application\/(?:xml|xhtml\+xml)/i.test(String(contentType))) {
+    return { ok: false, reason: 'error-page-content-type' };
+  }
+  if (numericStatus >= 400) {
+    return { ok: false, reason: `http-${numericStatus}` };
+  }
+  return { ok: true, reason: 'usable' };
+}
+
+/**
+ * 单字节 Range 预检：googlevideo 拒绝请求时回 text/plain 错误页，
+ * 直接交给 chrome.downloads 会被存成 "xxx.mp4.txt"（现场问题）。
+ * 探测本身失败（CORS/网络）时返回 ok:true，交给正常流程处理，不误拦。
+ */
+async function probeDirectStream(url, headers = {}) {
+  try {
+    const corsOrigin = chrome?.runtime?.getURL ? chrome.runtime.getURL('').replace(/\/$/, '') : '';
+    const cleanupRules = await injectHeaders(url, headers, { corsOrigin });
+    try {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { ...headers, Range: 'bytes=0-1' },
+      });
+      try {
+        await response.body?.cancel?.();
+      } catch (_err) {}
+
+      const contentType = response.headers?.get?.('content-type') || '';
+      const verdict = classifyDirectProbe({ contentType, status: response.status });
+      return { contentType, ok: verdict.ok, reason: verdict.reason, status: response.status };
+    } finally {
+      await cleanupRules().catch(() => {});
+    }
+  } catch (err) {
+    console.warn(`[OVD][BG] 直链预检异常（不拦截下载）: ${err.message}`);
+    return { contentType: '', ok: true, status: 0 };
+  }
+}
+
 function selectTarget(meta, downloadOptions) {
   const exactCombinedTarget = downloadOptions.preferCombined && downloadOptions.resolution !== 'auto'
     ? streamUtils.pickCombinedStream?.(meta, {
@@ -503,12 +550,33 @@ export function createYouTubeAdaptiveDownloadStrategy() {
       const target = selectTarget(videoInfo, downloadOptions);
 
       if (target.kind === 'combined') {
-        return submitDirectDownload({
-          headers: videoInfo?.requestHeaders || {},
-          filenameNoExt: buildDirectFilename(videoInfo, target.stream),
-          type: 'video',
-          url: target.stream.url,
-        });
+        const headers = videoInfo?.requestHeaders || {};
+        // 提交给下载管理器前先探一次：googlevideo 拒绝时会回 text/plain 错误页，
+        // Chrome 会把它存成 "xxx.mp4.txt" 残片（现场问题）
+        const probe = await probeDirectStream(target.stream.url, headers);
+        if (probe.ok) {
+          return submitDirectDownload({
+            headers,
+            filenameNoExt: buildDirectFilename(videoInfo, target.stream),
+            type: 'video',
+            url: target.stream.url,
+          });
+        }
+
+        // 直链不可用：若还有自适应流，改走合并/流式合并路径，别把错误页存成文件
+        const fallbackTarget = selectTarget(videoInfo, { ...downloadOptions, preferCombined: false });
+        console.warn(
+          `[OVD][BG] 直链探测失败（status=${probe.status || '-'} type=${probe.contentType || '-'}）：`
+          + `改走 ${fallbackTarget.kind} 路径`
+        );
+        if (fallbackTarget.kind === 'adaptive') {
+          return mergeAdaptiveStreams(videoInfo, fallbackTarget, context);
+        }
+
+        throw new Error(
+          '该清晰度的直链被服务器拒绝（返回错误页），已阻止保存成 .txt 残片；'
+          + '请改选其它清晰度，或刷新页面后重试'
+        );
       }
 
       return mergeAdaptiveStreams(videoInfo, target, context);
