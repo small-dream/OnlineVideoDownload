@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.2
+> **版本**：1.17.3
 > **最后更新**：2026-09-25
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -242,6 +242,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.17.3 | 2026-09-25 | 合并路径零拷贝优化：Bilibili fMP4 合并不再为「盒子内容 / moof+mdat 片段 / 每个样本」各复制一份全量数据（改为只按偏移解析、样本用同一缓冲上的视图），传入 muxer 前也不再复制两路输入。合并阶段的内存峰值从约 4～5 倍流大小降到约 2 倍（输入 + 输出），1.5 GB 的合并上限因此有放宽空间。新增 6 个 muxer 用例（自建 moof/mdat fixture）断言零拷贝不变量。 |
 | 1.17.2 | 2026-09-25 | P0 性能优化：①HLS 在内容侧下载前按播放列表预估体积（`sum(EXTINF) × 平均码率 / 8`，无 AVERAGE-BANDWIDTH 时对峰值带宽打 0.8 折），预估超限直接跳过内容侧、由后台 OPFS 落盘接手，省掉最多 1.5 GB 的重复下载；②Bilibili/YouTube 的后台→页面媒体流回传改为 1 MB 分块 + 4 条在途流水线（原为 256 KB 逐条等待，1 ms 往返模型下耗时约 1/3.6），分片带序号并按序还原，缺片直接报错而不是产出错序文件。 |
 | 1.17.1 | 2026-09-25 | 第三波补充（大文件治理 + 分离文件降级）：分片下载改为顺序写入 sink，内存中只保留「并发数个」待写分片，逐分片解密在同一通道完成（峰值内存从约 3 倍文件大小降到约 1 倍）；新增 OPFS 落盘能力（`lib/opfs-sink.js`，超过 128 MB 自动切换，manifest 增加 `unlimitedStorage`），后台 HLS 大文件落盘后经 offscreen 按文件名换取对象 URL 下载，临时文件在下载结束/中断后清理，异常退出遗留文件在启动时清理；内容侧因体积超限中止时自动回退到该后台路径。分离文件降级：HLS 独立音轨无法合并时单独保存 `_audio` 文件而不是丢弃；DASH 与 Bilibili 超过合并上限时改为保存 `-video` / `-audio` 两个文件而不是直接失败。 |
 | 1.17.0 | 2026-09-25 | 第三波「覆盖面对标 VDH」：HLS 支持 Master Playlist 清晰度选择（条目内下拉框、`HLS_FETCH_QUALITIES` 懒加载、默认最高码率）、`EXT-X-BYTERANGE`、`EXT-X-KEY` 轮换与按媒体序号派生 IV、`EXT-X-MEDIA` 独立音轨合并、`EXT-X-DISCONTINUITY` 计数，并在无 `EXT-X-ENDLIST` 时明确提示直播只能保存当前窗口；HLS/Bilibili 合并补 1.5 GB 体积守卫（`HLS_OUTPUT_TOO_LARGE` / `BILIBILI_OUTPUT_TOO_LARGE`）。DASH 补 `$Number%05d$` 宽度格式、`mediaRange`/`indexRange`、多 Period 分组与 `r="-1"`，页面侧下载经 background 注入 Referer/CORS 规则，background 对已解析的分离流落盘为两个文件并明确提示仅 `.mpd` 地址的场景。通用嗅探新增 `video/mp2t`、`video/quicktime`、`video/x-matroska` 与「`application/octet-stream` + 扩展名/Content-Disposition 二次确认」，并用 `MutationObserver` 持续监听动态播放器。页面注入改用 `chrome.scripting.executeScript({ world: 'MAIN' })`（DOM 注入回退）。新增过滤设置（域名黑名单、最小时长、最小体积）与「每次询问保存位置」开关。任务视图新增「取消」按钮，内容侧任务经 `ABORT_SOURCE_DOWNLOAD` 中止，且 `concurrentDownloadLimit` 通过新的下载队列覆盖全部后台下载入口。 |

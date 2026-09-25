@@ -42,6 +42,14 @@ function getHlsPipeline() {
   return pipeline;
 }
 
+/** 视图已覆盖整个 buffer 时直接复用，避免 muxer 入参再复制一份全量数据 */
+function toMuxBuffer(bytes) {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer;
+  }
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 export class HlsFetcher {
   async downloadAndMerge(m3u8Url, filename, headers = {}, onProgress = null, tabId = null, taskMeta = {}, options = {}) {
     console.log(`[HLS] start filename="${filename}" tabId=${tabId ?? 'none'} url=${m3u8Url}`);
@@ -288,8 +296,8 @@ export class HlsFetcher {
 
     const audioBytes = this._concatBuffers(prefixBuffers.concat(audioBuffers));
     const blob = await muxer.mergeFmp4Streams(
-      videoBytes.buffer.slice(videoBytes.byteOffset, videoBytes.byteOffset + videoBytes.byteLength),
-      audioBytes.buffer.slice(audioBytes.byteOffset, audioBytes.byteOffset + audioBytes.byteLength)
+      toMuxBuffer(videoBytes),
+      toMuxBuffer(audioBytes)
     );
     console.log(`[HLS] 独立音轨合并完成 task=${taskMeta.taskId || 'none'} size=${(blob.size / 1024 / 1024).toFixed(2)} MB`);
     return new Uint8Array(await blob.arrayBuffer());
