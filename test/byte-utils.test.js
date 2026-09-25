@@ -118,3 +118,28 @@ test('concatUint8Arrays 支持 totalBytes 预分配并跳过空分片', () => {
   const result = api.concatUint8Arrays([new Uint8Array([1, 2]), null, new Uint8Array([3])], 3);
   assert.deepEqual(Array.from(result), [1, 2, 3]);
 });
+
+// --- toArrayBuffer：把拼接分片（Uint8Array）安全交给只接受 ArrayBuffer 的解析器 ---
+
+test('toArrayBuffer 直通 ArrayBuffer、还原视图、忽略非法输入', () => {
+  const api = mod();
+
+  const buffer = new ArrayBuffer(4);
+  assert.equal(api.toArrayBuffer(buffer), buffer);
+
+  const view = new Uint8Array([1, 2, 3, 4]);
+  const converted = api.toArrayBuffer(view);
+  assert.ok(converted instanceof ArrayBuffer);
+  assert.deepEqual(Array.from(new Uint8Array(converted)), [1, 2, 3, 4]);
+
+  // 带 byteOffset 的视图只能取自己那一段，不能把整个底层 buffer 当数据
+  const padded = new Uint8Array(8);
+  padded.set([9, 8, 7], 3);
+  const sliced = api.toArrayBuffer(padded.subarray(3, 6));
+  assert.equal(sliced.byteLength, 3);
+  assert.deepEqual(Array.from(new Uint8Array(sliced)), [9, 8, 7]);
+
+  assert.equal(api.toArrayBuffer(null), null);
+  assert.equal(api.toArrayBuffer(undefined), null);
+  assert.equal(api.toArrayBuffer('nope'), null);
+});
