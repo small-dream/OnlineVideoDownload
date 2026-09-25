@@ -1501,7 +1501,36 @@ function getYouTubeQualityOptions(video) {
     }
   }
 
+  logYouTubeQualityOptions(video, qualityOptions, options);
   return options;
+}
+
+// 现场排查用：把"这个视频生成了哪些清晰度选项"打出来（同签名只打一次）
+const loggedQualityOptionKeys = new Set();
+
+function logYouTubeQualityOptions(video, qualityOptions, options) {
+  try {
+    const videoId = String(video?.videoId || video?.url || '');
+    const signature = [
+      videoId,
+      video?.hlsManifestUrl ? 'hls' : 'no-hls',
+      qualityOptions.map((item) => item.value).join(','),
+      options.map((item) => item.value).join(','),
+    ].join('|');
+    if (loggedQualityOptionKeys.has(signature)) {
+      return;
+    }
+    loggedQualityOptionKeys.add(signature);
+    console.log(
+      `[OVD] YouTube 清晰度选项 videoId=${videoId.slice(0, 40)} `
+      + `hlsManifest=${video?.hlsManifestUrl ? 'yes' : 'no'} `
+      + `streams=[${(video?.videoStreams || []).length}v/${(video?.audioStreams || []).length}a/`
+      + `${(video?.combined || []).length}c] `
+      + `options=[${options.map((item) => item.label).join(' | ')}]`
+    );
+  } catch (err) {
+    console.warn(`[OVD] 清晰度选项日志失败: ${err.message}`);
+  }
 }
 
 function wireYouTubeControls(item, index) {
