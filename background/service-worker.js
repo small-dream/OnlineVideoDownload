@@ -76,6 +76,32 @@ function createRangeRequestHeadersFallback(headers, start = 0) {
   return requestHeaders;
 }
 
+function hostOfUrlFallback(url) {
+  try {
+    return new URL(String(url)).hostname.toLowerCase();
+  } catch (_err) {
+    return '';
+  }
+}
+
+async function fetchFirstAvailableUrlFallback(urls, fetchOne) {
+  const candidates = (Array.isArray(urls) ? urls : [urls]).filter((url) => typeof url === 'string' && url.trim());
+  if (candidates.length === 0) {
+    throw new Error('没有可用的候选下载地址');
+  }
+
+  const failures = [];
+  for (const url of candidates) {
+    try {
+      return { url, value: await fetchOne(url) };
+    } catch (err) {
+      failures.push(`${hostOfUrlFallback(url) || url}: ${err?.message || String(err)}`);
+    }
+  }
+
+  throw new Error(`所有候选地址均失败: ${failures.join(' | ')}`);
+}
+
 function uint8ArrayToBase64Fallback(bytes) {
   let binary = '';
   for (let i = 0; i < bytes.length; i++) {
@@ -85,6 +111,8 @@ function uint8ArrayToBase64Fallback(bytes) {
 }
 
 const createRangeRequestHeaders = httpUtils.createRangeRequestHeaders || createRangeRequestHeadersFallback;
+const fetchFirstAvailableUrl = httpUtils.fetchFirstAvailableUrl || fetchFirstAvailableUrlFallback;
+const hostOfUrl = httpUtils.hostOfUrl || hostOfUrlFallback;
 const inferTotalBytesFromResponse = httpUtils.inferTotalBytesFromResponse || inferTotalBytesFromResponseFallback;
 const uint8ArrayToBase64 = byteUtils.uint8ArrayToBase64 || uint8ArrayToBase64Fallback;
 const BLOB_TRANSFER_CHUNK_SIZE = constants.BLOB_TRANSFER_CHUNK_SIZE || 256 * 1024;
@@ -212,11 +240,51 @@ async function restorePersistedState() {
         tabUrl: tab?.url || '',
         status: 'complete',
       });
-      await downloadNotifications.notifyComplete(downloadId, item);
+      await notifyDownloadComplete(task.downloadId);
     } catch (err) {
       console.warn(`[OVD] failed to backfill download history on restore: ${err.message}`);
     }
   }
+}
+
+/**
+ * 下载完成通知：每个 downloadId 只发一次。
+ * 「中断 → 自动续传 → 完成」以及 SW 重启后的补写路径都可能重复命中同一条任务，
+ * 因此除通知管理器内的内存去重外，再在任务上打持久标记（随 storage.session 存活）。
+ */
+async function notifyDownloadComplete(downloadId, item = null) {
+  if (downloadId == null) {
+    return;
+  }
+
+  const task = downloadStore.updateTaskByDownloadId(downloadId, {});
+  if (task?.completeNotified) {
+    return;
+  }
+
+  // 同一条视频（taskKey）在本会话内已经提示过就不要再来一条：
+  // 重复点击/重试会各自产生 downloadId，但用户眼里还是「同一次下载」。
+  // 标记跟着任务走（storage.session 镜像），SW 被回收后依然有效。
+  const taskKey = task?.taskKey || '';
+  if (taskKey) {
+    const alreadyNotified = downloadStore
+      .getTasks({ limit: 200 })
+      .some((candidate) => candidate?.completeNotified && candidate.taskKey === taskKey && candidate.downloadId !== downloadId);
+    if (alreadyNotified) {
+      downloadStore.updateTaskByDownloadId(downloadId, { completeNotified: true });
+      console.log(`[OVD] 同视频已完成过，跳过重复的完成通知 taskKey=${taskKey} downloadId=${downloadId}`);
+      return;
+    }
+  }
+
+  downloadStore.updateTaskByDownloadId(downloadId, { completeNotified: true });
+
+  // 按 taskKey 去重：同一条视频因重复点击/重试产生多个 downloadId 时，只提示一次
+  await downloadNotifications.notifyComplete(
+    downloadId,
+    item || await getDownloadItem(downloadId),
+    { dedupeKey: taskKey }
+  );
 }
 
 const interceptor = new RequestInterceptor(registry, onVideoDetected);
@@ -315,6 +383,8 @@ chrome.downloads.onChanged.addListener(async (delta) => {
       percent: 100,
     });
   }
+
+  await notifyDownloadComplete(downloadId);
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -497,7 +567,9 @@ async function handleMessage(msg, sender) {
         world: 'MAIN',
       });
       console.log(`[OVD] MAIN world 脚本注入完成 tab=${targetTabId} frame=${frameId ?? 'all'} files=${files.length}`);
-      return { ok: true, files: files.length, injected: 'main-world' };
+      // 回传本 frame 的 frameId：内容脚本无法自查自己的 frameId，
+      // 而下载类消息只应由「上报该视频的 frame」执行（见 content/message-router.js）。
+      return { ok: true, files: files.length, frameId: frameId ?? null, injected: 'main-world' };
     }
 
     case MSG.INJECT_DOWNLOAD_HEADERS || 'INJECT_DOWNLOAD_HEADERS': {
@@ -544,7 +616,15 @@ async function handleMessage(msg, sender) {
       if (!tabId) {
         return { ok: false, error: '无法获取 tabId' };
       }
-      return fetchMediaStreams(msg.videoUrl, msg.audioUrl, msg.headers, tabId, msg.transferId, frameId);
+      // videoUrls/audioUrls 为候选地址列表（主地址 + 备用 CDN）；旧格式单地址仍兼容
+      return fetchMediaStreams(
+        msg.videoUrls || msg.videoUrl,
+        msg.audioUrls || msg.audioUrl,
+        msg.headers,
+        tabId,
+        msg.transferId,
+        frameId
+      );
 
     case MSG.BILIBILI_MUXER_LOG || 'BILIBILI_MUXER_LOG':
       logMuxerMessage(tabId, msg.level, msg.message);
@@ -595,6 +675,14 @@ async function handleMessage(msg, sender) {
 
     case MSG.SET_TAB_MUTED || 'SET_TAB_MUTED':
       return setTabMuted(tabId, !!msg.muted);
+
+    // 内容脚本除 SOURCE_DOWNLOAD_* 外还会广播旧版通知消息（popup 直接监听），
+    // SW 侧无需处理；不声明会让每次 B 站/YouTube 下载都刷一条 Unknown message type 报错。
+    case MSG.BILIBILI_DOWNLOAD_STARTED || 'BILIBILI_DOWNLOAD_STARTED':
+    case MSG.BILIBILI_DOWNLOAD_RESULT || 'BILIBILI_DOWNLOAD_RESULT':
+    case MSG.YOUTUBE_DOWNLOAD_STARTED || 'YOUTUBE_DOWNLOAD_STARTED':
+    case MSG.YOUTUBE_DOWNLOAD_RESULT || 'YOUTUBE_DOWNLOAD_RESULT':
+      return {};
 
     case MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS': {
       // popup 来源 sender.tab 为空：frameId 为 null → 整 tab 清理；仅子框架 frameId>0 时清该 frame
@@ -722,24 +810,31 @@ function isYouTubePageUrl(url = '') {
   }
 }
 
-function shouldHideVideoFromYouTubeList(video, tabUrl = '', hasYouTubeAdaptive = false) {
-  if (isYouTubePageUrl(tabUrl) && !isYouTubeWatchPageUrl(tabUrl)) {
-    return true;
-  }
+function isBilibiliVideoPageUrl(url = '') {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.includes('bilibili.com')) {
+      return false;
+    }
 
-  if (!hasYouTubeAdaptive || !isYouTubeWatchPageUrl(tabUrl)) {
+    return parsed.pathname.startsWith('/video/')
+      || parsed.pathname.startsWith('/bangumi/play/')
+      || parsed.pathname.startsWith('/cheese/play/');
+  } catch (err) {
+    console.warn(`[OVD] failed to parse Bilibili page URL: ${err.message}`);
     return false;
   }
+}
 
-  if (video?.type === 'audio') {
-    return true;
-  }
-
-  if (video?.type === 'blob') {
-    return String(video?.url || '').startsWith('blob:https://www.youtube.com/');
-  }
-
-  return false;
+/** 列表去噪规则（纯函数在 lib/video-filter.js，便于单测）所需的页面判定 */
+function buildDetectionFilterContext(tabUrl = '', videos = []) {
+  return {
+    hasBilibiliMeta: videos.some((video) => video?.type === 'bilibili-meta' || video?.type === 'bilibili-dash'),
+    hasYouTubeAdaptive: videos.some((video) => video?.type === 'youtube-adaptive'),
+    isBilibiliVideoPage: isBilibiliVideoPageUrl(tabUrl),
+    isYouTubePage: isYouTubePageUrl(tabUrl),
+    isYouTubeWatchPage: isYouTubeWatchPageUrl(tabUrl),
+  };
 }
 
 async function getVisibleVideosForTab(tabId) {
@@ -759,8 +854,11 @@ async function getVisibleVideosForTab(tabId) {
 
   registry.enrichTitles(tabId, tabTitle);
   const videos = registry.getForTab(tabId);
-  const hasYouTubeAdaptive = videos.some((video) => video?.type === 'youtube-adaptive');
-  const visibleVideos = videos.filter((video) => !shouldHideVideoFromYouTubeList(video, tabUrl, hasYouTubeAdaptive));
+  const detectionFilterContext = buildDetectionFilterContext(tabUrl, videos);
+  const collapseBlobs = videoFilter.collapseDuplicateBlobEntries || ((list) => list);
+  const shouldHide = videoFilter.shouldHideRedundantDetection || (() => false);
+  const visibleVideos = collapseBlobs(videos)
+    .filter((video) => !shouldHide(video, detectionFilterContext));
 
   // 用户级过滤（域名黑名单/最小时长/最小体积）：在读取时应用，
   // 设置变化后无需重新检测即可生效。
@@ -1179,6 +1277,23 @@ async function handleDownloadVideo(payload, tabId, taskOptions = {}) {
 async function downloadBlobData(message = {}, tabId, frameId = null) {
   const objectUrl = message.objectUrl;
   const filename = message.filename;
+  const traceId = typeof message.traceId === 'string' ? message.traceId : '';
+
+  // 同一次逻辑下载（traceId 相同）可能被内容侧重发：首次请求其实已经创建了下载，
+  // 只是响应在 SW 回收/端口关闭时丢失，内容侧于是走了兜底再下一次。
+  // 这里按 traceId 复用已有 downloadId，避免一次点击产出多份重复文件与多条完成通知。
+  const reusableDownloadId = findReusableBlobDownload(traceId);
+  if (reusableDownloadId != null) {
+    console.log(`[OVD] 复用已创建的 blob 下载 downloadId=${reusableDownloadId} traceId=${traceId}`);
+    if (objectUrl && tabId) {
+      safeTabMessage(tabId, {
+        type: MSG.REVOKE_OBJECT_URL || 'REVOKE_OBJECT_URL',
+        objectUrl,
+      }, undefined, frameId != null ? { frameId } : undefined);
+    }
+    return { downloadId: reusableDownloadId, ok: true, reused: true };
+  }
+
   const finalFilename = await downloadPathUtils.applyDownloadSubdir?.(filename || 'video.mp4');
   const saveAs = await resolveSaveAs();
 
@@ -1239,6 +1354,8 @@ async function downloadBlobData(message = {}, tabId, frameId = null) {
         status: 'running',
       }));
 
+      rememberBlobDownloadTrace(traceId, downloadId);
+
       setTimeout(() => {
         if (tabId) {
           safeTabMessage(tabId, {
@@ -1253,13 +1370,45 @@ async function downloadBlobData(message = {}, tabId, frameId = null) {
   });
 }
 
-async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId, frameId = null) {
+function normalizeMediaUrlList(input) {
+  return (Array.isArray(input) ? input : [input])
+    .filter((url) => typeof url === 'string' && url.trim());
+}
+
+/**
+ * 抓取单路媒体流：按候选地址顺序尝试（主地址失败则换备用 CDN）。
+ * 错误前缀保持 `xxx stream fetch failed:`，供 popup 关键词兜底识别。
+ */
+async function fetchMediaStreamWithFallback(candidates, label, headers, onProgress) {
+  try {
+    const result = await fetchFirstAvailableUrl(
+      candidates,
+      (url) => fetchStreamBufferResumable(url, label, headers, onProgress)
+    );
+
+    if (candidates.length > 1 && result.url !== candidates[0]) {
+      console.warn(`[OVD] ${label} 主地址不可用，已切换到备用 CDN host=${hostOfUrl(result.url)}`);
+    }
+
+    return result.value;
+  } catch (err) {
+    throw new Error(`${label} stream fetch failed: ${err.message}`);
+  }
+}
+
+async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferId, frameId = null) {
+  const videoCandidates = normalizeMediaUrlList(videoUrls);
+  const audioCandidates = normalizeMediaUrlList(audioUrls);
   const cleanups = [];
   let videoLoaded = 0;
   let audioLoaded = 0;
   let videoTotal = 0;
   let audioTotal = 0;
   let lastBroadcastPercent = 0;
+
+  if (videoCandidates.length === 0 || audioCandidates.length === 0) {
+    throw new Error('缺少视音频流地址');
+  }
 
   function onStreamProgress(label, loadedBytes, totalBytes) {
     if (label === 'video') {
@@ -1293,15 +1442,22 @@ async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId,
   }
 
   try {
-    const urls = [...new Set([videoUrl, audioUrl].filter(Boolean))];
-    for (const url of urls) {
+    // 备用 CDN 与主地址是不同域名，逐个域名注入 Referer 规则，
+    // 否则回退到备用地址时会拿到 403。
+    const injectedHosts = new Set();
+    for (const url of [...videoCandidates, ...audioCandidates]) {
+      const host = hostOfUrl(url);
+      if (!host || injectedHosts.has(host)) {
+        continue;
+      }
+      injectedHosts.add(host);
       const cleanup = await injectHeaders(url, headers || {});
       cleanups.push(cleanup);
     }
 
     const [videoBuffer, audioBuffer] = await Promise.all([
-      fetchStreamBufferResumable(videoUrl, 'video', headers, onStreamProgress),
-      fetchStreamBufferResumable(audioUrl, 'audio', headers, onStreamProgress),
+      fetchMediaStreamWithFallback(videoCandidates, 'video', headers, onStreamProgress),
+      fetchMediaStreamWithFallback(audioCandidates, 'audio', headers, onStreamProgress),
     ]);
 
     // 回传是本地 IPC（不是网络），256KB + 逐条 await 会让大文件被 IPC 往返拖住：
@@ -1473,6 +1629,33 @@ function getDownloadItem(downloadId) {
   return new Promise((resolve) => {
     chrome.downloads.search({ id: downloadId }, (items) => resolve(items?.[0] || null));
   });
+}
+
+// 一次逻辑下载（traceId）→ 已创建的 chrome downloadId，用于重发去重（见 downloadBlobData）
+const blobDownloadByTrace = new Map();
+const BLOB_DOWNLOAD_TRACE_TTL_MS = 10 * 60 * 1000;
+
+function pruneBlobDownloadTraces(now = Date.now()) {
+  for (const [traceId, entry] of blobDownloadByTrace) {
+    if (now - entry.at > BLOB_DOWNLOAD_TRACE_TTL_MS) {
+      blobDownloadByTrace.delete(traceId);
+    }
+  }
+}
+
+function findReusableBlobDownload(traceId) {
+  if (!traceId) {
+    return null;
+  }
+  pruneBlobDownloadTraces();
+  return blobDownloadByTrace.get(traceId)?.downloadId ?? null;
+}
+
+function rememberBlobDownloadTrace(traceId, downloadId) {
+  if (!traceId || downloadId == null) {
+    return;
+  }
+  blobDownloadByTrace.set(traceId, { at: Date.now(), downloadId });
 }
 
 async function openDownloadFolder(downloadId) {

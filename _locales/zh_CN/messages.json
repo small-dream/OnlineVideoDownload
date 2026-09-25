@@ -162,6 +162,9 @@
   "err_bilibili": {
     "message": "Bilibili 下载失败，请确认已登录 B 站账号后重试。"
   },
+  "err_streamUnreachable": {
+    "message": "无法连接视频 CDN 服务器（主地址与备用地址均不可达），请检查网络或代理后重试。"
+  },
   "err_dashNoRepresentation": {
     "message": "未找到可用的视频表示"
   },

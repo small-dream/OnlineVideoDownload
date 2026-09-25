@@ -61,6 +61,31 @@
       return streamTransferManager?.getMediaStreamTaskMeta?.(transferId) || {};
     }
 
+    /**
+     * 内容脚本注入所有 frame，而 chrome.tabs.sendMessage(tabId, msg) 默认广播给每个 frame。
+     * 下载类消息只应由「上报该视频的 frame」执行，否则一次点击会被 N 个 iframe
+     * 各下载一份（现象：Downloads 里出现多份同名文件 + 一次下载弹出多个「下载完成」通知）。
+     *
+     * 注意：内容脚本收到的 sender 是「发送方」（popup），拿不到自己的 frameId，
+     * 因此本 frame 的 frameId 由 content-main 在 MAIN world 注入成功后从 SW 记录到
+     * globalThis.__OVD_FRAME_ID__（见 content/content-main.js）。
+     *
+     * 返回 true 表示本条消息属于其它 frame，应当直接忽略（不响应、不执行）。
+     */
+    function isForeignFrameMessage(msg) {
+      const ownerFrameId = msg?.meta?.frameId
+        ?? msg?.taskMeta?.frameId
+        ?? msg?.taskMeta?.videoInfo?.frameId
+        ?? msg?.frameId;
+      const selfFrameId = Number.isInteger(globalThis.__OVD_FRAME_ID__)
+        ? globalThis.__OVD_FRAME_ID__
+        : null;
+
+      return Number.isInteger(ownerFrameId)
+        && selfFrameId != null
+        && selfFrameId !== ownerFrameId;
+    }
+
     function emitYouTubeStreamProgress(transferId, progressPayload = {}) {
       const taskMeta = getMediaStreamTaskMeta(transferId);
       emitRuntimeMessage({
@@ -318,6 +343,12 @@
           case MSG.SOURCE_DOWNLOAD || 'SOURCE_DOWNLOAD':
           case 'YOUTUBE_DOWNLOAD':
           case 'BILIBILI_DOWNLOAD':
+            if (isForeignFrameMessage(msg)) {
+              console.log(
+                `[OVD] 忽略其它 frame 的下载请求 owner=${msg?.meta?.frameId} self=${globalThis.__OVD_FRAME_ID__} type=${msg.type}`
+              );
+              break;
+            }
             respond(startSourceDownload(msg.meta));
             break;
 

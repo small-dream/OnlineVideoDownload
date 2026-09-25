@@ -181,20 +181,20 @@
 
     /**
      * 合并 Bilibili DASH 视音频流并触发下载
-     * @param {string} videoUrl - 视频流地址
-     * @param {string} audioUrl - 音频流地址
+     * @param {string[]} videoUrls - 视频流候选地址（主地址 + 备用 CDN）
+     * @param {string[]} audioUrls - 音频流候选地址（主地址 + 备用 CDN）
      * @param {string} title - 视频标题
      * @param {Object} headers - 请求头
      */
-    async function mergeBilibiliDashAndDownload(videoUrl, audioUrl, title, headers, progressReporter, context = {}, meta = {}) {
+    async function mergeBilibiliDashAndDownload(videoUrls, audioUrls, title, headers, progressReporter, context = {}, meta = {}) {
       getFloatButton()?.showMessage(t('bili_fetching', '正在获取 Bilibili 视音频数据...'), false, 0);
       getFloatButton()?.showProgress(0);
       progressReporter?.status(t('bili_fetching', '正在获取 Bilibili 视音频数据...'));
       progressReporter?.progress(0, { phase: 'fetching' });
 
       const { videoBuffer, audioBuffer } = await fetchMediaStreamsAndWait(
-        videoUrl,
-        audioUrl,
+        videoUrls,
+        audioUrls,
         headers,
         'bili',
         '等待 Bilibili 视音频数据回传超时'
@@ -318,10 +318,14 @@
           const selectedVideo = qualityUtils.pickBilibiliVideoStream?.(videoStreams, qualityId) || videoStreams[0];
           const selectedAudio = qualityUtils.pickBilibiliAudioStream?.(audioStreams) || audioStreams[0];
 
-          const videoUrl = selectedVideo?.baseUrl || selectedVideo?.base_url;
-          const audioUrl = selectedAudio?.baseUrl || selectedAudio?.base_url;
+          // B 站会同时返回主地址与备用 CDN 地址（backupUrl）。主地址常是 PCDN 边缘节点，
+          // 部分网络下不可达；把备用地址一起交给后台按顺序回退，避免「主地址失败即整体失败」。
+          const videoUrls = qualityUtils.listBilibiliStreamUrls?.(selectedVideo)
+            || [selectedVideo?.baseUrl || selectedVideo?.base_url].filter(Boolean);
+          const audioUrls = qualityUtils.listBilibiliStreamUrls?.(selectedAudio)
+            || [selectedAudio?.baseUrl || selectedAudio?.base_url].filter(Boolean);
 
-          if (!videoUrl || !audioUrl) {
+          if (videoUrls.length === 0 || audioUrls.length === 0) {
             throw new Error('无法获取音视频流地址');
           }
 
@@ -330,7 +334,7 @@
           console.log(`[OVD] Bilibili 选中视频流: id=${selectedVideo.id} (${videoQualityLabel}) 编解码器=${selectedVideo.codecid}`);
           console.log(`[OVD] Bilibili 选中音频流: id=${selectedAudio.id} (${audioQualityLabel})`);
 
-          return mergeBilibiliDashAndDownload(videoUrl, audioUrl, meta.title, requiredHeaders, progressReporter, context, meta);
+          return mergeBilibiliDashAndDownload(videoUrls, audioUrls, meta.title, requiredHeaders, progressReporter, context, meta);
         }
 
         if (data.durl) {
