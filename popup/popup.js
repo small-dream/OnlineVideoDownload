@@ -10,6 +10,7 @@ const youtubeOptionFactory = globalThis.__OVD_YOUTUBE_DOWNLOAD_OPTIONS__ || {};
 const bilibiliQualityUtils = globalThis.__OVD_BILIBILI_QUALITY_UTILS__ || {};
 const bilibiliQualityStore = globalThis.__OVD_BILIBILI_QUALITY_STORE__ || {};
 const generalSettingsStore = globalThis.__OVD_GENERAL_SETTINGS_STORE__ || {};
+const popupErrorMessages = globalThis.__OVD_POPUP__ || {};
 const MSG = messageTypes;
 
 const {
@@ -50,6 +51,10 @@ const actionBarEl = document.getElementById('actionBar');
 const clearListBtnEl = document.getElementById('clearListBtn');
 const historyBtnEl = document.getElementById('historyBtn');
 const tasksBtnEl = document.getElementById('tasksBtn');
+const listHeaderEl = document.getElementById('listHeader');
+const listCountEl = document.getElementById('listCount');
+const selectAllCheckboxEl = document.getElementById('selectAllCheckbox');
+const batchDownloadBtnEl = document.getElementById('batchDownloadBtn');
 
 const selectedIndices = new Set();
 
@@ -91,6 +96,7 @@ function setDownloadButtonState(button, state) {
   const disabled = state === 'downloading' || state === 'pending' || state === 'completed';
   button.disabled = disabled;
   button.dataset.state = state;
+  button.removeAttribute('aria-label');
   button.innerHTML = state === 'idle'
     ? `
       <span class="dl-label">${label}</span>
@@ -138,7 +144,13 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
         </video>
         <div class="thumb-shade"></div>
         <span class="duration-badge">
-          <span class="mini-logo">b</span>
+          <span class="mini-logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 4v10"/>
+              <path d="M7 10l5 5 5-5"/>
+              <path d="M5 20h14"/>
+            </svg>
+          </span>
           <span class="duration-text">${durationText}</span>
         </span>
       </div>
@@ -150,7 +162,13 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
     <div class="video-thumb"${thumbnailStyle}>
       <div class="thumb-shade"></div>
       <span class="duration-badge">
-        <span class="mini-logo">b</span>
+        <span class="mini-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4v10"/>
+            <path d="M7 10l5 5 5-5"/>
+            <path d="M5 20h14"/>
+          </svg>
+        </span>
         <span class="duration-text">${durationText}</span>
       </span>
     </div>
@@ -239,10 +257,51 @@ closeHistoryBtnEl?.addEventListener('click', () => showMainView());
 closeTasksBtnEl?.addEventListener('click', () => showMainView());
 document.getElementById('settingsBtn')?.addEventListener('click', () => showSettingsView());
 clearHistoryBtnEl?.addEventListener('click', () => clearHistory());
-clearListBtnEl?.addEventListener('click', () => {
+clearListBtnEl?.addEventListener('click', async () => {
   currentVideos = [];
   selectedIndices.clear();
   renderVideos([]);
+
+  if (currentTabId == null) {
+    return;
+  }
+  try {
+    await sendRuntimeMessageAsync({
+      tabId: currentTabId,
+      type: MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS',
+    });
+  } catch (err) {
+    console.warn(`[OVD] failed to clear tab videos in background: ${err.message}`);
+  }
+});
+
+selectAllCheckboxEl?.addEventListener('change', () => {
+  selectedIndices.clear();
+  if (selectAllCheckboxEl.checked) {
+    currentVideos.forEach((video, index) => {
+      if (video.type !== 'drm-detected') {
+        selectedIndices.add(index);
+      }
+    });
+  }
+  videoListEl.querySelectorAll('.video-checkbox').forEach((checkbox) => {
+    checkbox.checked = selectedIndices.has(Number(checkbox.dataset.index));
+  });
+  updateBatchSelection();
+});
+
+batchDownloadBtnEl?.addEventListener('click', async () => {
+  if (selectedIndices.size === 0) {
+    return;
+  }
+
+  const batchSize = selectedIndices.size;
+  showMessage(`开始批量下载 ${batchSize} 个视频。`, 'success');
+  await startBatchDownload();
+  videoListEl.querySelectorAll('.video-checkbox').forEach((checkbox) => {
+    checkbox.checked = false;
+  });
+  updateBatchSelection();
 });
 
 init();
@@ -1078,9 +1137,18 @@ async function deleteTask(taskId, button) {
 function renderVideos(videos) {
   videoListEl.querySelectorAll('.video-item').forEach((el) => el.remove());
 
+  setHidden(listHeaderEl, videos.length === 0);
+  if (listCountEl) {
+    listCountEl.textContent = videos.length > 0
+      ? `检测到 ${videos.length} 个视频资源`
+      : '未检测到视频';
+  }
+
   if (videos.length === 0) {
     subtitleEl.textContent = '未检测到视频';
+    selectedIndices.clear();
     setHidden(emptyStateEl, false);
+    updateBatchSelection();
     return;
   }
 
@@ -1090,6 +1158,7 @@ function renderVideos(videos) {
   videos.forEach((video, index) => {
     videoListEl.appendChild(createVideoItem(video, index));
   });
+  updateBatchSelection();
 }
 
 function createVideoItem(video, index) {
@@ -1107,7 +1176,7 @@ function createVideoItem(video, index) {
   const thumbnailUrl = normalizeAssetUrl(video.thumbnail || video.cover || video.poster || '');
 
   item.innerHTML = `
-    <input type="checkbox" class="video-checkbox" data-index="${index}" ${isDrm ? 'disabled' : ''}>
+    <input type="checkbox" class="video-checkbox" data-index="${index}" ${isDrm ? 'disabled' : ''} ${selectedIndices.has(index) ? 'checked' : ''}>
     ${buildThumbHtml(video, thumbnailUrl, durationText)}
     <div class="video-info">
       <div class="video-title-row">
@@ -1120,6 +1189,7 @@ function createVideoItem(video, index) {
             <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>
           </svg>
         </button>
+        ${buildFormatPillHtml(video, typeClass, typeLabel)}
         ${buildYouTubeControlsHtml(video, index)}
         ${buildBilibiliControlsHtml(video, index)}
         ${buildMetaHtml(video)}
@@ -1176,10 +1246,6 @@ function buildQualityHtml(video) {
 }
 
 function buildFormatPillHtml(video, typeClass, typeLabel) {
-  if (video.type === 'bilibili-meta') {
-    return '';
-  }
-
   return `
     <div class="format-pill">
       <span class="type-badge ${typeClass}">${typeLabel}</span>
@@ -1566,7 +1632,11 @@ function handleSourceLifecycleMessage(msg) {
   }
 
   releaseTrackedSourceTask(msg, false);
-  showMessage(`${sourceLabel} 下载失败: ${msg.error || '未知错误'}`, 'error');
+  const friendly = popupErrorMessages.buildFriendlyErrorMessage?.({
+    code: msg.code,
+    message: msg.error || '未知错误',
+  });
+  showMessage(`${sourceLabel} 下载失败: ${friendly?.text || msg.error || '未知错误'}`, 'error');
 }
 
 function sourceLabelFromId(sourceId) {
@@ -1625,11 +1695,17 @@ function applyItemProgress(item, btn, percent) {
 
   if (safePercent >= 100) {
     setDownloadButtonState(btn, 'completed');
+    btn.removeAttribute('aria-label');
     return;
   }
 
   if (safePercent > 0) {
     setDownloadButtonState(btn, 'downloading');
+    const label = btn.querySelector('.dl-label');
+    if (label) {
+      label.textContent = `下载中 ${safePercent}%`;
+    }
+    btn.setAttribute('aria-label', `下载中 ${safePercent}%`);
   }
 }
 
@@ -1733,9 +1809,14 @@ async function triggerDownload(video, btn) {
       releaseBackgroundHlsTask(pendingBackgroundHlsTask.videoUrl);
     }
 
-    const friendlyMessage = err.message.includes('Receiving end does not exist')
-      ? '当前页面下载脚本未就绪，请刷新页面后重试。'
-      : err.message;
+    const friendly = popupErrorMessages.buildFriendlyErrorMessage?.({
+      code: err.code,
+      message: err.message,
+    });
+    const friendlyMessage = friendly?.text || err.message;
+    if (friendlyMessage !== err.message) {
+      console.warn(`[OVD] 原始错误信息: ${err.message}`);
+    }
 
     showMessage(`错误: ${friendlyMessage}`, 'error');
     setDownloadButtonState(btn, 'idle');
@@ -1743,7 +1824,18 @@ async function triggerDownload(video, btn) {
 }
 
 function updateBatchSelection() {
-  // no-op: select-all and batch UI removed
+  const selectableCount = currentVideos.filter((video) => video.type !== 'drm-detected').length;
+  const selectedCount = selectedIndices.size;
+
+  if (batchDownloadBtnEl) {
+    batchDownloadBtnEl.textContent = `下载所选 (${selectedCount})`;
+    batchDownloadBtnEl.disabled = selectedCount === 0;
+  }
+
+  if (selectAllCheckboxEl) {
+    selectAllCheckboxEl.checked = selectableCount > 0 && selectedCount >= selectableCount;
+    selectAllCheckboxEl.indeterminate = selectedCount > 0 && selectedCount < selectableCount;
+  }
 }
 
 async function startBatchDownload() {
@@ -1787,6 +1879,10 @@ async function startBatchDownload() {
   });
 
   selectedIndices.clear();
+  videoListEl.querySelectorAll('.video-checkbox').forEach((checkbox) => {
+    checkbox.checked = false;
+  });
+  updateBatchSelection();
 }
 
 const TOAST_MAX_VISIBLE = 3;
