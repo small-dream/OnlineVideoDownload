@@ -110,3 +110,11 @@ test('concatUint8Arrays: byte offsets are correct', () => {
   assert.equal(result[2], 30);
   assert.equal(result[4], 50);
 });
+
+// --- 4.3：可选总长度预分配（收敛自 youtube-adaptive 的 mergeUint8Chunks） ---
+
+test('concatUint8Arrays 支持 totalBytes 预分配并跳过空分片', () => {
+  const api = mod();
+  const result = api.concatUint8Arrays([new Uint8Array([1, 2]), null, new Uint8Array([3])], 3);
+  assert.deepEqual(Array.from(result), [1, 2, 3]);
+});

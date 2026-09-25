@@ -336,24 +336,16 @@
     }
 
     /**
-     * 解析并抓取解密密钥。
-     * 优先使用支持密钥轮换的 resolveHlsKeys，旧管线缺少该能力时退回单密钥接口。
+     * 解析并抓取解密密钥（实现已收敛到 lib/hls-pipeline.js#resolveHlsKeyInfo）。
      */
     async function resolveKeyInfo(playlist, playlistText, playlistUrl, headers, fetchOptions) {
-      const keyEntries = playlist.keys || [];
-      if (keyEntries.length > 0 && typeof hlsPipeline.resolveHlsKeys === 'function') {
-        return {
-          keys: await hlsPipeline.resolveHlsKeys(keyEntries, headers, fetchOptions),
-          segments: playlist.segments,
-        };
+      if (typeof hlsPipeline.resolveHlsKeyInfo === 'function') {
+        return hlsPipeline.resolveHlsKeyInfo(playlist, playlistText, playlistUrl, headers, fetchOptions);
       }
-
-      if (!playlist.isEncrypted) {
-        return null;
-      }
-
-      const legacy = await hlsPipeline.parseHlsEncryption?.(playlistText, playlistUrl, headers, fetchOptions);
-      return legacy || null;
+      // 兼容替身管线：仅处理单密钥路径
+      return playlist.isEncrypted
+        ? (await hlsPipeline.parseHlsEncryption?.(playlistText, playlistUrl, headers, fetchOptions)) || null
+        : null;
     }
 
     async function downloadSegments(playlist, headers, fetchOptions, taskMeta, sourceUrl, requestOptions = {}, sinkOptions = {}) {
@@ -457,12 +449,9 @@
       }
     }
 
-    /** 视图已覆盖整个 buffer 时直接复用，避免 muxer 入参再复制一份全量数据 */
+    /** muxer 入参转换已收敛到 lib/hls-pipeline.js#toMuxBuffer */
     function toMuxBuffer(bytes) {
-      if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-        return bytes.buffer;
-      }
-      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      return typeof hlsPipeline.toMuxBuffer === 'function' ? hlsPipeline.toMuxBuffer(bytes) : bytes.buffer;
     }
 
     /** 分离文件降级：音轨单独落盘，返回 { separate: true, filename } */

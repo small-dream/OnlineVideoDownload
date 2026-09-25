@@ -158,3 +158,23 @@ test('createRangeRequestHeaders: preserves existing headers', () => {
   assert.equal(result['Content-Type'], 'video/mp4');
   assert.equal(result.Range, 'bytes=512-');
 });
+
+// --- 4.3：闭区间 Range（原先只支持 bytes=N-） ---
+
+test('createRangeHeaderValue 支持闭区间与开放式范围', () => {
+  const api = mod();
+  assert.equal(api.createRangeHeaderValue(0, 0), 'bytes=0-0');
+  assert.equal(api.createRangeHeaderValue(100, 199), 'bytes=100-199');
+  assert.equal(api.createRangeHeaderValue(100), 'bytes=100-');
+  assert.equal(api.createRangeHeaderValue(0), '');
+  assert.equal(api.createRangeHeaderValue(0, null), '');
+});
+
+test('createRangeRequestHeaders 支持 end 且剔除原有 Range（避免冲突）', () => {
+  const api = mod();
+  assert.deepEqual(
+    api.createRangeRequestHeaders({ Range: 'bytes=5-', Referer: 'https://a/' }, 10, 20),
+    { Range: 'bytes=10-20', Referer: 'https://a/' }
+  );
+  assert.deepEqual(api.createRangeRequestHeaders({ Range: 'bytes=5-' }, 0), {});
+});
