@@ -10,6 +10,22 @@
   }
 
   const constants = globalThis.__OVD_CONSTANTS__ || {};
+  // 国际化：优先 chrome.i18n（见 lib/i18n.js）；未加载时本地退回中文原文，
+  // 并同样处理 $1..$9 占位符，避免出现裸露的占位符。
+  const i18n = globalThis.__OVD_I18N__ || {};
+  const t = typeof i18n.t === 'function'
+    ? i18n.t
+    : (_key, fallback, subs) => {
+      if (!fallback || !subs) {
+        return fallback;
+      }
+      const list = Array.isArray(subs) ? subs : [subs];
+      return String(fallback).replace(/\$(\d)/g, (match, index) => {
+        const value = list[Number(index) - 1];
+        return value == null ? match : String(value);
+      });
+    };
+
   const SEGMENT_CONCURRENCY = constants.HLS_SEGMENT_CONCURRENCY || 5;
   const MAX_MERGE_SIZE = constants.DASH_MAX_MERGE_BYTES || 2 * 1024 * 1024 * 1024;
 
@@ -78,7 +94,7 @@
 
       if (failedCount > 0 || retriedCount > 0) {
         console.warn(`[OVD] DASH ${label} 分片下载完成 失败=${failedCount} 重试成功=${retriedCount}`);
-        progressReporter?.status(`DASH ${label} 有 ${failedCount} 个分片下载失败（未超阈值），已跳过`);
+        progressReporter?.status(t('dash_segmentFailed', 'DASH $1 有 $2 个分片下载失败（未超阈值），已跳过', [label, String(failedCount)]));
       }
 
       return {
@@ -174,7 +190,7 @@
 
     async function handleDashDownload(meta, buttonElement, progressReporter, context = {}) {
       const reporter = progressReporter || defaultProgressReporter;
-      reporter?.status('正在获取 DASH manifest...');
+      reporter?.status(t('dash_fetchManifest', '正在获取 DASH manifest...'));
 
       const mpdUrl = meta?.url;
       if (!mpdUrl) {
@@ -223,7 +239,7 @@
       }
 
       if (videoPick.hasMultipleInitializations || audioPick.hasMultipleInitializations) {
-        reporter?.status('该清单包含多个 Period，已按顺序拼接分片；如播放不连续请下载分离文件');
+        reporter?.status(t('dash_multiPeriod', '该清单包含多个 Period，已按顺序拼接分片；如播放不连续请下载分离文件'));
       }
 
       console.log(`[OVD] DASH 选中视频: id=${videoRep.id} bandwidth=${videoRep.bandwidth} ` +
@@ -234,7 +250,7 @@
           `codecs=${audioRep.codecs} periods=${audioPick.representations.length} segments=${audioPick.representations.reduce((sum, rep) => sum + (rep.segments?.length || 0), 0)}`);
       }
 
-      reporter?.status('正在下载 DASH 视频分片...');
+      reporter?.status(t('dash_fetchingVideo', '正在下载 DASH 视频分片...'));
 
       const videoResult = await fetchSegmentBuffers(
         buildSegmentEntries(videoPick.representations),
@@ -260,7 +276,7 @@
         return { ok: true, filename };
       }
 
-      reporter?.status('正在下载 DASH 音频分片...');
+      reporter?.status(t('dash_fetchingAudio', '正在下载 DASH 音频分片...'));
 
       const audioResult = await fetchSegmentBuffers(
         buildSegmentEntries(audioPick.representations),
@@ -277,7 +293,7 @@
       if (estimatedTotal > MAX_MERGE_SIZE) {
         // 分离文件降级：不因体积超限直接失败，音视频各自落盘，供用户本地合并
         const totalMb = (estimatedTotal / 1024 / 1024).toFixed(0);
-        reporter?.status(`DASH 流总体积 ${totalMb} MB 超过浏览器内合并上限，改为分别保存视频与音频文件`);
+        reporter?.status(t('dash_tooLarge', 'DASH 流总体积 $1 MB 超过浏览器内合并上限，改为分别保存视频与音频文件', [totalMb]));
         console.warn(`[OVD] DASH 体积 ${totalMb} MB 超过合并上限，降级为分离文件`);
 
         const baseName = videoUtils.buildMediaFilename?.({
@@ -299,7 +315,7 @@
         };
       }
 
-      reporter?.status('正在合并 DASH 视音频...');
+      reporter?.status(t('dash_merging', '正在合并 DASH 视音频...'));
       console.log('[OVD] 开始合并 DASH 视音频');
 
       const muxer = globalThis.BilibiliMuxer || {};

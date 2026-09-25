@@ -5,6 +5,21 @@
     return;
   }
 
+  // 国际化：优先 chrome.i18n（见 lib/i18n.js）；未加载时本地退回中文原文，
+  // 并同样处理 $1..$9 占位符，避免出现裸露的占位符。
+  const i18n = globalThis.__OVD_I18N__ || {};
+  const t = typeof i18n.t === 'function'
+    ? i18n.t
+    : (_key, fallback, subs) => {
+      if (!fallback || !subs) {
+        return fallback;
+      }
+      const list = Array.isArray(subs) ? subs : [subs];
+      return String(fallback).replace(/\$(\d)/g, (match, index) => {
+        const value = list[Number(index) - 1];
+        return value == null ? match : String(value);
+      });
+    };
   const loggerFactory = globalThis.__OVD_LOGGER__ || {};
   const optionsFactory = globalThis.__OVD_YOUTUBE_DOWNLOAD_OPTIONS__ || {};
   const streamUtils = globalThis.__OVD_YOUTUBE_STREAM_UTILS__ || {};
@@ -284,10 +299,10 @@
         videoMb: (videoBuffer.byteLength / 1024 / 1024).toFixed(2),
       });
 
-      floatButton?.showMessage('正在合并 YouTube 视音频...', false, 0);
-      progressReporter?.status('正在合并 YouTube 视音频...');
+      floatButton?.showMessage(t('yt_merging', '正在合并 YouTube 视音频...'), false, 0);
+      progressReporter?.status(t('yt_merging', '正在合并 YouTube 视音频...'));
       const blob = await BilibiliMuxer.mergeFmp4Streams(videoBuffer, audioBuffer, (percent) => {
-        floatButton?.showMessage(`正在合并 YouTube 视音频... ${percent}%`, false, 0);
+        floatButton?.showMessage(t('yt_mergingPercent', '正在合并 YouTube 视音频... $1%', [String(percent)]), false, 0);
         floatButton?.showProgress(percent);
         progressReporter?.progress(percent, { phase: 'merging' });
       });
@@ -315,8 +330,8 @@
         const log = createLogger(traceId, meta, downloadOptions);
         const snapshot = streamUtils.buildYouTubeSelectionSnapshot?.(meta, downloadOptions) || {};
 
-        floatButton?.showMessage('正在准备 YouTube 解析下载...', false, 0);
-        progressReporter?.status('正在准备 YouTube 解析下载...');
+        floatButton?.showMessage(t('yt_parsePreparing', '正在准备 YouTube 解析下载...'), false, 0);
+        progressReporter?.status(t('yt_parsePreparing', '正在准备 YouTube 解析下载...'));
         log.info('parse workflow started', {
           fallbackToLowerQuality: downloadOptions.fallbackToLowerQuality ? 'true' : 'false',
           preferCombined: downloadOptions.preferCombined ? 'true' : 'false',
@@ -339,13 +354,13 @@
           }
 
           floatButton?.showProgress(100);
-          floatButton?.showMessage(`下载完成: ${meta?.title || 'YouTube 视频'}`);
+          floatButton?.showMessage(t('download_doneShort', '下载完成: $1', [meta?.title || t('yt_videoFallback', 'YouTube 视频')]));
           progressReporter?.progress(100, { phase: 'complete' });
           return { ...result, ok: true };
         } catch (err) {
           const normalizedError = errorFactory.normalizeYouTubeDownloadError?.(err, 'YT_PARSE_FAILED') || err;
-          floatButton?.showMessage(`YouTube 下载失败: ${normalizedError.message}`, true);
-          progressReporter?.status(`YouTube 下载失败: ${normalizedError.message}`, { level: 'error' });
+          floatButton?.showMessage(t('yt_failed', 'YouTube 下载失败: $1', [normalizedError.message]), true);
+          progressReporter?.status(t('yt_failed', 'YouTube 下载失败: $1', [normalizedError.message]), { level: 'error' });
           log.error('parse workflow failed', {
             code: normalizedError.code || '',
           }, {

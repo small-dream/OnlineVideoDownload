@@ -1,96 +1,524 @@
 {
-  "action_settings": { "message": "设置" },
-  "action_tasks": { "message": "任务" },
-  "action_history": { "message": "历史" },
-  "action_clearList": { "message": "清列表" },
-  "list_selectAll": { "message": "全选" },
-  "list_batchDownload": { "message": "下载所选 ($1)", "placeholders": { "1": { "content": "$1" } } },
-  "list_detected": { "message": "检测到 $1 个视频资源", "placeholders": { "1": { "content": "$1" } } },
-  "list_none": { "message": "未检测到视频" },
-  "list_hint": { "message": "请在包含视频的页面打开扩展" },
-  "settings_title": { "message": "设置" },
-  "settings_subtitle": { "message": "正在检测视频..." },
-  "settings_concurrent": { "message": "并发下载数" },
-  "settings_notification": { "message": "下载完成通知" },
-  "settings_youtubeMode": { "message": "YouTube 默认模式" },
-  "settings_youtubeCapture": { "message": "录制模式" },
-  "settings_youtubeParse": { "message": "解析下载" },
-  "settings_filename": { "message": "文件命名" },
-  "settings_filenameTitle": { "message": "仅标题" },
-  "settings_filenameQuality": { "message": "标题 + 画质" },
-  "settings_filenameDate": { "message": "标题 + 日期" },
-  "settings_subdir": { "message": "下载目录" },
-  "settings_subdirPlaceholder": { "message": "留空为默认目录" },
-  "settings_minDuration": { "message": "最小时长（秒，0=不限）" },
-  "settings_minSize": { "message": "最小体积（MB，0=不限）" },
-  "settings_domainBlacklist": { "message": "域名黑名单" },
-  "settings_domainBlacklistPlaceholder": { "message": "逗号或换行分隔，如 ads.example.com" },
-  "settings_askSaveLocation": { "message": "每次询问保存位置" },
-  "settings_historyRetention": { "message": "历史保留" },
-  "settings_days": { "message": "$1 天", "placeholders": { "1": { "content": "$1" } } },
-  "settings_days7": { "message": "7 天" },
-  "settings_days30": { "message": "30 天" },
-  "settings_days90": { "message": "90 天" },
-  "settings_forever": { "message": "永久" },
-  "settings_debugLogging": { "message": "调试日志" },
-  "settings_saved": { "message": "设置已保存。" },
-  "settings_saveFailed": { "message": "设置保存失败: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_title": { "message": "下载历史" },
-  "history_loading": { "message": "正在加载..." },
-  "history_empty": { "message": "暂无下载历史" },
-  "history_clear": { "message": "清空下载历史" },
-  "history_count": { "message": "共 $1 条记录", "placeholders": { "1": { "content": "$1" } } },
-  "history_clearFailed": { "message": "清空失败: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_deleteFailed": { "message": "删除失败: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_openFailed": { "message": "无法打开下载文件夹: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_deleting": { "message": "删除中" },
-  "history_delete": { "message": "删除" },
-  "tasks_title": { "message": "下载任务" },
-  "tasks_empty": { "message": "暂无下载任务" },
-  "tasks_running": { "message": "$1 个任务进行中", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_total": { "message": "共 $1 个任务", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_retry": { "message": "重试" },
-  "tasks_retryFailed": { "message": "重试失败: $1", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_cancel": { "message": "取消" },
-  "tasks_cancelled": { "message": "任务已取消。" },
-  "tasks_cancelFailed": { "message": "取消失败: $1", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_cancelUnavailable": { "message": "该任务当前无法取消，可能已在写入文件。" },
-  "tasks_openLocation": { "message": "打开位置" },
-  "taskStatus_running": { "message": "下载中" },
-  "taskStatus_retrying": { "message": "重试中" },
-  "taskStatus_complete": { "message": "已完成" },
-  "taskStatus_failed": { "message": "失败" },
-  "taskStatus_interrupted": { "message": "已中断" },
-  "download_button": { "message": "下载" },
-  "download_buttonDownloading": { "message": "下载中" },
-  "download_buttonCompleted": { "message": "已完成" },
-  "download_buttonProtected": { "message": "受保护" },
-  "download_percent": { "message": "下载中 $1%", "placeholders": { "1": { "content": "$1" } } },
-  "download_started": { "message": "下载已开始。" },
-  "download_startedBatch": { "message": "开始批量下载 $1 个视频。", "placeholders": { "1": { "content": "$1" } } },
-  "download_alreadyRunning": { "message": "$1 下载任务已在执行中。", "placeholders": { "1": { "content": "$1" } } },
-  "download_failed": { "message": "$1 下载失败: $2", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } },
-  "download_done": { "message": "$1 下载完成。", "placeholders": { "1": { "content": "$1" } } },
-  "quality_loading": { "message": "加载中…" },
-  "quality_auto": { "message": "自动（最高画质）" },
-  "quality_resolution": { "message": "清晰度" },
-  "quality_needsSignature": { "message": "（待签名解析）" },
-  "quality_withAudio": { "message": "（含音频）" },
-  "quality_needsMerge": { "message": "（需合并）" },
-  "edit_title": { "message": "编辑标题" },
-  "error_prefix": { "message": "错误: $1", "placeholders": { "1": { "content": "$1" } } },
-  "error_unknown": { "message": "未知错误" },
-  "error_noBackground": { "message": "无法连接到扩展后台。" },
-  "title_unknownVideo": { "message": "未知视频" },
-  "note_youtube": { "message": "YouTube 下载模式可在设置中切换。" },
-  "note_youtubeSignature": { "message": "部分高分辨率仍需要补充签名解析，扩展会继续尝试补全可下载地址。" },
-  "note_bilibili": { "message": "Bilibili 会在页面侧解析并合并音视频。" },
-  "note_blob": { "message": "Blob 资源会先提取真实数据，再触发保存。" },
-  "note_hls": { "message": "HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。" },
-  "note_audio": { "message": "音频资源会走后台直链下载流程。" },
-  "note_drm": { "message": "该资源受 DRM 保护，无法下载。" },
-  "notify_completeTitle": { "message": "下载完成" },
-  "notify_completeBody": { "message": "$1（$2）", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } },
-  "notify_failedTitle": { "message": "下载失败" },
-  "notify_failedBody": { "message": "$1：$2", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } }
+  "action_clearList": {
+    "message": "清列表"
+  },
+  "action_history": {
+    "message": "历史"
+  },
+  "action_settings": {
+    "message": "设置"
+  },
+  "action_tasks": {
+    "message": "任务"
+  },
+  "bili_failed": {
+    "message": "Bilibili 下载失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "bili_fetching": {
+    "message": "正在获取 Bilibili 视音频数据..."
+  },
+  "bili_fetchingUrl": {
+    "message": "正在获取 Bilibili 视频地址..."
+  },
+  "bili_merging": {
+    "message": "正在合并 Bilibili 视音频..."
+  },
+  "bili_mergingPercent": {
+    "message": "合并中... $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "bili_tooLarge": {
+    "message": "Bilibili 视频体积 $1 MB 超过浏览器内合并上限 $2 MB，改为分别保存视频与音频文件（可用本地工具合并）",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "blob_started": {
+    "message": "Blob 视频下载已开始"
+  },
+  "dash_fetchManifest": {
+    "message": "正在获取 DASH manifest..."
+  },
+  "dash_fetchingAudio": {
+    "message": "正在下载 DASH 音频分片..."
+  },
+  "dash_fetchingVideo": {
+    "message": "正在下载 DASH 视频分片..."
+  },
+  "dash_merging": {
+    "message": "正在合并 DASH 视音频..."
+  },
+  "dash_multiPeriod": {
+    "message": "该清单包含多个 Period，已按顺序拼接分片；如播放不连续请下载分离文件"
+  },
+  "dash_segmentFailed": {
+    "message": "DASH $1 有 $2 个分片下载失败（未超阈值），已跳过",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "dash_tooLarge": {
+    "message": "DASH 流总体积 $1 MB 超过浏览器内合并上限，改为分别保存视频与音频文件",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_alreadyRunning": {
+    "message": "$1 下载任务已在执行中。",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_button": {
+    "message": "下载"
+  },
+  "download_buttonCompleted": {
+    "message": "已完成"
+  },
+  "download_buttonDownloading": {
+    "message": "下载中"
+  },
+  "download_buttonProtected": {
+    "message": "受保护"
+  },
+  "download_done": {
+    "message": "$1 下载完成。",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_doneShort": {
+    "message": "下载完成: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_failed": {
+    "message": "$1 下载失败: $2",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "download_percent": {
+    "message": "下载中 $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_started": {
+    "message": "下载已开始。"
+  },
+  "download_startedBatch": {
+    "message": "开始批量下载 $1 个视频。",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_started_short": {
+    "message": "下载已开始"
+  },
+  "edit_title": {
+    "message": "编辑标题"
+  },
+  "error_noBackground": {
+    "message": "无法连接到扩展后台。"
+  },
+  "error_prefix": {
+    "message": "错误: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "error_unknown": {
+    "message": "未知错误"
+  },
+  "history_clear": {
+    "message": "清空下载历史"
+  },
+  "history_clearFailed": {
+    "message": "清空失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_count": {
+    "message": "共 $1 条记录",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_delete": {
+    "message": "删除"
+  },
+  "history_deleteFailed": {
+    "message": "删除失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_deleting": {
+    "message": "删除中"
+  },
+  "history_empty": {
+    "message": "暂无下载历史"
+  },
+  "history_loading": {
+    "message": "正在加载..."
+  },
+  "history_openFailed": {
+    "message": "无法打开下载文件夹: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_title": {
+    "message": "下载历史"
+  },
+  "hls_audioMergeFailed": {
+    "message": "独立音轨合并失败（$1），将只保存视频画面",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "hls_audioSeparate": {
+    "message": "独立音轨无法在浏览器内合并，已单独保存为 _audio 文件"
+  },
+  "hls_live": {
+    "message": "检测到直播流，仅能下载当前播放窗口的 $1 个分片",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_batchDownload": {
+    "message": "下载所选 ($1)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_detected": {
+    "message": "检测到 $1 个视频资源",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_hint": {
+    "message": "请在包含视频的页面打开扩展"
+  },
+  "list_none": {
+    "message": "未检测到视频"
+  },
+  "list_selectAll": {
+    "message": "全选"
+  },
+  "note_audio": {
+    "message": "音频资源会走后台直链下载流程。"
+  },
+  "note_bilibili": {
+    "message": "Bilibili 会在页面侧解析并合并音视频。"
+  },
+  "note_blob": {
+    "message": "Blob 资源会先提取真实数据，再触发保存。"
+  },
+  "note_drm": {
+    "message": "该资源受 DRM 保护，无法下载。"
+  },
+  "note_hls": {
+    "message": "HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。"
+  },
+  "note_youtube": {
+    "message": "YouTube 下载模式可在设置中切换。"
+  },
+  "note_youtubeSignature": {
+    "message": "部分高分辨率仍需要补充签名解析，扩展会继续尝试补全可下载地址。"
+  },
+  "notify_completeBody": {
+    "message": "$1（$2）",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "notify_completeTitle": {
+    "message": "下载完成"
+  },
+  "notify_failedBody": {
+    "message": "$1：$2",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "notify_failedTitle": {
+    "message": "下载失败"
+  },
+  "quality_auto": {
+    "message": "自动（最高画质）"
+  },
+  "quality_loading": {
+    "message": "加载中…"
+  },
+  "quality_needsMerge": {
+    "message": "（需合并）"
+  },
+  "quality_needsSignature": {
+    "message": "（待签名解析）"
+  },
+  "quality_resolution": {
+    "message": "清晰度"
+  },
+  "quality_withAudio": {
+    "message": "（含音频）"
+  },
+  "settings_askSaveLocation": {
+    "message": "每次询问保存位置"
+  },
+  "settings_concurrent": {
+    "message": "并发下载数"
+  },
+  "settings_days": {
+    "message": "$1 天",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "settings_days30": {
+    "message": "30 天"
+  },
+  "settings_days7": {
+    "message": "7 天"
+  },
+  "settings_days90": {
+    "message": "90 天"
+  },
+  "settings_debugLogging": {
+    "message": "调试日志"
+  },
+  "settings_domainBlacklist": {
+    "message": "域名黑名单"
+  },
+  "settings_domainBlacklistPlaceholder": {
+    "message": "逗号或换行分隔，如 ads.example.com"
+  },
+  "settings_filename": {
+    "message": "文件命名"
+  },
+  "settings_filenameDate": {
+    "message": "标题 + 日期"
+  },
+  "settings_filenameQuality": {
+    "message": "标题 + 画质"
+  },
+  "settings_filenameTitle": {
+    "message": "仅标题"
+  },
+  "settings_forever": {
+    "message": "永久"
+  },
+  "settings_historyRetention": {
+    "message": "历史保留"
+  },
+  "settings_minDuration": {
+    "message": "最小时长（秒，0=不限）"
+  },
+  "settings_minSize": {
+    "message": "最小体积（MB，0=不限）"
+  },
+  "settings_notification": {
+    "message": "下载完成通知"
+  },
+  "settings_saveFailed": {
+    "message": "设置保存失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "settings_saved": {
+    "message": "设置已保存。"
+  },
+  "settings_subdir": {
+    "message": "下载目录"
+  },
+  "settings_subdirPlaceholder": {
+    "message": "留空为默认目录"
+  },
+  "settings_subtitle": {
+    "message": "正在检测视频..."
+  },
+  "settings_title": {
+    "message": "设置"
+  },
+  "settings_youtubeCapture": {
+    "message": "录制模式"
+  },
+  "settings_youtubeMode": {
+    "message": "YouTube 默认模式"
+  },
+  "settings_youtubeParse": {
+    "message": "解析下载"
+  },
+  "taskStatus_complete": {
+    "message": "已完成"
+  },
+  "taskStatus_failed": {
+    "message": "失败"
+  },
+  "taskStatus_interrupted": {
+    "message": "已中断"
+  },
+  "taskStatus_retrying": {
+    "message": "重试中"
+  },
+  "taskStatus_running": {
+    "message": "下载中"
+  },
+  "tasks_cancel": {
+    "message": "取消"
+  },
+  "tasks_cancelFailed": {
+    "message": "取消失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_cancelUnavailable": {
+    "message": "该任务当前无法取消，可能已在写入文件。"
+  },
+  "tasks_cancelled": {
+    "message": "任务已取消。"
+  },
+  "tasks_empty": {
+    "message": "暂无下载任务"
+  },
+  "tasks_openLocation": {
+    "message": "打开位置"
+  },
+  "tasks_retry": {
+    "message": "重试"
+  },
+  "tasks_retryFailed": {
+    "message": "重试失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_running": {
+    "message": "$1 个任务进行中",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_title": {
+    "message": "下载任务"
+  },
+  "tasks_total": {
+    "message": "共 $1 个任务",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "title_unknownVideo": {
+    "message": "未知视频"
+  },
+  "yt_capturePreparing": {
+    "message": "正在准备 YouTube 页面录制下载..."
+  },
+  "yt_failed": {
+    "message": "YouTube 下载失败: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "yt_merging": {
+    "message": "正在合并 YouTube 视音频..."
+  },
+  "yt_mergingPercent": {
+    "message": "正在合并 YouTube 视音频... $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "yt_parsePreparing": {
+    "message": "正在准备 YouTube 解析下载..."
+  },
+  "yt_videoFallback": {
+    "message": "YouTube 视频"
+  }
 }

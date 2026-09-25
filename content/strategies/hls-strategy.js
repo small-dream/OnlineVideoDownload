@@ -7,6 +7,22 @@
 
   const constants = globalThis.__OVD_CONSTANTS__ || {};
   const messageTypes = globalThis.__OVD_MESSAGE_TYPES__?.MESSAGE_TYPES || {};
+  // 国际化：优先 chrome.i18n（见 lib/i18n.js）；未加载时本地退回中文原文，
+  // 并同样处理 $1..$9 占位符，避免出现裸露的占位符。
+  const i18n = globalThis.__OVD_I18N__ || {};
+  const t = typeof i18n.t === 'function'
+    ? i18n.t
+    : (_key, fallback, subs) => {
+      if (!fallback || !subs) {
+        return fallback;
+      }
+      const list = Array.isArray(subs) ? subs : [subs];
+      return String(fallback).replace(/\$(\d)/g, (match, index) => {
+        const value = list[Number(index) - 1];
+        return value == null ? match : String(value);
+      });
+    };
+
   const MSG = messageTypes;
 
   function createHlsDelegateHandler(options = {}) {
@@ -91,7 +107,7 @@
 
       if (playlist.isLive) {
         // 直播流没有 ENDLIST，只能下载当前窗口，必须显式告知用户而不是静默产出残片
-        reportStatus(`检测到直播流，仅能下载当前播放窗口的 ${segments.length} 个分片`, 'info');
+        reportStatus(t('hls_live', '检测到直播流，仅能下载当前播放窗口的 $1 个分片', [String(segments.length)]), 'info');
         emitRuntimeMessage({
           isLive: true,
           live: true,
@@ -218,7 +234,7 @@
           }
         } catch (err) {
           console.warn(`[OVD] 独立音轨合并失败，回退为纯视频文件: ${err.message}`);
-          reportStatus(`独立音轨合并失败（${err.message}），将只保存视频画面`, 'info');
+          reportStatus(t('hls_audioMergeFailed', '独立音轨合并失败（$1），将只保存视频画面', [err.message]), 'info');
         }
 
         blob = new Blob([merged], { type: output.mimeType });
@@ -456,7 +472,7 @@
       const audioBlob = new Blob([audioBytes], { type: audioOutput.mimeType });
 
       emitRuntimeMessage({
-        message: '独立音轨无法在浏览器内合并，已单独保存为 _audio 文件',
+        message: t('hls_audioSeparate', '独立音轨无法在浏览器内合并，已单独保存为 _audio 文件'),
         taskMeta,
         type: MSG.SOURCE_DOWNLOAD_STATUS || 'SOURCE_DOWNLOAD_STATUS',
         videoUrl: taskMeta.videoUrl || audioUrl,
