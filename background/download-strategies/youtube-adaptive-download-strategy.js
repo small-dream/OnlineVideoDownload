@@ -22,6 +22,36 @@ const YOUTUBE_PARALLEL_AUDIO_MIN_BYTES = constants.YOUTUBE_PARALLEL_AUDIO_MIN_BY
 const YOUTUBE_PARALLEL_CHUNK_BYTES = constants.YOUTUBE_PARALLEL_CHUNK_BYTES || 8 * 1024 * 1024;
 const YOUTUBE_PARALLEL_MAX_CONCURRENCY = constants.YOUTUBE_PARALLEL_MAX_CONCURRENCY || 4;
 const YOUTUBE_PARALLEL_MIN_BYTES = constants.YOUTUBE_PARALLEL_MIN_BYTES || 16 * 1024 * 1024;
+// 浏览器内合并的保守上限：超过它就走 HLS（OPFS 流式落盘）或明确报错，
+// 而不是让浏览器抛 "Array buffer allocation failed"
+const YOUTUBE_MERGE_MAX_BYTES = constants.YOUTUBE_MERGE_MAX_BYTES || 768 * 1024 * 1024;
+
+/**
+ * 决定自适应流的下载路线：
+ * - `merge`：体积在上限内，照常"抓视频流 + 抓音频流 + 内存合并"
+ * - `hls`：超限但有 HLS 清单 → 改走 HLS 流式落盘（OPFS，上限 8GB）
+ * - `reject`：超限且没有 HLS → 明确报错（提示换更低清晰度/录制模式）
+ * @returns {'merge'|'hls'|'reject'}
+ */
+export function decideAdaptiveDownloadRoute({
+  estimatedBytes = 0,
+  hasHlsManifest = false,
+  limitBytes = YOUTUBE_MERGE_MAX_BYTES,
+} = {}) {
+  if (!(Number(estimatedBytes) > Number(limitBytes))) {
+    return 'merge';
+  }
+  return hasHlsManifest ? 'hls' : 'reject';
+}
+
+/** 合并超限错误：带错误码，避免下载重试逻辑把整条流再拉一遍 */
+function createMergeTooLargeError(estimatedBytes) {
+  const error = new Error(
+    `该清晰度预计需要 ${formatBytes(estimatedBytes)}，超出浏览器内合并上限（${formatBytes(YOUTUBE_MERGE_MAX_BYTES)}）`
+  );
+  error.code = 'YOUTUBE_MERGE_TOO_LARGE';
+  return error;
+}
 
 function formatBytes(bytes) {
   const value = Number(bytes) || 0;
@@ -109,6 +139,11 @@ async function fetchParallelRangeBuffer(url, label, headers, totalBytesHint = 0,
 
   if (probeResponse.status !== 206 || totalBytes <= 0 || totalBytes < minBytes) {
     throw new Error(`${label} range probe unsupported status=${probeResponse.status} total=${totalBytes}`);
+  }
+
+  // 单路流本身超过合并上限就没必要继续拉（探测已给出真实长度）
+  if (totalBytes > YOUTUBE_MERGE_MAX_BYTES) {
+    throw createMergeTooLargeError(totalBytes);
   }
 
   const segments = [];
@@ -235,6 +270,14 @@ async function fetchResumableBuffer(url, label, headers, totalBytesHint = 0, onP
         const { done, value } = await reader.read();
         if (done) break;
         if (value?.length) {
+          // 兜底：估算缺失（无 contentLength/bitrate）时按实际接收量守住上限，
+          // 避免一路拉到 OOM 才抛 "Array buffer allocation failed"
+          if (loadedBytes + value.length > YOUTUBE_MERGE_MAX_BYTES) {
+            try {
+              await reader.cancel();
+            } catch (_err) {}
+            throw createMergeTooLargeError(loadedBytes + value.length);
+          }
           chunks.push(value);
           loadedBytes += value.length;
           if (onProgress && loadedBytes - lastReportedBytes >= PROGRESS_REPORT_INTERVAL) {
@@ -245,6 +288,10 @@ async function fetchResumableBuffer(url, label, headers, totalBytesHint = 0, onP
       }
       break;
     } catch (err) {
+      // 超限属于"确定不做"，不要再重试把整条流拉一遍
+      if (err?.code === 'YOUTUBE_MERGE_TOO_LARGE') {
+        throw err;
+      }
       if (attemptIndex === retryDelays.length - 1) {
         throw new Error(`${label} stream fetch failed: ${err.message}`);
       }
@@ -320,9 +367,42 @@ async function mergeAdaptiveStreams(meta, target, context) {
     `[OVD][BG] YouTube 合并选流 videoItag=${videoStream?.itag || '-'} audioItag=${audioStream?.itag || '-'} `
     + `audioTrack=${audioStream?.audioTrackName || '-'} audioDefault=${audioStream?.audioTrackIsDefault ? 'yes' : 'no'}`
   );
-  const estimatedTotalBytes = (Number(videoStream?.contentLength) || 0) + (Number(audioStream?.contentLength) || 0);
-  if (estimatedTotalBytes > MAX_BACKGROUND_MERGE_BYTES) {
-    throw new Error(`当前清晰度预计需要抓取约 ${formatBytes(estimatedTotalBytes)}，浏览器内合并不稳定，请改用更低清晰度或录制模式`);
+  // 估算：优先 contentLength，缺失时用 bitrate×时长（现场 1.7GB 的视频就属于缺失情况）
+  const durationSeconds = Number(meta?.duration || meta?.lengthSeconds) || 0;
+  const estimateOf = (stream) => (Number(stream?.contentLength) || 0)
+    || (streamUtils.estimateStreamBytes?.(stream, durationSeconds) || 0);
+  const estimatedTotalBytes = estimateOf(videoStream) + estimateOf(audioStream);
+
+  const hlsManifestUrl = typeof meta?.hlsManifestUrl === 'string' ? meta.hlsManifestUrl : '';
+  const route = decideAdaptiveDownloadRoute({
+    estimatedBytes: estimatedTotalBytes,
+    hasHlsManifest: !!hlsManifestUrl,
+  });
+
+  // 超限时优先改走 HLS（OPFS 流式落盘，上限 8GB），拿不到清单才明确报错
+  if (route === 'hls') {
+    const hlsFetcher = context?.hlsFetcher;
+    if (typeof hlsFetcher?.downloadAndMerge === 'function') {
+      console.warn(
+        `[OVD][BG] 预计 ${formatBytes(estimatedTotalBytes)} 超出浏览器内合并上限 `
+        + `(${formatBytes(YOUTUBE_MERGE_MAX_BYTES)})，改用 HLS 流式下载`
+      );
+      // 直接走后台上报/落盘链路（HlsFetcher 内部按体积自动切 OPFS 流式落盘），
+      // 不再经过页面上下文那条纯内存路径
+      return hlsFetcher.downloadAndMerge(
+        hlsManifestUrl,
+        context.filenameBase,
+        meta?.requestHeaders || {},
+        (percent, payload = {}) => context.onTaskProgress?.(percent, payload),
+        context.tabId,
+        context.taskMeta || {},
+        {}
+      );
+    }
+  }
+
+  if (route !== 'merge') {
+    throw createMergeTooLargeError(estimatedTotalBytes);
   }
 
   const headers = meta?.requestHeaders || {};
