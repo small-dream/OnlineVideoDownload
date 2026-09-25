@@ -176,8 +176,89 @@ async function submitBlobDownloadFromOffscreen(blob, filename, mimeType, taskMet
   };
 }
 
+/**
+ * 把已经落到 OPFS 的流交给浏览器下载。
+ * SW 里没有 URL.createObjectURL，由 offscreen 文档按文件名打开同一份 OPFS 文件
+ * 生成对象 URL；双方共享扩展 origin 的 OPFS，因此不需要传输字节。
+ */
+async function submitOpfsDownloadFromOffscreen(opfsName, filename, mimeType, taskMeta = {}) {
+  if (!opfsName) {
+    return { error: 'OPFS 文件名为空', ok: false };
+  }
+
+  await ensureOffscreenDocument();
+
+  let openResult;
+  try {
+    openResult = await sendOffscreenMessage({
+      mimeType,
+      name: opfsName,
+      taskMeta,
+      type: MSG.OFFSCREEN_OPFS_DOWNLOAD_OPEN || 'OFFSCREEN_OPFS_DOWNLOAD_OPEN',
+    });
+  } catch (err) {
+    return { error: `OPFS 对象 URL 创建失败: ${err.message}`, ok: false };
+  }
+
+  if (!openResult?.ok || !openResult.objectUrl) {
+    return { error: openResult?.error || 'OPFS 对象 URL 创建失败', ok: false };
+  }
+
+  const downloadFilename = await downloadPathUtils.applyDownloadSubdir?.(filename);
+  const saveAs = await resolveSaveAs();
+
+  const downloadResult = await new Promise((resolve) => {
+    chrome.downloads.download({
+      filename: downloadFilename,
+      saveAs,
+      url: openResult.objectUrl,
+    }, (downloadId) => {
+      if (chrome.runtime.lastError) {
+        resolve({ error: chrome.runtime.lastError.message, ok: false });
+        return;
+      }
+      resolve({ downloadId, ok: true });
+    });
+  });
+
+  if (!downloadResult.ok) {
+    await releaseOpfsDownload({ name: opfsName, objectUrl: openResult.objectUrl });
+    return downloadResult;
+  }
+
+  console.log(`[OVD] OPFS 文件已提交下载 downloadId=${downloadResult.downloadId} name=${opfsName} size=${openResult.byteLength || 0}`);
+
+  return {
+    downloadId: downloadResult.downloadId,
+    filename: downloadFilename,
+    ok: true,
+    opfsName,
+    objectUrl: openResult.objectUrl,
+    size: openResult.byteLength || null,
+  };
+}
+
+/** 释放对象 URL 并删除 OPFS 临时文件（下载完成/失败/中断后调用） */
+async function releaseOpfsDownload({ name = '', objectUrl = '' } = {}) {
+  if (!name && !objectUrl) {
+    return;
+  }
+
+  try {
+    await sendOffscreenMessage({
+      name,
+      objectUrl,
+      type: MSG.OFFSCREEN_OPFS_DOWNLOAD_RELEASE || 'OFFSCREEN_OPFS_DOWNLOAD_RELEASE',
+    });
+  } catch (err) {
+    console.warn(`[OVD] 释放 OPFS 临时文件失败 name=${name}: ${err.message}`);
+  }
+}
+
 export {
   ensureOffscreenDocument,
+  releaseOpfsDownload,
   revokeOffscreenObjectUrl,
   submitBlobDownloadFromOffscreen,
+  submitOpfsDownloadFromOffscreen,
 };

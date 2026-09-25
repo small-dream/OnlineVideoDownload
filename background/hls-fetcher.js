@@ -10,7 +10,8 @@ import '../lib/mp4-muxer.js';
 import '../lib/bilibili-muxer.js';
 import { safeRuntimeMessage } from '../lib/browser-compat.module.js';
 import { injectHeaders } from './header-injector.js';
-import { submitBlobDownloadFromOffscreen } from './offscreen-download.js';
+import { releaseOpfsDownload, submitBlobDownloadFromOffscreen, submitOpfsDownloadFromOffscreen } from './offscreen-download.js';
+import { registerOpfsTempFile } from './opfs-temp-registry.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const constants = globalThis.__OVD_CONSTANTS__ || {};
@@ -113,9 +114,19 @@ export class HlsFetcher {
     const audioMergePlanned = !!audioRenditionUrl
       && output.ext === '.mp4'
       && typeof globalThis.BilibiliMuxer?.mergeFmp4Streams === 'function';
+
+    // 大文件走 OPFS：小文件仍是纯内存（快），累计超过阈值后自动落盘，
+    // 上限也从"浏览器内存"变成"磁盘空间"。
+    const opfs = globalThis.__OVD_OPFS_SINK__ || {};
+    const diskBacked = typeof opfs.createSpillSink === 'function' && !!opfs.isSupported?.();
     const sink = !audioMergePlanned && typeof pipeline.createInMemorySink === 'function'
-      ? pipeline.createInMemorySink()
+      ? (diskBacked
+        ? opfs.createSpillSink({ thresholdBytes: constants.OPFS_SPILL_THRESHOLD_BYTES })
+        : pipeline.createInMemorySink())
       : null;
+    const maxTotalBytes = diskBacked && sink
+      ? (constants.OPFS_MAX_OUTPUT_BYTES || 0)
+      : constants.MAX_IN_PAGE_MERGE_BYTES;
 
     const prefixBuffers = [];
     if (playlist.initSegmentUrl) {
@@ -133,7 +144,7 @@ export class HlsFetcher {
       concurrency: HLS_SEGMENT_CONCURRENCY,
       fetchBuffer: (url, range) => pipeline.hlsFetchBuffer(url, headers, { range }),
       headers,
-      maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES,
+      maxTotalBytes,
       onProgress,
       sink,
       transform: decryptor,
@@ -142,7 +153,8 @@ export class HlsFetcher {
       console.warn(`[HLS] ${failedCount}/${segments.length} 个分片下载失败（未超阈值），已按空洞跳过`);
     }
 
-    let blob;
+    let blob = null;
+    let opfsName = '';
     let audioMerged = false;
 
     if (audioMergePlanned) {
@@ -178,8 +190,16 @@ export class HlsFetcher {
       }
 
       blob = new Blob([merged], { type: output.mimeType });
-    } else if (sink && sink.byteLength > 0 && typeof sink.toBlob === 'function') {
-      blob = sink.toBlob(output.mimeType);
+    } else if (sink && sink.byteLength > 0) {
+      const info = typeof sink.finalize === 'function'
+        ? await sink.finalize()
+        : { byteLength: sink.byteLength, mode: 'memory' };
+
+      if (info.mode === 'opfs' && info.name) {
+        opfsName = info.name;
+      } else {
+        blob = sink.toBlob(output.mimeType);
+      }
     } else {
       // 兜底：下载管线未使用 sink（旧实现）时仍按缓冲数组拼接
       let finalBuffers = buffers || [];
@@ -190,7 +210,9 @@ export class HlsFetcher {
       blob = new Blob([this._concatBuffers(finalBuffers)], { type: output.mimeType });
     }
 
-    const result = await this._downloadMergedBlob(blob, filename, output, taskMeta);
+    const result = opfsName
+      ? await this._downloadOpfsBlob(opfsName, filename, output, taskMeta)
+      : await this._downloadMergedBlob(blob, filename, output, taskMeta);
     return {
       ...(result || {}),
       audioMerged,
@@ -283,6 +305,32 @@ export class HlsFetcher {
     if (result?.ok) {
       console.log(`[HLS] download submitted downloadId=${result.downloadId} filename="${downloadFilename}"`);
     }
+    return result;
+  }
+
+  /**
+   * OPFS 落盘后的下载交接：SW 无法创建对象 URL，由 offscreen 按文件名打开同一份
+   * OPFS 文件生成 URL（不传输字节），下载结束/中断后由 SW 删除临时文件。
+   */
+  async _downloadOpfsBlob(opfsName, filename, output, taskMeta = {}) {
+    const pipeline = getHlsPipeline();
+    const downloadFilename = pipeline.ensureExtension(filename, output.ext);
+
+    const result = await submitOpfsDownloadFromOffscreen(
+      opfsName,
+      downloadFilename,
+      output.mimeType,
+      taskMeta
+    );
+
+    if (result?.ok) {
+      registerOpfsTempFile(result.downloadId, opfsName);
+      console.log(`[HLS] OPFS 落盘已提交 downloadId=${result.downloadId} filename="${result.filename}"`);
+    } else {
+      // 提交失败（例如用户取消保存对话框）立刻回收，避免临时文件残留
+      await releaseOpfsDownload({ name: opfsName });
+    }
+
     return result;
   }
 }

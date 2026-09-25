@@ -462,3 +462,80 @@ test('HLS 加密流在写入 sink 前逐分片解密（按媒体序号派生 IV�
     delete globalThis.__OVD_HLS_PIPELINE__;
   }
 });
+
+test('HLS 视频非 fMP4 时把独立音轨单独保存而不是丢弃', async () => {
+  const pipeline = loadRealPipeline();
+  const master = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="主音轨",DEFAULT=YES,URI="audio.m3u8"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="aud"',
+    'video.m3u8',
+  ].join('\n');
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(master)],
+    ['video.m3u8', playlistResponse('#EXTM3U\n#EXTINF:1,\nv1.ts\n')],
+    ['audio.m3u8', playlistResponse('#EXTM3U\n#EXTINF:1,\na1.ts\n')],
+  ]);
+  const blobDownloads = [];
+  // muxer 存在但视频是 TS：只能分离保存
+  globalThis.BilibiliMuxer = { mergeFmp4Streams: async () => new Blob([new Uint8Array(1)]) };
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ filename, size: blob.size });
+        return { downloadId: 1, ok: true };
+      },
+    });
+
+    const result = await handler.handle('https://cdn.example.com/master.m3u8', 'video', {}, {});
+
+    assert.equal(result.audioSavedSeparately, true);
+    assert.equal(result.audioSeparateFilename, 'video_audio.ts');
+    assert.equal(result.audioMerged, false);
+    assert.deepEqual(blobDownloads.map((item) => item.filename), ['video_audio.ts', 'video.ts']);
+  } finally {
+    stub.restore();
+    delete globalThis.BilibiliMuxer;
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('HLS 合并失败时降级为单独保存音轨文件', async () => {
+  const pipeline = loadRealPipeline();
+  const videoBody = '#EXTM3U\n#EXT-X-MAP:URI="vinit.mp4"\n#EXTINF:1,\nv1.m4s\n';
+  const audioBody = '#EXTM3U\n#EXT-X-MAP:URI="ainit.mp4"\n#EXTINF:1,\na1.m4s\n';
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(MASTER_WITH_AUDIO)],
+    ['high.m3u8', playlistResponse(videoBody)],
+    ['audio.m3u8', playlistResponse(audioBody)],
+  ]);
+  const blobDownloads = [];
+  globalThis.BilibiliMuxer = {
+    async mergeFmp4Streams() {
+      throw new Error('muxer 解析失败');
+    },
+  };
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ filename, size: blob.size });
+        return { downloadId: 1, ok: true };
+      },
+    });
+
+    const result = await handler.handle('https://cdn.example.com/master.m3u8', 'video', {}, {});
+
+    assert.equal(result.audioMerged, false);
+    assert.equal(result.audioSavedSeparately, true);
+    assert.equal(result.audioSeparateFilename, 'video_audio.mp4');
+    assert.deepEqual(blobDownloads.map((item) => item.filename), ['video_audio.mp4', 'video.mp4']);
+  } finally {
+    stub.restore();
+    delete globalThis.BilibiliMuxer;
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});

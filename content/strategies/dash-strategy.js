@@ -11,7 +11,7 @@
 
   const constants = globalThis.__OVD_CONSTANTS__ || {};
   const SEGMENT_CONCURRENCY = constants.HLS_SEGMENT_CONCURRENCY || 5;
-  const MAX_MERGE_SIZE = 1500 * 1024 * 1024;
+  const MAX_MERGE_SIZE = constants.DASH_MAX_MERGE_BYTES || 1500 * 1024 * 1024;
 
   function createDashStrategy(options = {}) {
     const {
@@ -113,6 +113,13 @@
         }
       }
       return merged.buffer;
+    }
+
+    /** 在扩展名前插入后缀：demo.mp4 → demo-video.mp4 */
+    function withFilenameSuffix(filename, suffix) {
+      const value = String(filename || 'dash_video');
+      const match = /^(.*?)(\.[a-z0-9]{2,5})?$/i.exec(value);
+      return `${match?.[1] || 'dash_video'}${suffix}${match?.[2] || ''}`;
     }
 
     /**
@@ -268,12 +275,28 @@
 
       const estimatedTotal = videoData.byteLength + audioData.byteLength;
       if (estimatedTotal > MAX_MERGE_SIZE) {
-        const tooLarge = new Error(
-          `DASH 流总体积过大 (${(estimatedTotal / 1024 / 1024).toFixed(0)} MB)，` +
-          `浏览器内合并可能失败。建议下载分离文件。`
-        );
-        tooLarge.code = 'DASH_OUTPUT_TOO_LARGE';
-        throw tooLarge;
+        // 分离文件降级：不因体积超限直接失败，音视频各自落盘，供用户本地合并
+        const totalMb = (estimatedTotal / 1024 / 1024).toFixed(0);
+        reporter?.status(`DASH 流总体积 ${totalMb} MB 超过浏览器内合并上限，改为分别保存视频与音频文件`);
+        console.warn(`[OVD] DASH 体积 ${totalMb} MB 超过合并上限，降级为分离文件`);
+
+        const baseName = videoUtils.buildMediaFilename?.({
+          ext: '.mp4',
+          fallback: 'dash_video',
+          title: meta?.title,
+        }) || 'dash_video.mp4';
+        const videoFilename = withFilenameSuffix(baseName, '-video');
+        const audioFilename = withFilenameSuffix(baseName, '-audio');
+
+        triggerBlobDownload(new Blob([videoData], { type: 'video/mp4' }), videoFilename, taskMeta);
+        triggerBlobDownload(new Blob([audioData], { type: 'audio/mp4' }), audioFilename, taskMeta);
+        reporter?.progress(100, { phase: 'complete' });
+
+        return {
+          filename: videoFilename,
+          ok: true,
+          separateFiles: [videoFilename, audioFilename],
+        };
       }
 
       reporter?.status('正在合并 DASH 视音频...');

@@ -119,7 +119,11 @@
       const audioMergePlanned = !!audioRenditionUrl
         && output.ext === '.mp4'
         && typeof globalThis.BilibiliMuxer?.mergeFmp4Streams === 'function';
-      const sink = !audioMergePlanned && typeof hlsPipeline.createInMemorySink === 'function'
+      // 独立音轨：能合并就合并（需要整体持有视频数据），否则单独落盘
+      const audioHandling = !audioRenditionUrl
+        ? 'none'
+        : (audioMergePlanned ? 'merge' : 'separate');
+      const sink = audioHandling !== 'merge' && typeof hlsPipeline.createInMemorySink === 'function'
         ? hlsPipeline.createInMemorySink()
         : null;
 
@@ -150,6 +154,8 @@
       let blob;
       let mergedBytes = 0;
       let mergedAudio = false;
+      let audioSavedSeparately = false;
+      let audioSeparateFilename = '';
 
       if (audioMergePlanned) {
         let finalBuffers = buffers || [];
@@ -167,12 +173,20 @@
             fetchOptions,
             taskMeta,
             merged,
-            output
+            output,
+            filename,
+            'merge'
           );
           if (audioResult) {
-            merged = audioResult;
-            mergedBytes = audioResult.byteLength;
-            mergedAudio = true;
+            if (audioResult.separate) {
+              // 无法合并时不丢音轨：视频保持纯画面，音轨单独落盘
+              audioSavedSeparately = true;
+              audioSeparateFilename = audioResult.filename;
+            } else {
+              merged = audioResult;
+              mergedBytes = audioResult.byteLength;
+              mergedAudio = true;
+            }
           }
         } catch (err) {
           console.warn(`[OVD] 独立音轨合并失败，回退为纯视频文件: ${err.message}`);
@@ -196,6 +210,29 @@
       }
 
       const finalFilename = hlsPipeline.ensureExtension(filename, output.ext);
+
+      // 无法合并（视频非 fMP4）时把音轨单独保存，避免整条音轨被静默丢弃
+      if (audioHandling === 'separate') {
+        const separateResult = await downloadAudioRendition(
+          audioRenditionUrl,
+          headers,
+          fetchOptions,
+          taskMeta,
+          null,
+          output,
+          filename,
+          'separate'
+        ).catch((err) => {
+          console.warn(`[OVD] 独立音轨单独保存失败: ${err.message}`);
+          return null;
+        });
+
+        if (separateResult?.separate) {
+          audioSavedSeparately = true;
+          audioSeparateFilename = separateResult.filename;
+        }
+      }
+
       console.log(`[OVD] 委托下载完成 合并大小=${(mergedBytes / 1024 / 1024).toFixed(2)} MB 触发下载 filename=${finalFilename}`);
 
       const downloadResult = await Promise.resolve(triggerBlobDownload(blob, finalFilename, taskMeta))
@@ -217,6 +254,8 @@
       });
       getFloatButton()?.showProgress(100);
       return {
+        audioSavedSeparately,
+        audioSeparateFilename,
         audioMerged: mergedAudio,
         downloadId: downloadResult?.downloadId ?? null,
         failedCount,
@@ -321,18 +360,8 @@
      * 仅当两路都是带 init segment 的 fMP4（.m4s/.mp4）且 muxer 可用时才合并，
      * 否则回退为纯视频并提示用户。
      */
-    async function downloadAudioRendition(audioUrl, headers, fetchOptions, taskMeta, videoBytes, output) {
+    async function downloadAudioRendition(audioUrl, headers, fetchOptions, taskMeta, videoBytes, output, filename, mode = 'merge') {
       const muxer = globalThis.BilibiliMuxer || {};
-      if (output.ext !== '.mp4' || typeof muxer.mergeFmp4Streams !== 'function') {
-        emitRuntimeMessage({
-          message: '该流的独立音轨需要合并工具，当前已保存为纯视频文件',
-          taskMeta,
-          type: MSG.SOURCE_DOWNLOAD_STATUS || 'SOURCE_DOWNLOAD_STATUS',
-          videoUrl: taskMeta.videoUrl || audioUrl,
-        });
-        return null;
-      }
-
       const audioText = await hlsPipeline.hlsFetchText(audioUrl, headers, fetchOptions);
       const audioPlaylist = hlsPipeline.parseHlsPlaylist(audioText, audioUrl);
       if (!audioPlaylist.segments.length) {
@@ -362,14 +391,50 @@
       }
 
       const audioBytes = concatBuffers(prefixBuffers.concat(audioBuffers));
-      const blob = await muxer.mergeFmp4Streams(
-        videoBytes.buffer.slice(videoBytes.byteOffset, videoBytes.byteOffset + videoBytes.byteLength),
-        audioBytes.buffer.slice(audioBytes.byteOffset, audioBytes.byteOffset + audioBytes.byteLength),
-        (percent) => getFloatButton()?.showProgress(percent)
-      );
-      const mergedBuffer = await blob.arrayBuffer();
-      console.log(`[OVD] 独立音轨合并完成 大小=${(mergedBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
-      return new Uint8Array(mergedBuffer);
+
+      // 无法在浏览器内合并时不丢音轨：把音轨单独保存为 _audio 文件
+      if (mode === 'separate' || output.ext !== '.mp4' || typeof muxer.mergeFmp4Streams !== 'function') {
+        return saveAudioSeparately(audioBytes, audioPlaylist, filename, taskMeta, audioUrl);
+      }
+
+      try {
+        const blob = await muxer.mergeFmp4Streams(
+          videoBytes.buffer.slice(videoBytes.byteOffset, videoBytes.byteOffset + videoBytes.byteLength),
+          audioBytes.buffer.slice(audioBytes.byteOffset, audioBytes.byteOffset + audioBytes.byteLength),
+          (percent) => getFloatButton()?.showProgress(percent)
+        );
+        const mergedBuffer = await blob.arrayBuffer();
+        console.log(`[OVD] 独立音轨合并完成 大小=${(mergedBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+        return new Uint8Array(mergedBuffer);
+      } catch (err) {
+        // 合并失败也不再丢音轨：降级为单独保存
+        console.warn(`[OVD] 独立音轨合并失败（${err.message}），改为单独保存音轨文件`);
+        return saveAudioSeparately(audioBytes, audioPlaylist, filename, taskMeta, audioUrl);
+      }
+    }
+
+    /** 分离文件降级：音轨单独落盘，返回 { separate: true, filename } */
+    async function saveAudioSeparately(audioBytes, audioPlaylist, filename, taskMeta, audioUrl) {
+      const audioOutput = hlsPipeline.inferHlsOutputProfile(audioPlaylist);
+      const audioFilename = hlsPipeline.ensureExtension(`${filename}_audio`, audioOutput.ext);
+      const audioBlob = new Blob([audioBytes], { type: audioOutput.mimeType });
+
+      emitRuntimeMessage({
+        message: '独立音轨无法在浏览器内合并，已单独保存为 _audio 文件',
+        taskMeta,
+        type: MSG.SOURCE_DOWNLOAD_STATUS || 'SOURCE_DOWNLOAD_STATUS',
+        videoUrl: taskMeta.videoUrl || audioUrl,
+      });
+
+      const audioResult = await Promise.resolve(triggerBlobDownload(audioBlob, audioFilename, taskMeta))
+        .catch((err) => ({ error: err.message, ok: false }));
+      if (audioResult?.ok === false) {
+        console.warn(`[OVD] 独立音轨单独保存失败: ${audioResult.error}`);
+        return null;
+      }
+
+      console.log(`[OVD] 独立音轨已单独保存 filename=${audioFilename} size=${(audioBytes.byteLength / 1024 / 1024).toFixed(2)} MB`);
+      return { filename: audioFilename, separate: true };
     }
 
     return {
