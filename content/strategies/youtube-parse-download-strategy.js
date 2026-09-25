@@ -40,7 +40,9 @@
       videoUtils = {},
     } = options;
 
-    const MAX_IN_PAGE_MERGE_BYTES = constants.MAX_IN_PAGE_MERGE_BYTES || 1.5 * 1024 * 1024 * 1024;
+    // 页面上下文是纯内存合并：上限与后台的"流式合并落盘"阈值对齐（512MB），
+    // 超过就交给后台走 OPFS（页面内 1.7GB 级合并必然分配失败）
+    const MAX_IN_PAGE_MERGE_BYTES = constants.STREAM_MERGE_THRESHOLD_BYTES || 512 * 1024 * 1024;
 
     function createLogger(traceId, meta, downloadOptions) {
       return loggerFactory.createLogger?.('youtube-parse', {
@@ -241,13 +243,17 @@
       if (estimatedTotalBytes > MAX_IN_PAGE_MERGE_BYTES) {
         throw errorFactory.createYouTubeDownloadError?.(
           'YT_PARSE_TOO_LARGE',
-          `当前清晰度预计需要抓取约 ${estimatedLabel}，浏览器内合并不稳定，请改用更低清晰度或录制模式`,
+          `该清晰度预计约 ${estimatedLabel}，超出页面内合并上限（${formatBytes(MAX_IN_PAGE_MERGE_BYTES)}）：`
+          + '请在扩展弹窗里下载（会走流式合并落盘），或改选更低清晰度',
           {
             audioBytes: estimatedAudioBytes,
             estimatedTotalBytes,
             videoBytes: estimatedVideoBytes,
           }
-        ) || new Error(`当前清晰度预计需要抓取约 ${estimatedLabel}，浏览器内合并不稳定，请改用更低清晰度或录制模式`);
+        ) || new Error(
+          `该清晰度预计约 ${estimatedLabel}，超出页面内合并上限（${formatBytes(MAX_IN_PAGE_MERGE_BYTES)}）：`
+          + '请在扩展弹窗里下载（会走流式合并落盘），或改选更低清晰度'
+        );
       }
 
       floatButton?.showMessage(

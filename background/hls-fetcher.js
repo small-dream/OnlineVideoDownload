@@ -12,6 +12,7 @@ import { safeRuntimeMessage } from '../lib/browser-compat.module.js';
 import { injectHeaders } from './header-injector.js';
 import { releaseOpfsDownload, submitBlobDownloadFromOffscreen, submitOpfsDownloadFromOffscreen } from './offscreen-download.js';
 import { registerOpfsTempFile } from './opfs-temp-registry.js';
+import { isStreamingMergeSupported, mergeOpfsStreamsAndDownload } from './streaming-merge.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const constants = globalThis.__OVD_CONSTANTS__ || {};
@@ -66,6 +67,7 @@ export class HlsFetcher {
     let m3u8Content = await pipeline.hlsFetchText(m3u8Url, headers);
     let audioRenditionUrl = null;
     let selectedQuality = '';
+    let selectedVariant = null;
 
     if (m3u8Content.includes('#EXT-X-STREAM-INF')) {
       const master = pipeline.parseHlsMasterPlaylist?.(m3u8Content, m3u8Url)
@@ -75,6 +77,7 @@ export class HlsFetcher {
       });
 
       if (variant) {
+        selectedVariant = variant;
         selectedQuality = variant.label || '';
         console.log(`[HLS] Master Playlist 选中画质=${selectedQuality} 带宽=${variant.bandwidth} url=${variant.url}`);
         const audioRendition = pipeline.findMatchingAudioRendition?.(master, variant);
@@ -114,6 +117,45 @@ export class HlsFetcher {
       : null;
 
     const output = pipeline.inferHlsOutputProfile(playlist);
+
+    // 需要"独立音轨合并"时，内存合并必须整体持有视频数据（上限 2GB）。
+    // 体积超过流式阈值且 OPFS 可用时，改成"视频/音频各自落盘 → 文件级流式合并"，
+    // 峰值内存与文件体积解耦（现场 1.7GB 视频撞 2048MB 上限就是这条分支）。
+    const averageBandwidth = Number(selectedVariant?.averageBandwidth) || 0;
+    const estimatedBytes = typeof pipeline.estimateHlsBytes === 'function'
+      ? pipeline.estimateHlsBytes(
+        playlist,
+        averageBandwidth || Number(selectedVariant?.bandwidth) || 0,
+        averageBandwidth > 0 ? { bandwidthFactor: 1 } : {}
+      )
+      : 0;
+    const streamMergeThreshold = constants.STREAM_MERGE_THRESHOLD_BYTES || 512 * 1024 * 1024;
+    const useStreamingAudioMerge = !!audioRenditionUrl
+      && output.ext === '.mp4'
+      && estimatedBytes > streamMergeThreshold
+      && isStreamingMergeSupported();
+
+    if (useStreamingAudioMerge) {
+      console.log(
+        `[HLS] 预估 ${Math.round(estimatedBytes / 1024 / 1024)} MB 需要音轨合并，`
+        + '改走流式合并落盘（视频/音频分别落盘后文件级合并）'
+      );
+      return this._downloadWithStreamingAudioMerge({
+        audioRenditionUrl,
+        decryptor,
+        headers,
+        keyInfo,
+        m3u8Url,
+        onProgress,
+        output,
+        filename,
+        pipeline,
+        playlist,
+        prefixBuffers,
+        segments,
+        taskMeta,
+      });
+    }
 
     // 需要把独立音轨合并进视频时必须整体持有视频数据（fMP4 muxer 接口所限）；
     // 其余情况走顺序写入 sink，避免再拼一份全量 Uint8Array。
@@ -225,6 +267,118 @@ export class HlsFetcher {
       isLive: !!playlist.isLive,
       quality: selectedQuality,
     };
+  }
+
+  /**
+   * 视频分片 + 独立音轨分别落盘到 OPFS，再做文件级流式合并。
+   * 峰值内存 ≈ 一个分片 + 一个 moof，与整片体积解耦；磁盘上限走 OPFS_MAX_OUTPUT_BYTES。
+   */
+  async _downloadWithStreamingAudioMerge({
+    audioRenditionUrl,
+    decryptor,
+    filename,
+    headers,
+    keyInfo,
+    onProgress,
+    output,
+    pipeline,
+    playlist,
+    prefixBuffers,
+    segments,
+    taskMeta,
+  }) {
+    const opfs = globalThis.__OVD_OPFS_SINK__ || {};
+    if (typeof opfs.createOpfsSink !== 'function') {
+      throw new Error('OPFS 不可用，无法进行流式合并');
+    }
+
+    const maxOutputBytes = constants.OPFS_MAX_OUTPUT_BYTES || 0;
+    const videoSink = await opfs.createOpfsSink({ prefix: 'ovd-hls-video' });
+    let audioSink = null;
+    let audioName = '';
+    let videoName = '';
+
+    try {
+      // 1) 视频（init segment + 全部分片）顺序写盘
+      for (const buffer of prefixBuffers) {
+        await videoSink.write(buffer);
+      }
+      await pipeline.downloadHlsSegments(segments, {
+        concurrency: HLS_SEGMENT_CONCURRENCY,
+        fetchBuffer: (url, range) => pipeline.hlsFetchBuffer(url, headers, { range }),
+        headers,
+        maxTotalBytes: maxOutputBytes,
+        onProgress,
+        sink: videoSink,
+        transform: decryptor,
+      });
+      const videoInfo = await videoSink.finalize();
+      videoName = videoInfo.name;
+      console.log(`[HLS] 视频分片已落盘 name=${videoName} 大小=${Math.round(videoInfo.byteLength / 1024 / 1024)} MB`);
+
+      // 2) 独立音轨同样落盘
+      audioSink = await opfs.createOpfsSink({ prefix: 'ovd-hls-audio' });
+      const audioText = await pipeline.hlsFetchText(audioRenditionUrl, headers);
+      const audioPlaylist = pipeline.parseHlsPlaylist(audioText, audioRenditionUrl);
+      if (!audioPlaylist.segments.length) {
+        throw new Error('独立音轨播放列表为空');
+      }
+
+      const audioKeyInfo = typeof pipeline.resolveHlsKeyInfo === 'function'
+        ? await pipeline.resolveHlsKeyInfo(audioPlaylist, audioText, audioRenditionUrl, headers, {})
+        : null;
+      const audioDecryptor = audioKeyInfo && typeof pipeline.createSegmentDecryptor === 'function'
+        ? pipeline.createSegmentDecryptor(audioKeyInfo)
+        : null;
+
+      if (audioPlaylist.initSegmentUrl) {
+        await audioSink.write(await pipeline.hlsFetchBuffer(audioPlaylist.initSegmentUrl, headers, {
+          range: audioPlaylist.initSegmentByteRange,
+        }));
+      }
+      await pipeline.downloadHlsSegments(audioPlaylist.segments, {
+        concurrency: HLS_SEGMENT_CONCURRENCY,
+        fetchBuffer: (url, range) => pipeline.hlsFetchBuffer(url, headers, { range }),
+        headers,
+        maxTotalBytes: maxOutputBytes,
+        sink: audioSink,
+        transform: audioDecryptor,
+      });
+      const audioInfo = await audioSink.finalize();
+      audioName = audioInfo.name;
+      console.log(`[HLS] 音轨已落盘 name=${audioName} 大小=${Math.round(audioInfo.byteLength / 1024 / 1024)} MB`);
+
+      // 3) 文件级流式合并 + 保存
+      const merged = await mergeOpfsStreamsAndDownload({
+        audioName,
+        filename: pipeline.ensureExtension(filename, output.ext),
+        mimeType: output.mimeType,
+        onProgress,
+        taskMeta,
+        videoName,
+      });
+
+      // 输入临时文件已用完，立即释放；输出文件由 opfs-temp-registry 按 downloadId 清理
+      videoName = '';
+      audioName = '';
+      await videoSink.remove?.().catch?.(() => {});
+      await audioSink.remove?.().catch?.(() => {});
+
+      return {
+        ...merged,
+        audioMerged: true,
+        isLive: !!playlist.isLive,
+        streamingMerge: true,
+      };
+    } catch (err) {
+      if (videoName) {
+        await opfs.removeFile?.(videoName).catch?.(() => {});
+      }
+      if (audioName) {
+        await opfs.removeFile?.(audioName).catch?.(() => {});
+      }
+      throw err;
+    }
   }
 
   _concatBuffers(buffers) {
