@@ -1056,6 +1056,10 @@
       .filter((format) => format.mimeType?.startsWith('audio/'))
       .map((format) => ({
         audioQuality: format.audioQuality,
+        // 多语言/自动配音：记录音轨信息，供选流时挑"原声"而不是按码率瞎挑
+        audioTrackId: format.audioTrack?.id || '',
+        audioTrackIsDefault: format.audioTrack?.audioIsDefault === true,
+        audioTrackName: format.audioTrack?.displayName || '',
         bitrate: format.bitrate,
         contentLength: format.contentLength ? parseInt(format.contentLength, 10) : null,
         itag: format.itag,

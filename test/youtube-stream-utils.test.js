@@ -311,6 +311,52 @@ test('pickAdaptiveAudioStream returns null for empty meta', () => {
   assert.equal(mod.pickAdaptiveAudioStream(), null);
 });
 
+// 现场问题：带自动配音的视频会返回多条同码率音轨，按码率挑会把"配音"合进视频
+test('pickAdaptiveAudioStream 优先原声轨（audioIsDefault）而不是最高码率', () => {
+  const mod = loadModule();
+  const result = mod.pickAdaptiveAudioStream({
+    audioStreams: [
+      // 配音轨码率更高
+      {
+        itag: 140, bitrate: 128000, mimeType: 'audio/mp4', url: 'https://example.com/dub.mp4',
+        audioTrackId: 'hi-IN.4', audioTrackIsDefault: false, audioTrackName: 'Hindi',
+      },
+      {
+        itag: 140, bitrate: 96000, mimeType: 'audio/mp4', url: 'https://example.com/original.mp4',
+        audioTrackId: 'en-US.4', audioTrackIsDefault: true, audioTrackName: 'English (US) original',
+      },
+    ],
+  });
+
+  assert.equal(result.url, 'https://example.com/original.mp4');
+  assert.equal(result.audioTrackIsDefault, true);
+  assert.equal(mod.isOriginalAudioTrack({ audioTrackIsDefault: true }), true);
+});
+
+test('pickAdaptiveAudioStream 缺 audioIsDefault 时按"original"名称兜底', () => {
+  const mod = loadModule();
+  const result = mod.pickAdaptiveAudioStream({
+    audioStreams: [
+      { itag: 140, bitrate: 128000, mimeType: 'audio/mp4', url: 'https://example.com/dub.mp4', audioTrackName: 'Portuguese (auto-dubbed)' },
+      { itag: 140, bitrate: 64000, mimeType: 'audio/mp4', url: 'https://example.com/orig.mp4', audioTrackName: 'English (US) original' },
+    ],
+  });
+
+  assert.equal(result.url, 'https://example.com/orig.mp4');
+});
+
+test('pickAdaptiveAudioStream 无音轨信息时保持原有行为（取最高码率）', () => {
+  const mod = loadModule();
+  const result = mod.pickAdaptiveAudioStream({
+    audioStreams: [
+      { itag: 140, bitrate: 128000, mimeType: 'audio/mp4', url: 'https://example.com/a.mp4' },
+      { itag: 140, bitrate: 64000, mimeType: 'audio/mp4', url: 'https://example.com/b.mp4' },
+    ],
+  });
+
+  assert.equal(result.url, 'https://example.com/a.mp4');
+});
+
 // ---------------------------------------------------------------
 // estimateYouTubeDownloadSize
 // ---------------------------------------------------------------

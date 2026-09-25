@@ -316,6 +316,10 @@ async function saveBlobViaBrowserDownload(blob, filename, context = {}, meta = {
 async function mergeAdaptiveStreams(meta, target, context) {
   const videoStream = target.videoStream;
   const audioStream = target.audioStream;
+  console.log(
+    `[OVD][BG] YouTube 合并选流 videoItag=${videoStream?.itag || '-'} audioItag=${audioStream?.itag || '-'} `
+    + `audioTrack=${audioStream?.audioTrackName || '-'} audioDefault=${audioStream?.audioTrackIsDefault ? 'yes' : 'no'}`
+  );
   const estimatedTotalBytes = (Number(videoStream?.contentLength) || 0) + (Number(audioStream?.contentLength) || 0);
   if (estimatedTotalBytes > MAX_BACKGROUND_MERGE_BYTES) {
     throw new Error(`当前清晰度预计需要抓取约 ${formatBytes(estimatedTotalBytes)}，浏览器内合并不稳定，请改用更低清晰度或录制模式`);
