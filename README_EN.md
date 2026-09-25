@@ -20,6 +20,9 @@
 ## ✨ Highlights
 
 - 🎬 **Auto Detection** — Automatically identifies all video resources on any page, no need to paste URLs
+- 🏷️ **Badge Counter** — The toolbar icon shows the number of videos detected on the current tab at a glance
+- ☑️ **Batch Download** — Multi-select / select-all and download several videos concurrently in one click
+- 🔔 **Completion Notifications** — System notifications on download completion/failure; click a notification to open its folder
 - ⬇️ **One-Click Download** — Save videos with a single click, dead simple
 - 🔀 **In-Browser Merging** — YouTube 1080p+ and Bilibili DASH audio/video streams are merged in the browser — **no ffmpeg or local tools required**
 - 🌐 **Broad Compatibility** — Specialized support for YouTube and Bilibili, plus HLS / DASH / MP4 / Blob videos from any website
@@ -187,7 +190,7 @@ For detailed interface documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTU
 <details>
 <summary><strong>No videos detected in the popup?</strong></summary>
 
-- Make sure the page actually has video content (some pages load videos in iframes, which the current version doesn't scan)
+- Make sure the page actually has video content (iframe-embedded videos are supported since v1.16.0; on pages with strict CSP the injection may still be blocked)
 - Try refreshing the page and detecting again
 - Press F12 → Console and check for errors with the `[OVD]` prefix
 

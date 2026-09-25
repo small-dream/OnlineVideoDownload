@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.15.0
-> Last Updated: 2026-09-24
+> Version: 1.16.0
+> Last Updated: 2026-09-25
 
 ## Goals
 
@@ -38,6 +38,7 @@ Content Script
   content/strategies/*
   content/stream-transfer-manager.js
   content/download-coordinator.js
+  content/float-button.js
   content/message-router.js
   content/content-main.js
     -> chrome.runtime.sendMessage / chrome.tabs.sendMessage
@@ -49,6 +50,9 @@ Service Worker
   background/download-strategy-registry.js
   background/download-strategies/*
   background/download-history-store.js
+  background/download-notification.js
+  background/action-badge.js
+  background/clear-video-scope.js
 
 Popup
   lib/settings-store.js
@@ -56,6 +60,7 @@ Popup
   lib/bilibili-quality-store.js
   lib/youtube-download-mode-store.js
   lib/youtube-stream-utils.js
+  popup/popup-error-messages.js
   popup/popup.js
 ```
 
@@ -238,7 +243,7 @@ Public surface:
 
 ### Loader Entry
 
-File: [injected/page-context-script.js](/d:/AI/OnlineVideoDownload/injected/page-context-script.js)
+File: [injected/page-context-script.js](D:/github/OnlineVideoDownload/injected/page-context-script.js)
 
 Responsibilities:
 
@@ -251,11 +256,11 @@ Responsibilities:
 
 Files:
 
-- [injected/page-core.js](/d:/AI/OnlineVideoDownload/injected/page-core.js)
-- [injected/page-http-utils.js](/d:/AI/OnlineVideoDownload/injected/page-http-utils.js)
-- [injected/page-youtube-parser.js](/d:/AI/OnlineVideoDownload/injected/page-youtube-parser.js)
-- [injected/page-bilibili-parser.js](/d:/AI/OnlineVideoDownload/injected/page-bilibili-parser.js)
-- [injected/page-interceptor.js](/d:/AI/OnlineVideoDownload/injected/page-interceptor.js)
+- [injected/page-core.js](D:/github/OnlineVideoDownload/injected/page-core.js)
+- [injected/page-http-utils.js](D:/github/OnlineVideoDownload/injected/page-http-utils.js)
+- [injected/page-youtube-parser.js](D:/github/OnlineVideoDownload/injected/page-youtube-parser.js)
+- [injected/page-bilibili-parser.js](D:/github/OnlineVideoDownload/injected/page-bilibili-parser.js)
+- [injected/page-interceptor.js](D:/github/OnlineVideoDownload/injected/page-interceptor.js)
 
 Responsibilities:
 
@@ -274,7 +279,7 @@ Notes:
 
 ### Composition Entry
 
-File: [content/content-main.js](/d:/AI/OnlineVideoDownload/content/content-main.js)
+File: [content/content-main.js](D:/github/OnlineVideoDownload/content/content-main.js)
 
 Responsibilities:
 
@@ -288,7 +293,7 @@ Responsibilities:
 
 ### Source Registry
 
-File: [content/source-handlers.js](/d:/AI/OnlineVideoDownload/content/source-handlers.js)
+File: [content/source-handlers.js](D:/github/OnlineVideoDownload/content/source-handlers.js)
 
 Responsibilities:
 
@@ -309,13 +314,13 @@ Current source IDs:
 
 Files:
 
-- [content/strategies/blob-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/blob-strategy.js)
-- [content/strategies/youtube-capture-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/youtube-capture-strategy.js)
-- [content/strategies/youtube-parse-download-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/youtube-parse-download-strategy.js)
-- [content/strategies/bilibili-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/bilibili-strategy.js)
-- [content/strategies/generic-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/generic-strategy.js)
-- [content/strategies/hls-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/hls-strategy.js)
-- [content/strategies/dash-strategy.js](/d:/AI/OnlineVideoDownload/content/strategies/dash-strategy.js)
+- [content/strategies/blob-strategy.js](D:/github/OnlineVideoDownload/content/strategies/blob-strategy.js)
+- [content/strategies/youtube-capture-strategy.js](D:/github/OnlineVideoDownload/content/strategies/youtube-capture-strategy.js)
+- [content/strategies/youtube-parse-download-strategy.js](D:/github/OnlineVideoDownload/content/strategies/youtube-parse-download-strategy.js)
+- [content/strategies/bilibili-strategy.js](D:/github/OnlineVideoDownload/content/strategies/bilibili-strategy.js)
+- [content/strategies/generic-strategy.js](D:/github/OnlineVideoDownload/content/strategies/generic-strategy.js)
+- [content/strategies/hls-strategy.js](D:/github/OnlineVideoDownload/content/strategies/hls-strategy.js)
+- [content/strategies/dash-strategy.js](D:/github/OnlineVideoDownload/content/strategies/dash-strategy.js)
 
 Responsibilities:
 
@@ -329,21 +334,23 @@ Responsibilities:
 
 Additional content helpers:
 
-- [content/progress-reporter.js](/d:/AI/OnlineVideoDownload/content/progress-reporter.js)
-- [content/youtube-download-options.js](/d:/AI/OnlineVideoDownload/content/youtube-download-options.js)
-- [content/youtube-download-errors.js](/d:/AI/OnlineVideoDownload/content/youtube-download-errors.js)
+- [content/progress-reporter.js](D:/github/OnlineVideoDownload/content/progress-reporter.js)
+- [content/youtube-download-options.js](D:/github/OnlineVideoDownload/content/youtube-download-options.js)
+- [content/youtube-download-errors.js](D:/github/OnlineVideoDownload/content/youtube-download-errors.js)
+- [content/float-button.js](D:/github/OnlineVideoDownload/content/float-button.js)
 
 Responsibilities:
 
 - `progress-reporter`: normalize page-side source progress/status messages and forward them to background for popup display.
 - `youtube-download-options`: merge stored preferences with per-request `downloadOptions`.
 - `youtube-download-errors`: normalize YouTube error codes across capture and parse strategies.
+- `float-button`: render the page-bottom-right floating feedback bar for long tasks (HLS, capture, etc.); `showMessage(text, isError, durationMs)` auto-hides after 4s by default, `showProgress(percent)` shows a progress bar and lingers briefly at 100%, `hide()` dismisses it; only one bar at a time so progress stays visible even after the popup closes.
 - `youtube-stream-utils`: list both directly playable qualities and signature-only qualities for diagnostics and popup rendering.
 - `youtube-parse-download-strategy`: reject oversized adaptive merge jobs before page-side fetching exhausts browser memory.
 
 ### Stream Transfer Manager
 
-File: [content/stream-transfer-manager.js](/d:/AI/OnlineVideoDownload/content/stream-transfer-manager.js)
+File: [content/stream-transfer-manager.js](D:/github/OnlineVideoDownload/content/stream-transfer-manager.js)
 
 Responsibilities:
 
@@ -362,7 +369,7 @@ Owned state:
 
 ### Download Coordinator
 
-File: [content/download-coordinator.js](/d:/AI/OnlineVideoDownload/content/download-coordinator.js)
+File: [content/download-coordinator.js](D:/github/OnlineVideoDownload/content/download-coordinator.js)
 
 Responsibilities:
 
@@ -371,7 +378,7 @@ Responsibilities:
 - Deduplicate active work by `sourceId + strategyId + taskKey`.
 - Emit unified lifecycle messages.
 - Generate a per-download `traceId` and attach it to source execution context and lifecycle payloads.
-- Attach a per-task progress reporter so page-side workflows can update the popup without visible page UI.
+- Attach a per-task progress reporter so page-side workflows can update the popup, and surface long-task progress/messages on the page via the float feedback bar (see `content/float-button.js`).
 
 Primary messages emitted:
 
@@ -389,7 +396,7 @@ Legacy compatibility adapters are still emitted for:
 
 ### Message Router
 
-File: [content/message-router.js](/d:/AI/OnlineVideoDownload/content/message-router.js)
+File: [content/message-router.js](D:/github/OnlineVideoDownload/content/message-router.js)
 
 Responsibilities:
 
@@ -403,7 +410,7 @@ Responsibilities:
 
 ## Popup Runtime
 
-File: [popup/popup.js](/d:/AI/OnlineVideoDownload/popup/popup.js)
+File: [popup/popup.js](D:/github/OnlineVideoDownload/popup/popup.js)
 
 Responsibilities:
 
@@ -417,6 +424,7 @@ Responsibilities:
 - Own the visible video list, per-item progress, global progress, and source workflow status messages.
 - Support batch download: multi-select checkboxes, select-all toggle, and concurrent download dispatch.
 - Provide in-popup settings and download history views.
+- Map error codes to friendly Chinese text via `popup-error-messages.js` (`buildFriendlyErrorMessage`): 15 error-code mappings plus keyword-based fallbacks (e.g. Bilibili login hints), so raw `err.message` never reaches the user.
 - Settings view: read and write extension preferences through `lib/settings-store.js`.
 - History view: load download history with `GET_DOWNLOAD_HISTORY`, open folders with `OPEN_DOWNLOAD_FOLDER`, and delete individual records with `DELETE_DOWNLOAD_HISTORY_RECORD`.
 - The standalone `options_ui` page has been removed; popup is the only user-facing settings/history surface.
@@ -426,11 +434,12 @@ Responsibilities:
 
 ### Downloader
 
-File: [background/downloader.js](/d:/AI/OnlineVideoDownload/background/downloader.js)
+File: [background/downloader.js](D:/github/OnlineVideoDownload/background/downloader.js)
 
 Responsibilities:
 
 - Build a stable filename base, optionally prefixed with `downloadSubdir` from settings.
+- `lib/download-path.js` `composeFilenameBase` honors the `filenameFormat` setting (`title` / `title-quality` / `title-date`) so the configured naming rule actually applies.
 - Look up the matching background strategy.
 - Pass shared execution context such as `filenameBase`, `tabId`, and `hlsFetcher`.
 
@@ -440,13 +449,13 @@ Responsibilities:
 
 Files:
 
-- [background/download-strategy-registry.js](/d:/AI/OnlineVideoDownload/background/download-strategy-registry.js)
-- [background/download-strategies/direct-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/direct-download-strategy.js)
-- [background/download-strategies/hls-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/hls-download-strategy.js)
-- [background/download-strategies/dash-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/dash-download-strategy.js)
-- [background/download-strategies/youtube-adaptive-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/youtube-adaptive-download-strategy.js)
-- [background/download-strategies/blob-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/blob-download-strategy.js)
-- [background/download-strategies/unsupported-download-strategy.js](/d:/AI/OnlineVideoDownload/background/download-strategies/unsupported-download-strategy.js)
+- [background/download-strategy-registry.js](D:/github/OnlineVideoDownload/background/download-strategy-registry.js)
+- [background/download-strategies/direct-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/direct-download-strategy.js)
+- [background/download-strategies/hls-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/hls-download-strategy.js)
+- [background/download-strategies/dash-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/dash-download-strategy.js)
+- [background/download-strategies/youtube-adaptive-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/youtube-adaptive-download-strategy.js)
+- [background/download-strategies/blob-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/blob-download-strategy.js)
+- [background/download-strategies/unsupported-download-strategy.js](D:/github/OnlineVideoDownload/background/download-strategies/unsupported-download-strategy.js)
 
 Responsibilities:
 
@@ -457,7 +466,7 @@ Responsibilities:
 
 ### HLS Fetcher
 
-File: [background/hls-fetcher.js](/d:/AI/OnlineVideoDownload/background/hls-fetcher.js)
+File: [background/hls-fetcher.js](D:/github/OnlineVideoDownload/background/hls-fetcher.js)
 
 Responsibilities:
 
@@ -468,7 +477,7 @@ Responsibilities:
 
 ### Download History Store
 
-File: [background/download-history-store.js](/d:/AI/OnlineVideoDownload/background/download-history-store.js)
+File: [background/download-history-store.js](D:/github/OnlineVideoDownload/background/download-history-store.js)
 
 Responsibilities:
 
@@ -509,6 +518,56 @@ Public surface:
 - `deleteRecord(id)`
 - `clear()`
 - `prune()`
+
+### Download Notification
+
+File: [background/download-notification.js](D:/github/OnlineVideoDownload/background/download-notification.js)
+
+Responsibilities:
+
+- Show system notifications on download completion/failure, gated by the `downloadNotification` setting.
+- Build notification id/title/message in pure functions (filename + size for completion, filename + reason for failure) so they are unit-testable separately from `chrome` calls.
+- Handle notification clicks: `onClicked` resolves the download id from the notification id and calls `chrome.downloads.show` to open the download folder.
+
+Public surface:
+
+- `DownloadNotificationManager`
+- `buildNotificationId(downloadId)`
+- `parseNotificationDownloadId(notificationId)`
+- `buildCompletionNotification({ filename, sizeBytes })`
+- `buildFailureNotification({ filename, reason })`
+
+### Tab Action Badge
+
+File: [background/action-badge.js](D:/github/OnlineVideoDownload/background/action-badge.js)
+
+Responsibilities:
+
+- Drive the toolbar icon badge as a per-tab count of detected videos (replacing the old running-task-count badge).
+- Format the badge text: `formatBadgeCount(count)` renders the count, collapses anything above 99 to `99+`, and renders an empty string when nothing is detected.
+- Refresh the badge when a tab's registry entries change and clear it when the tab closes or its registry is cleared.
+
+Public surface:
+
+- `createTabBadgeManager({ action })` → `{ refresh(tabId, count), clear(tabId) }`
+- `formatBadgeCount(count)`
+- `BADGE_MAX_COUNT` (99), `BADGE_BACKGROUND_COLOR`
+
+Note: running-task count is no longer shown on the icon; it appears on the popup's 任务 (tasks) button badge instead.
+
+### Clear Video Scope
+
+File: [background/clear-video-scope.js](D:/github/OnlineVideoDownload/background/clear-video-scope.js)
+
+Responsibilities:
+
+- Resolve the cleanup scope of `CLEAR_TAB_VIDEOS` as a pure function.
+- Messages from content scripts carry `sender.tab`/`sender.frameId`; messages from the popup have no `sender.tab` and rely on `msg.tabId`.
+- A `frameId` of null/0 (main frame) triggers a tab-level clear; only a subframe (`frameId > 0`) clears that frame's entries.
+
+Public surface:
+
+- `resolveClearVideoScope({ sender, msg })` → `{ tabId, frameId }`
 
 ## Message Model
 
@@ -620,8 +679,9 @@ Manifest content-script order is now:
 24. `content/strategies/*` (includes `dash-strategy.js`)
 25. `content/stream-transfer-manager.js`
 26. `content/download-coordinator.js`
-27. `content/message-router.js`
-28. `content/content-main.js`
+27. `content/float-button.js`
+28. `content/message-router.js`
+29. `content/content-main.js`
 
 This order is required because content modules communicate through `globalThis` factories.
 
@@ -650,9 +710,9 @@ This order is required because the page runtime uses `window.__OVD_PAGE_*__` nam
 
 When adding a new source:
 
-1. Add or update source identification in [lib/video-source-utils.js](/d:/AI/OnlineVideoDownload/lib/video-source-utils.js).
-2. Register the source in [content/source-handlers.js](/d:/AI/OnlineVideoDownload/content/source-handlers.js) when the source is content-owned.
-3. Add a dedicated source strategy under [content/strategies](/d:/AI/OnlineVideoDownload/content/strategies).
+1. Add or update source identification in [lib/video-source-utils.js](D:/github/OnlineVideoDownload/lib/video-source-utils.js).
+2. Register the source in [content/source-handlers.js](D:/github/OnlineVideoDownload/content/source-handlers.js) when the source is content-owned.
+3. Add a dedicated source strategy under [content/strategies](D:/github/OnlineVideoDownload/content/strategies).
 4. If the source is background-owned, register a background strategy instead.
 5. Keep `content/content-main.js` limited to wiring.
 
@@ -666,7 +726,7 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. |
+| 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. Second-wave UX pass: download completion/failure system notifications gated by `downloadNotification` (click opens the download folder via `download-notification.js`); `filenameFormat` naming rule enforced in `lib/download-path.js` (`title` / `title-quality` / `title-date`); batch download UI restored (visible per-item checkboxes, header select-all with indeterminate state, 「下载所选 (N)」 button, concurrency from `concurrentDownloadLimit`, DRM items not selectable); toolbar badge now shows the per-tab detected-video count (>99 → `99+`) via `action-badge.js` while running-task count moves to the popup tasks-button badge; downloading items show 「下载中 N%」; in-page floating feedback bar restored (`content/float-button.js`) for long tasks; errors render as friendly Chinese text via `popup-error-messages.js` (15 error-code mappings + keyword fallbacks); 「清列表」 also clears the background `VideoRegistry` via `CLEAR_TAB_VIDEOS` with popup/main-frame/subframe scope resolved by `clear-video-scope.js`. |
 | 1.15.0 | 2026-09-24 | HLS downloads now run in the page context first: `hls-download-strategy` delegates to `HLS_DOWNLOAD_DELEGATE` so requests carry page cookies/origin/`Sec-Fetch` (fixes CDN WAF 403s seen from service-worker fetches), echoes the tab origin in CORS response headers via `injectHeaders(url, headers, { corsOrigin })`, adds optional `credentials` support to `hlsFetch`/`hlsFetchText`/`hlsFetchBuffer`/`parseHlsEncryption`, returns the real `downloadId` from the delegated blob download, and falls back to `HlsFetcher` when the content script is unavailable or fails. |
 | 1.14.1 | 2026-06-12 | Fixed subdirectory setting not working for content-script blob downloads (HLS, blob, DASH). `triggerBlobDownload` now delegates to service worker via `DOWNLOAD_BLOB_DATA` message so `chrome.downloads.download` handles the subdirectory path correctly; falls back to `<a download>` only when the service worker is unavailable. |
 | 1.14.0 | 2026-06-12 | Added `downloadSubdir` setting (default `OnlineVideoDownload`) to save downloads into a subdirectory under Chrome's default download folder. `Downloader._buildFilenameBase` and `downloadBlobData` now prepend the configured subdirectory. |
