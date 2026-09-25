@@ -372,3 +372,93 @@ test('HLS 独立音轨与视频合并为单文件', async () => {
     delete globalThis.__OVD_HLS_PIPELINE__;
   }
 });
+
+test('HLS 委托下载用顺序 sink 输出完整文件（init + 全部分片）', async () => {
+  const pipeline = loadRealPipeline();
+  const body = [
+    '#EXTM3U',
+    '#EXT-X-MAP:URI="init.mp4"',
+    '#EXTINF:1,',
+    'a1.m4s',
+    '#EXTINF:1,',
+    'a2.m4s',
+    '#EXTINF:1,',
+    'a3.m4s',
+  ].join('\n');
+  const stub = installFetchStub([['index.m3u8', playlistResponse(body)]]);
+  const blobDownloads = [];
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ blob, filename, size: blob.size });
+        return { downloadId: 11, ok: true };
+      },
+    });
+
+    const result = await handler.handle('https://cdn.example.com/index.m3u8', 'video', {}, {});
+
+    // 每个响应 4 字节：init 1 个 + 3 个分片
+    assert.equal(result.segmentCount, 3);
+    assert.equal(blobDownloads[0].filename, 'video.mp4');
+    assert.equal(blobDownloads[0].size, 16);
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('HLS 加密流在写入 sink 前逐分片解密（按媒体序号派生 IV）', async () => {
+  const pipeline = loadRealPipeline();
+  const keyBytes = new Uint8Array(16).fill(7);
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+  const plain1 = new Uint8Array(16).fill(1);
+  const plain2 = new Uint8Array(16).fill(2);
+  const cipher1 = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv: pipeline.ivFromSequence(5) },
+    key,
+    plain1
+  );
+  const cipher2 = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv: pipeline.ivFromSequence(6) },
+    key,
+    plain2
+  );
+  const body = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA-SEQUENCE:5',
+    '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+    '#EXTINF:1,',
+    's1.ts',
+    '#EXTINF:1,',
+    's2.ts',
+  ].join('\n');
+  const stub = installFetchStub([
+    ['index.m3u8', playlistResponse(body)],
+    ['key.bin', { arrayBuffer: async () => keyBytes.buffer, ok: true, status: 200 }],
+    ['s1.ts', { arrayBuffer: async () => cipher1, ok: true, status: 200 }],
+    ['s2.ts', { arrayBuffer: async () => cipher2, ok: true, status: 200 }],
+  ]);
+  const blobDownloads = [];
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob) => {
+        blobDownloads.push(blob);
+        return { downloadId: 12, ok: true };
+      },
+    });
+
+    await handler.handle('https://cdn.example.com/index.m3u8', 'video', {}, {});
+
+    const bytes = new Uint8Array(await blobDownloads[0].arrayBuffer());
+    assert.equal(bytes.byteLength, 32);
+    assert.deepEqual(Array.from(bytes.slice(0, 16)), Array.from(plain1));
+    assert.deepEqual(Array.from(bytes.slice(16)), Array.from(plain2));
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});

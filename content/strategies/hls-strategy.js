@@ -110,12 +110,30 @@
         console.log(`[OVD] 检测到 AES-128 加密（${playlist.keys?.length || 1} 个密钥）`);
       }
 
+      const decryptor = keyInfo && typeof hlsPipeline.createSegmentDecryptor === 'function'
+        ? hlsPipeline.createSegmentDecryptor(keyInfo)
+        : null;
+
+      // 需要把独立音轨合并进视频时必须整体持有视频数据（fMP4 muxer 接口所限）；
+      // 其余情况走顺序写入 sink，避免再拼一份全量 Uint8Array。
+      const audioMergePlanned = !!audioRenditionUrl
+        && output.ext === '.mp4'
+        && typeof globalThis.BilibiliMuxer?.mergeFmp4Streams === 'function';
+      const sink = !audioMergePlanned && typeof hlsPipeline.createInMemorySink === 'function'
+        ? hlsPipeline.createInMemorySink()
+        : null;
+
       const prefixBuffers = [];
       if (playlist.initSegmentUrl) {
-        prefixBuffers.push(await hlsPipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers, {
+        const initBuffer = await hlsPipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers, {
           ...fetchOptions,
           range: playlist.initSegmentByteRange,
-        }));
+        });
+        if (sink) {
+          await sink.write(initBuffer);
+        } else {
+          prefixBuffers.push(initBuffer);
+        }
       }
 
       const { buffers, failedCount, retriedCount } = await downloadSegments(
@@ -124,20 +142,24 @@
         fetchOptions,
         taskMeta,
         sourceUrl,
-        requestOptions
+        requestOptions,
+        { sink, transform: decryptor }
       );
       console.log(`[OVD] 分片下载完成 总数=${segments.length} 失败=${failedCount} 重试成功=${retriedCount}`);
 
-      let finalBuffers = buffers;
-      if (keyInfo) {
-        finalBuffers = await hlsPipeline.decryptHlsSegments(buffers, keyInfo);
-      }
-      finalBuffers = prefixBuffers.concat(finalBuffers);
-
-      let merged = concatBuffers(finalBuffers);
+      let blob;
+      let mergedBytes = 0;
       let mergedAudio = false;
 
-      if (audioRenditionUrl) {
+      if (audioMergePlanned) {
+        let finalBuffers = buffers || [];
+        if (keyInfo && !decryptor) {
+          finalBuffers = await hlsPipeline.decryptHlsSegments(finalBuffers, keyInfo);
+        }
+        finalBuffers = prefixBuffers.concat(finalBuffers);
+        let merged = concatBuffers(finalBuffers);
+        mergedBytes = merged.byteLength;
+
         try {
           const audioResult = await downloadAudioRendition(
             audioRenditionUrl,
@@ -149,17 +171,32 @@
           );
           if (audioResult) {
             merged = audioResult;
+            mergedBytes = audioResult.byteLength;
             mergedAudio = true;
           }
         } catch (err) {
           console.warn(`[OVD] 独立音轨合并失败，回退为纯视频文件: ${err.message}`);
           reportStatus(`独立音轨合并失败（${err.message}），将只保存视频画面`, 'info');
         }
+
+        blob = new Blob([merged], { type: output.mimeType });
+      } else if (sink && sink.byteLength > 0 && typeof sink.toBlob === 'function') {
+        mergedBytes = sink.byteLength;
+        blob = sink.toBlob(output.mimeType);
+      } else {
+        // 兜底：下载管线未使用 sink（旧实现）时仍按缓冲数组拼接
+        let finalBuffers = buffers || [];
+        if (keyInfo && !decryptor) {
+          finalBuffers = await hlsPipeline.decryptHlsSegments(finalBuffers, keyInfo);
+        }
+        finalBuffers = prefixBuffers.concat(finalBuffers);
+        const merged = concatBuffers(finalBuffers);
+        mergedBytes = merged.byteLength;
+        blob = new Blob([merged], { type: output.mimeType });
       }
 
-      const blob = new Blob([merged], { type: output.mimeType });
       const finalFilename = hlsPipeline.ensureExtension(filename, output.ext);
-      console.log(`[OVD] 委托下载完成 合并大小=${(merged.byteLength / 1024 / 1024).toFixed(2)} MB 触发下载 filename=${finalFilename}`);
+      console.log(`[OVD] 委托下载完成 合并大小=${(mergedBytes / 1024 / 1024).toFixed(2)} MB 触发下载 filename=${finalFilename}`);
 
       const downloadResult = await Promise.resolve(triggerBlobDownload(blob, finalFilename, taskMeta))
         .catch((err) => {
@@ -236,13 +273,15 @@
       return legacy || null;
     }
 
-    async function downloadSegments(playlist, headers, fetchOptions, taskMeta, sourceUrl, requestOptions = {}) {
+    async function downloadSegments(playlist, headers, fetchOptions, taskMeta, sourceUrl, requestOptions = {}, sinkOptions = {}) {
       const total = playlist.segments.length;
       return hlsPipeline.downloadHlsSegments(playlist.segments, {
         concurrency: constants.HLS_SEGMENT_CONCURRENCY || 5,
         fetchBuffer: (url, range) => hlsPipeline.hlsFetchBuffer(url, headers, { ...fetchOptions, range }),
         maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES || 1500 * 1024 * 1024,
         signal: requestOptions.signal || null,
+        sink: sinkOptions.sink || null,
+        transform: sinkOptions.transform || null,
         onProgress: (done, totalCount, stats) => {
           const percent = Math.min(95, Math.round((done / totalCount) * 95));
           const message = {
@@ -262,7 +301,13 @@
           getFloatButton()?.showProgress(percent);
         },
         retryDelays: constants.HLS_SEGMENT_RETRY_DELAYS,
-      }).then((result) => result || { buffers: [], failedCount: 0, retriedCount: 0, segments: playlist.segments })
+      }).then((result) => result || {
+        buffers: [],
+        failedCount: 0,
+        retriedCount: 0,
+        segments: playlist.segments,
+        sink: null,
+      })
         .catch((err) => {
           if (err?.code === 'HLS_SEGMENT_DOWNLOAD_FAILED') {
             err.totalSegments = err.totalSegments ?? total;

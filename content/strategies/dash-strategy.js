@@ -59,9 +59,9 @@
       return response.text();
     }
 
-    async function fetchSegmentBuffers(segmentUrls, headers, label, progressReporter, signal = null) {
+    async function fetchSegmentBuffers(segmentUrls, headers, label, progressReporter, signal = null, sink = null) {
       if (segmentUrls.length === 0) {
-        return [];
+        return { buffers: [], failedCount: 0, retriedCount: 0, sink };
       }
 
       // 与 HLS 共用的 fail-fast 下载：分片重试 + 超阈值中止，不产出含空洞的文件
@@ -69,6 +69,7 @@
         concurrency: SEGMENT_CONCURRENCY,
         fetchBuffer: (url, range) => fetchBuffer(url, headers, range),
         signal,
+        sink,
         onProgress: (done, total) => {
           const percent = Math.round((done / total) * 50);
           progressReporter?.progress(percent, { phase: `fetching-${label}` });
@@ -80,7 +81,25 @@
         progressReporter?.status(`DASH ${label} 有 ${failedCount} 个分片下载失败（未超阈值），已跳过`);
       }
 
-      return buffers.filter((b) => b && b.byteLength > 0);
+      return {
+        buffers: (buffers || []).filter((buffer) => buffer && buffer.byteLength > 0),
+        failedCount,
+        retriedCount,
+        sink,
+      };
+    }
+
+    /**
+     * 取整数下载结果。
+     * 优先用 sink（下载阶段按序累积，省掉一次全量拼接）；sink 不可用或没拿到数据时
+     * 回退到缓冲数组拼接，保证与旧管线/测试替身兼容。
+     */
+    function resolveDownloadedBytes(result) {
+      const sink = result?.sink;
+      if (sink && sink.byteLength > 0 && typeof sink.toArrayBuffer === 'function') {
+        return sink.toArrayBuffer();
+      }
+      return concatBuffers(result?.buffers || []);
     }
 
     function concatBuffers(buffers) {
@@ -210,14 +229,15 @@
 
       reporter?.status('正在下载 DASH 视频分片...');
 
-      const videoBuffers = await fetchSegmentBuffers(
+      const videoResult = await fetchSegmentBuffers(
         buildSegmentEntries(videoPick.representations),
         headers,
         'video',
         reporter,
-        signal
+        signal,
+        typeof hlsPipeline.createInMemorySink === 'function' ? hlsPipeline.createInMemorySink() : null
       );
-      const videoData = concatBuffers(videoBuffers);
+      const videoData = resolveDownloadedBytes(videoResult);
       console.log(`[OVD] DASH 视频数据大小=${(videoData.byteLength / 1024 / 1024).toFixed(2)} MB`);
 
       if (!audioRep || audioPick.representations.every((rep) => (rep.segments || []).length === 0)) {
@@ -235,14 +255,15 @@
 
       reporter?.status('正在下载 DASH 音频分片...');
 
-      const audioBuffers = await fetchSegmentBuffers(
+      const audioResult = await fetchSegmentBuffers(
         buildSegmentEntries(audioPick.representations),
         headers,
         'audio',
         reporter,
-        signal
+        signal,
+        typeof hlsPipeline.createInMemorySink === 'function' ? hlsPipeline.createInMemorySink() : null
       );
-      const audioData = concatBuffers(audioBuffers);
+      const audioData = resolveDownloadedBytes(audioResult);
       console.log(`[OVD] DASH 音频数据大小=${(audioData.byteLength / 1024 / 1024).toFixed(2)} MB`);
 
       const estimatedTotal = videoData.byteLength + audioData.byteLength;

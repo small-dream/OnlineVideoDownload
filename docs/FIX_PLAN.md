@@ -55,13 +55,13 @@
 | 3.4 | MPD 解析修复 | 支持 `$Number%05d$` 宽度格式符（`lib/mpd-parser.js:135-151` 当前只做字面替换，产出含 `$` 的坏 URL）、SegmentURL `mediaRange`/`indexRange`、多 Period 正确分组、SegmentTimeline `r="-1"` | ✅ 另加 `$Time%08d$`、`$$` 转义、`SegmentBase@indexRange`、内置无 DOMParser 回退解析器（测试不再 skip） |
 | 3.5 | 通用嗅探增强 | MIME 增加 `video/mp2t`、`video/quicktime`、`application/octet-stream`（结合扩展名/Content-Disposition 二次确认）；通用站点加 MutationObserver 持续监听动态插入的 `<video>/<audio>`（当前仅 init/load 扫描两次） | ✅ 另加 `video/x-matroska`；`injected/page-context-script.js` 新增防抖 MutationObserver + `loadstart`/`loadedmetadata` 监听 |
 | 3.6 | 页面注入改用 `chrome.scripting.executeScript({world:'MAIN'})` | 当前 DOM `<script>` 注入在 Twitter/X 等 CSP 严格站点静默失败，导致全部 hook 失效（`content/content-main.js:16-51`） | ✅ 新增 `INJECT_PAGE_SCRIPTS`（按 `sender.frameId` 定向、`injectImmediately`），DOM `<script>` 注入保留为回退 |
-| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 1.5GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ `downloadHlsSegments({ maxTotalBytes })` 统一守卫（`HLS_OUTPUT_TOO_LARGE`）、Bilibili 改为报错（`BILIBILI_OUTPUT_TOO_LARGE`）；OPFS 落盘未做（见下方遗留） |
+| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 1.5GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ 两步：①`downloadHlsSegments({ maxTotalBytes })` 统一守卫（`HLS_OUTPUT_TOO_LARGE`）、Bilibili 改为报错（`BILIBILI_OUTPUT_TOO_LARGE`）；②下载循环新增顺序写入 sink + 逐分片 transform，峰值内存从 ≈3N 降到 ≈N+并发窗口（HLS 纯拼接与 DASH 均已接入，逐分片解密走同一通道）。OPFS 真实落盘未做（见下方遗留） |
 | 3.8 | 过滤与黑名单 | 增加大小/时长阈值与域名黑名单，过滤广告片段、音效等噪声条目 | ✅ 新增 `lib/video-filter.js` + 三个设置项，读取列表时过滤，结构化来源不受阈值影响 |
 | 3.9 | 任务管理补全 | 内容侧任务 ABORT 消息通道（当前只能取消有 downloadId 的任务）、落实全局并发队列（`concurrentDownloadLimit` 当前仅 popup 批量入口生效）、`saveAs` 可选保存位置 | ✅ `ABORT_SOURCE_DOWNLOAD` + `AbortController`（`DOWNLOAD_ABORTED`）、popup 任务「取消」按钮、`background/download-queue.js` 全局并发、`askSaveLocation` → `saveAs` |
 
 ### 第三波遗留（未做，建议并入第四波）
 
-- OPFS / File System Access API 分片落盘：当前仍是纯内存合并，只是超过 1.5 GB 会明确拒绝而不是崩页面。
+- OPFS / File System Access API 真实落盘：内存已从 ≈3N 降到 ≈N（`createInMemorySink` 也是 OPFS sink 的挂载点，实现 `write` 即可接入），但数据仍常驻内存，超过 1.5 GB 依旧明确拒绝而不是崩页面；`offscreen/offscreen.js` 的 base64 分片中转仍会再复制一份，属后台回退路径。
 - HLS 直播续录、`EXT-X-PROGRAM-DATE-TIME` 对齐、DRM（SAMPLE-AES/CENC）仍然不支持。
 
 ## 第四波：工程健康
