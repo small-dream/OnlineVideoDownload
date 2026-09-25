@@ -41,7 +41,8 @@ export class Downloader {
       type: videoInfo?.type,
       url: videoInfo?.url,
     });
-    const filenameBase = await downloadPathUtils.applyDownloadSubdir?.(rawFilenameBase, settingsStore);
+    const filenameBase = await downloadPathUtils.applyDownloadNaming?.(rawFilenameBase, videoInfo, settingsStore)
+      ?? await downloadPathUtils.applyDownloadSubdir?.(rawFilenameBase, settingsStore);
 
     console.log(`[OVD] filename base="${filenameBase}" tabTitle="${tabTitle || ''}"`);
     return filenameBase;

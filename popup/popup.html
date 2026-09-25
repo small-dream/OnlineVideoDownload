@@ -9,6 +9,14 @@
 <body>
   <div class="popup-shell">
     <main class="main-view" id="mainView">
+      <div class="list-header" id="listHeader" hidden>
+        <label class="select-all-label">
+          <input type="checkbox" id="selectAllCheckbox">
+          <span class="select-all-text">全选</span>
+        </label>
+        <span class="list-count" id="listCount"></span>
+        <button class="batch-btn" id="batchDownloadBtn" type="button" disabled>下载所选 (0)</button>
+      </div>
       <div id="videoList" class="video-list">
         <div class="empty-state" id="emptyState">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -188,6 +196,7 @@
   <script src="../lib/settings-store.js"></script>
   <script src="../lib/ui-dom-utils.js"></script>
   <script src="../content/youtube-download-options.js"></script>
+  <script src="popup-error-messages.js"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

@@ -133,6 +133,7 @@
   const downloadCoordinatorFactory = globalThis.__OVD_DOWNLOAD_COORDINATOR__ || {};
   const messageRouterFactory = globalThis.__OVD_MESSAGE_ROUTER__ || {};
   const progressReporterFactory = globalThis.__OVD_PROGRESS_REPORTER__ || {};
+  const floatButtonFactory = globalThis.__OVD_FLOAT_BUTTON__ || {};
 
   globalThis.__OVD_MUXER_LOG__ = (level, message) => {
     try {
@@ -152,7 +153,18 @@
     console.warn('[OVD] Failed to initialize YouTube mode store:', err);
   });
 
-  const getFloatButton = () => null;
+  // 页面内长任务浮动反馈条：懒创建，仅在 showMessage/showProgress 时挂载 DOM
+  let floatButton = null;
+  const getFloatButton = () => {
+    if (floatButton === null) {
+      let iconUrl = '';
+      try {
+        iconUrl = chrome.runtime.getURL('icons/icon16.png');
+      } catch (_err) {}
+      floatButton = floatButtonFactory.createFloatButton?.({ iconUrl }) || false;
+    }
+    return floatButton || null;
+  };
   const streamTransferManager = streamTransferManagerFactory.createStreamTransferManager({
     postMessageToPage,
     sendMessageAsync,
@@ -229,7 +241,7 @@
   const messageRouter = messageRouterFactory.createMessageRouter({
     bilibiliStrategy,
     blobStrategy,
-    ensureUi: () => {},
+    ensureUi: () => getFloatButton()?.mount?.(),
     getFloatButton,
     hlsDelegateHandler,
     startSourceDownload: (meta) => downloadCoordinator.startSourceDownload(meta),

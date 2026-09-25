@@ -8,6 +8,9 @@ import { DownloadStateStore } from './download-state-store.js';
 import { DownloadHistoryStore } from './download-history-store.js';
 import { SessionMirror } from './session-mirror.js';
 import { recoverDownloadTasks } from './download-task-recovery.js';
+import { DownloadNotificationManager } from './download-notification.js';
+import { createTabBadgeManager } from './action-badge.js';
+import { resolveClearVideoScope } from './clear-video-scope.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
@@ -95,6 +98,10 @@ const historyStore = new DownloadHistoryStore();
 const downloadResumeAttempts = new Map();
 const downloadResumeTimers = new Map();
 const lastKnownTabUrls = new Map();
+// 下载完成/失败通知（settings.downloadNotification 控制）与按 tab 的视频数徽章
+const downloadNotifications = new DownloadNotificationManager({ settingsStore: globalThis.__OVD_GENERAL_SETTINGS_STORE__ });
+downloadNotifications.attach();
+const tabBadge = createTabBadgeManager();
 
 // SW 启动恢复：先初始化历史库，再从 storage.session 读回任务表与注册表
 const restorePersistedStatePromise = historyStore.init().then(async () => {
@@ -125,6 +132,15 @@ async function restorePersistedState() {
     const registrySnapshot = await registrySnapshotMirror.load();
     if (registrySnapshot) {
       registry.restoreAll(registrySnapshot);
+      // 恢复后同步刷新各 tab 的视频数徽章
+      for (const rawTabId of Object.keys(registrySnapshot)) {
+        const restoredTabId = Number(rawTabId);
+        if (Number.isFinite(restoredTabId)) {
+          notifyVisibleVideoCount(restoredTabId).catch((err) => {
+            console.warn(`[OVD] failed to refresh badge for restored tab=${restoredTabId}: ${err.message}`);
+          });
+        }
+      }
     }
   } catch (err) {
     console.warn(`[OVD] video registry restore failed: ${err.message}`);
@@ -162,6 +178,7 @@ async function restorePersistedState() {
         tabUrl: tab?.url || '',
         status: 'complete',
       });
+      await downloadNotifications.notifyComplete(downloadId, item);
     } catch (err) {
       console.warn(`[OVD] failed to backfill download history on restore: ${err.message}`);
     }
@@ -216,6 +233,7 @@ chrome.downloads.onChanged.addListener(async (delta) => {
       }));
       downloadStore.cleanupRules(downloadId);
       clearDownloadResumeTracking(downloadId);
+      void downloadNotifications.notifyFailed(downloadId, await getDownloadItem(downloadId), reason).catch(() => {});
     }
     return;
   }
@@ -276,6 +294,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   registry.clearTab(tabId);
+  tabBadge.clear(tabId);
   const interruptedTasks = downloadStore.markTabInterrupted(tabId);
   interruptedTasks.forEach((task) => broadcastTaskUpdate(task));
   downloadStore.clearTab(tabId, { onlyRequiresTabContext: true });
@@ -473,11 +492,13 @@ async function handleMessage(msg, sender) {
       return setTabMuted(tabId, !!msg.muted);
 
     case MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS': {
-      const clearTabId = tabId ?? msg.tabId;
+      // popup 来源 sender.tab 为空：frameId 为 null → 整 tab 清理；仅子框架 frameId>0 时清该 frame
+      const clearScope = resolveClearVideoScope({ sender, msg });
+      const clearTabId = clearScope.tabId;
       if (clearTabId) {
         // 子框架导航/卸载只清理该 frame 上报的条目，主框架才做 tab 级清理
-        if (frameId) {
-          registry.clearFrame(clearTabId, frameId);
+        if (clearScope.frameId != null) {
+          registry.clearFrame(clearTabId, clearScope.frameId);
           void notifyVisibleVideoCount(clearTabId);
           return { ok: true, frameCleared: true };
         }
@@ -492,6 +513,7 @@ async function handleMessage(msg, sender) {
         }
 
         registry.clearTab(clearTabId);
+        tabBadge.clear(clearTabId);
         safeTabMessage(clearTabId, { type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON', count: 0 });
         console.log(`[OVD] 清理 tab=${clearTabId} 的视频注册表（SPA 导航）`);
       }
@@ -649,6 +671,7 @@ async function notifyVisibleVideoCount(tabId) {
 
   const { videos } = await getVisibleVideosForTab(tabId);
   safeTabMessage(tabId, { type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON', count: videos.length });
+  tabBadge.refresh(tabId, videos.length);
   return videos.length;
 }
 
@@ -724,22 +747,6 @@ async function getDownloadHistoryRecords() {
   });
 }
 
-function updateTaskBadge() {
-  try {
-    const runningCount = downloadStore
-      .getTasks({ limit: 200 })
-      .filter((task) => ['running', 'retrying'].includes(task.status)).length;
-    if (runningCount > 0) {
-      chrome.action?.setBadgeText?.({ text: String(Math.min(runningCount, 99)) });
-      chrome.action?.setBadgeBackgroundColor?.({ color: '#0d8fd3' });
-    } else {
-      chrome.action?.setBadgeText?.({ text: '' });
-    }
-  } catch (err) {
-    console.warn(`[OVD] failed to update task badge: ${err.message}`);
-  }
-}
-
 function isTabContextRequiredForVideo(videoInfo = {}) {
   const type = String(videoInfo?.type || '').trim();
   if (type === 'blob') return true;
@@ -748,7 +755,6 @@ function isTabContextRequiredForVideo(videoInfo = {}) {
 }
 
 function broadcastTaskUpdate(task = null) {
-  updateTaskBadge();
   if (!task) {
     return;
   }

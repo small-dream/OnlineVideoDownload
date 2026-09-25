@@ -61,6 +61,7 @@
         "content/strategies/generic-strategy.js",
         "content/stream-transfer-manager.js",
         "content/download-coordinator.js",
+        "content/float-button.js",
         "content/message-router.js",
         "content/content-main.js"
       ],
