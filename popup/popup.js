@@ -339,7 +339,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 
   if (msg.type === (MSG.SOURCE_DOWNLOAD_STATUS || 'SOURCE_DOWNLOAD_STATUS') && msg.message) {
-    showMessage(msg.message, msg.level === 'error' ? 'error' : 'info');
+    showMessage(msg.message, msg.level === 'error' ? 'error' : 'info', { key: sourceToastKey(msg) });
     return;
   }
 
@@ -1780,13 +1780,15 @@ function normalizeSourceLifecycleMessage(msg) {
 function handleSourceLifecycleMessage(msg) {
   const sourceId = msg.sourceId || 'generic';
   const sourceLabel = sourceLabelFromId(sourceId);
+  // 同一次下载的状态/结果共用一个 toast（就地更新），避免堆出多条几乎一样的提示
+  const toastKey = sourceToastKey(msg);
 
   if (msg.type === (MSG.SOURCE_DOWNLOAD_STARTED || 'SOURCE_DOWNLOAD_STARTED')) {
     const trackedEntry = resolveTrackedSourceTask(msg);
     if (trackedEntry) {
       setTrackedSourceTaskPending(trackedEntry);
     }
-    showMessage(buildSourceStartedMessage(sourceLabel, msg.strategyId), 'info');
+    showMessage(buildSourceStartedMessage(sourceLabel, msg.strategyId), 'info', { key: toastKey });
     return;
   }
 
@@ -1798,7 +1800,7 @@ function handleSourceLifecycleMessage(msg) {
       applyItemProgress(entry.item, entry.button, 100);
     }
     releaseTrackedSourceTask(msg, true);
-    showMessage(t('download_done', '$1 下载完成。', [sourceLabel]), 'success');
+    showMessage(t('download_done', '$1 下载完成。', [sourceLabel]), 'success', { key: toastKey });
     return;
   }
 
@@ -1807,7 +1809,16 @@ function handleSourceLifecycleMessage(msg) {
     code: msg.code,
     message: msg.error || '未知错误',
   });
-  showMessage(`${sourceLabel} 下载失败: ${friendly?.text || msg.error || '未知错误'}`, 'error');
+  showMessage(`${sourceLabel} 下载失败: ${friendly?.text || msg.error || '未知错误'}`, 'error', { key: toastKey });
+}
+
+/**
+ * 同一次下载（同 taskKey / traceId）的提示共用一个 toast 槽位。
+ * 返回空串时表示无法归类，此时退化为「连续重复文案不重复弹出」的默认行为。
+ */
+function sourceToastKey(msg = {}) {
+  const identity = msg.taskKey || msg.traceId || '';
+  return identity ? `source:${identity}` : '';
 }
 
 function sourceLabelFromId(sourceId) {
@@ -1906,6 +1917,8 @@ async function triggerDownload(video, btn) {
 
     const executionMode = sourceUtils.getExecutionMode?.(downloadVideo) || 'background';
     const sourceLabel = sourceUtils.getSourceLabel?.(downloadVideo) || sourceLabelFromId(sourceUtils.getSourceId?.(downloadVideo));
+    // 本次下载的所有提示（开始/已在执行/失败）共用同一个 toast 槽位
+    const downloadToastKey = `source:${getSourceTaskKey(downloadVideo)}`;
 
     if (executionMode === 'content') {
       const taskKey = getSourceTaskKey(downloadVideo);
@@ -1930,9 +1943,9 @@ async function triggerDownload(video, btn) {
       trackSourceTask(pendingSourceTask);
 
       if (response.alreadyRunning) {
-        showMessage(t('download_alreadyRunning', '$1 下载任务已在执行中。', [sourceLabel]), 'info');
+        showMessage(t('download_alreadyRunning', '$1 下载任务已在执行中。', [sourceLabel]), 'info', { key: downloadToastKey });
       } else if (response.started) {
-        showMessage(buildSourceStartedMessage(sourceLabel, response.strategyId), 'success');
+        showMessage(buildSourceStartedMessage(sourceLabel, response.strategyId), 'success', { key: downloadToastKey });
       }
       void loadDownloadTasks({ renderTaskList: !tasksViewEl?.hidden });
       return;
@@ -1971,7 +1984,7 @@ async function triggerDownload(video, btn) {
     releaseBackgroundHlsTask(downloadVideo.url);
     void loadDownloadTasks({ renderTaskList: !tasksViewEl?.hidden });
 
-    showMessage(t('download_started', '下载已开始。'), 'success');
+    showMessage(t('download_started', '下载已开始。'), 'success', { key: downloadToastKey });
   } catch (err) {
     if (pendingSourceTask) {
       releaseTrackedSourceTask(pendingSourceTask, false);
@@ -1989,7 +2002,7 @@ async function triggerDownload(video, btn) {
       console.warn(`[OVD] 原始错误信息: ${err.message}`);
     }
 
-    showMessage(t('error_prefix', '错误: $1', [friendlyMessage]), 'error');
+    showMessage(t('error_prefix', '错误: $1', [friendlyMessage]), 'error', { key: downloadToastKey });
     setDownloadButtonState(btn, 'idle');
   }
 }
@@ -2059,6 +2072,16 @@ async function startBatchDownload() {
 const TOAST_MAX_VISIBLE = 3;
 const TOAST_HIDE_DELAY_MS = { success: 2800, info: 3000, error: 6000 };
 const TOAST_FADE_MS = 240;
+// 同一个下载任务的提示（获取地址 → 获取数据 → 合并 → 完成/失败）复用同一个 toast 就地更新，
+// 否则一次下载会堆出多条「正在获取 Bilibili 视音频数据...」这类几乎一样的提示。
+const toastByKey = new Map();
+
+function forgetToast(toast) {
+  const key = toast?.__toastKey;
+  if (key && toastByKey.get(key) === toast) {
+    toastByKey.delete(key);
+  }
+}
 
 function dismissToast(toast) {
   if (!toast || toast.dataset.dismissing === '1') {
@@ -2068,7 +2091,10 @@ function dismissToast(toast) {
   toast.dataset.dismissing = '1';
   clearTimeout(toast.__hideTimer);
   toast.classList.remove('toast-visible');
-  setTimeout(() => toast.remove(), TOAST_FADE_MS);
+  setTimeout(() => {
+    toast.remove();
+    forgetToast(toast);
+  }, TOAST_FADE_MS);
 }
 
 function removeToastImmediately(toast) {
@@ -2078,9 +2104,15 @@ function removeToastImmediately(toast) {
 
   clearTimeout(toast.__hideTimer);
   toast.remove();
+  forgetToast(toast);
 }
 
-function showMessage(text, type = 'info') {
+/**
+ * @param {string} text
+ * @param {'info'|'success'|'error'} [type]
+ * @param {{ key?: string }} [options] - key 相同的提示复用同一个 toast（同任务状态就地更新）
+ */
+function showMessage(text, type = 'info', options = {}) {
   if (type === 'error') {
     console.warn(`[OVD] ${text}`);
   }
@@ -2091,9 +2123,38 @@ function showMessage(text, type = 'info') {
   }
 
   const normalizedType = Object.prototype.hasOwnProperty.call(TOAST_HIDE_DELAY_MS, type) ? type : 'info';
+  const message = String(text ?? '');
+  const key = String(options?.key || '');
+
+  const refreshTimer = (toast) => {
+    clearTimeout(toast.__hideTimer);
+    toast.__hideTimer = setTimeout(() => dismissToast(toast), TOAST_HIDE_DELAY_MS[normalizedType]);
+  };
+
+  if (key) {
+    const existing = toastByKey.get(key);
+    if (existing?.isConnected) {
+      existing.className = `toast toast-${normalizedType} toast-visible`;
+      existing.textContent = message;
+      refreshTimer(existing);
+      return existing;
+    }
+  }
+
+  // 连续重复文案（例如多个 frame 上报同一条状态）只更新时间，不再补一条
+  const lastToast = container.lastElementChild;
+  if (lastToast && lastToast.dataset.dismissing !== '1' && lastToast.textContent === message) {
+    refreshTimer(lastToast);
+    return lastToast;
+  }
+
   const toast = document.createElement('div');
   toast.className = `toast toast-${normalizedType}`;
-  toast.textContent = String(text ?? '');
+  toast.textContent = message;
+  if (key) {
+    toast.__toastKey = key;
+    toastByKey.set(key, toast);
+  }
   container.appendChild(toast);
 
   while (container.children.length > TOAST_MAX_VISIBLE) {
@@ -2101,7 +2162,8 @@ function showMessage(text, type = 'info') {
   }
 
   requestAnimationFrame(() => toast.classList.add('toast-visible'));
-  toast.__hideTimer = setTimeout(() => dismissToast(toast), TOAST_HIDE_DELAY_MS[normalizedType]);
+  refreshTimer(toast);
+  return toast;
 }
 
 function routeHlsProgress(msg = {}) {

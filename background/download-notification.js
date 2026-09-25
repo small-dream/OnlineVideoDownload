@@ -43,8 +43,18 @@ function formatBytes(bytes) {
   return `${value} B`;
 }
 
+/** 通知里只展示文件名：chrome.downloads 给的是绝对路径，整条路径对用户没有意义 */
+function displayNameOf(filename) {
+  const value = String(filename || '').trim();
+  if (!value) {
+    return '';
+  }
+  const segments = value.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] || value;
+}
+
 export function buildCompletionNotification({ filename = '', sizeBytes = null } = {}) {
-  const name = filename || 'video';
+  const name = displayNameOf(filename) || 'video';
   const sizeLabel = formatBytes(sizeBytes);
   const body = sizeLabel
     ? translate('notify_completeBody', '$1（$2）', [name, sizeLabel])
@@ -56,7 +66,7 @@ export function buildCompletionNotification({ filename = '', sizeBytes = null } 
 }
 
 export function buildFailureNotification({ filename = '', reason = '' } = {}) {
-  const name = filename || 'video';
+  const name = displayNameOf(filename) || 'video';
   const reasonLabel = String(reason || '').trim();
   return {
     title: translate('notify_failedTitle', '下载失败'),
@@ -74,6 +84,11 @@ export class DownloadNotificationManager {
     this._chrome = chromeApi;
     this._settingsStore = settingsStore;
     this._attached = false;
+    // 已提示过的下载：完成事件可能在「中断→自动续传→完成」等场景重复到达，
+    // 同一条视频（taskKey）重复下载也会各自产生 downloadId ——
+    // Windows 上每次 create 都会再弹一条横幅，所以按「逻辑视频」去重，
+    // 让用户点一次下载只看到一条「下载完成」。
+    this._completedNotified = new Set();
   }
 
   attach() {
@@ -86,7 +101,19 @@ export class DownloadNotificationManager {
     });
   }
 
-  async notifyComplete(downloadId, item = {}) {
+  /**
+   * @param {number} downloadId - chrome 下载 id（同时用作通知 id，点击可定位文件）
+   * @param {Object} [item] - chrome.downloads 条目
+   * @param {{ dedupeKey?: string }} [options] - 去重键，默认按 downloadId；
+   *   传入 taskKey 时，同一视频的多次下载只提示一次
+   */
+  async notifyComplete(downloadId, item = {}, options = {}) {
+    const dedupeKey = options?.dedupeKey || downloadId;
+    if (downloadId == null || this._completedNotified.has(dedupeKey)) {
+      return;
+    }
+    this._completedNotified.add(dedupeKey);
+
     await this._notify(downloadId, buildCompletionNotification({
       filename: item?.filename,
       sizeBytes: item?.fileSize ?? item?.totalBytes ?? null,

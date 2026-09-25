@@ -41,6 +41,11 @@
   const KEYWORD_ERROR_TEXT = Object.freeze([
     { pattern: /Receiving end does not exist/, text: '当前页面下载脚本未就绪，请刷新页面后重试。' },
     {
+      key: 'err_streamUnreachable',
+      pattern: /所有候选地址均失败|stream fetch failed/i,
+      text: '无法连接视频 CDN 服务器（主地址与备用地址均不可达），请检查网络或代理后重试。',
+    },
+    {
       key: 'err_bilibili',
       pattern: /B站 API 错误|Bilibili|Bilibili download failed/i,
       text: 'Bilibili 下载失败，请确认已登录 B 站账号后重试。',

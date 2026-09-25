@@ -25,6 +25,51 @@ test('BILIBILI_QUALITY_LABELS is a frozen object with common entries', () => {
 });
 
 // ---------------------------------------------------------------
+// listBilibiliStreamUrls（主地址 + 备用 CDN 回退，见 B 站下载 Failed to fetch 修复）
+// ---------------------------------------------------------------
+
+test('listBilibiliStreamUrls 返回 baseUrl 与 backupUrl（保持优先级）', () => {
+  const { listBilibiliStreamUrls } = loadModule();
+  const urls = listBilibiliStreamUrls({
+    backupUrl: ['https://upos-sz-mirrorcoso1.bilivideo.com/a.m4s', 'https://cn-hnzz-cm-01-03.bilivideo.com/a.m4s'],
+    baseUrl: 'https://xy106x227x71x161xy.mcdn.bilivideo.cn:8082/a.m4s',
+  });
+
+  assert.deepEqual(urls, [
+    'https://xy106x227x71x161xy.mcdn.bilivideo.cn:8082/a.m4s',
+    'https://upos-sz-mirrorcoso1.bilivideo.com/a.m4s',
+    'https://cn-hnzz-cm-01-03.bilivideo.com/a.m4s',
+  ]);
+});
+
+test('listBilibiliStreamUrls 兼容下划线字段并去重', () => {
+  const { listBilibiliStreamUrls } = loadModule();
+  const urls = listBilibiliStreamUrls({
+    backup_url: ['https://backup.bilivideo.com/a.m4s'],
+    base_url: 'https://backup.bilivideo.com/a.m4s',
+  });
+
+  assert.deepEqual(urls, ['https://backup.bilivideo.com/a.m4s']);
+});
+
+test('listBilibiliStreamUrls 过滤空值与非法协议', () => {
+  const { listBilibiliStreamUrls } = loadModule();
+  const urls = listBilibiliStreamUrls({
+    backupUrl: ['', 'blob:https://example.com/x', 'https://ok.bilivideo.com/a.m4s'],
+    baseUrl: '  ',
+  });
+
+  assert.deepEqual(urls, ['https://ok.bilivideo.com/a.m4s']);
+});
+
+test('listBilibiliStreamUrls 对缺失/异常输入返回空数组', () => {
+  const { listBilibiliStreamUrls } = loadModule();
+  assert.deepEqual(listBilibiliStreamUrls(), []);
+  assert.deepEqual(listBilibiliStreamUrls({}), []);
+  assert.deepEqual(listBilibiliStreamUrls({ backupUrl: 'not-an-array', baseUrl: 42 }), []);
+});
+
+// ---------------------------------------------------------------
 // listAvailableBilibiliQualities
 // ---------------------------------------------------------------
 

@@ -162,6 +162,9 @@
   "err_bilibili": {
     "message": "Bilibili download failed. Make sure you are logged in to Bilibili and retry."
   },
+  "err_streamUnreachable": {
+    "message": "Could not reach the video CDN servers (both the primary and backup hosts failed). Check your network or proxy and retry."
+  },
   "err_dashNoRepresentation": {
     "message": "No usable video representation found"
   },

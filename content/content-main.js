@@ -58,6 +58,10 @@
     if (!response?.ok) {
       throw new Error(response?.error || 'MAIN world 脚本注入失败');
     }
+    // 记录本 frame 的 frameId（内容脚本自身拿不到），用于按 frame 归属过滤下载消息
+    if (Number.isInteger(response.frameId)) {
+      globalThis.__OVD_FRAME_ID__ = response.frameId;
+    }
   }
 
   async function injectPageScript() {

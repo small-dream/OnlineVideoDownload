@@ -71,7 +71,6 @@ function delay(ms) {
 // 这些工具已收敛到 lib/http-utils.js 与 lib/byte-utils.js（第四波 4.3），
 // 原先此处存在一份拷贝并与库实现漂移。
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
-const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 
 const parseTotalBytesHintFromUrl = (url) => httpUtils.parseTotalBytesHintFromUrl?.(url) || 0;
 const inferTotalBytesFromResponse = (response, loadedBytesBefore = 0, fallbackTotal = 0, requestUrl = '') =>

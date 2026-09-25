@@ -74,19 +74,57 @@ test('失败通知文案含原因', () => {
   assert.equal(content.message, 'movie.mp4：NETWORK_FAILED');
 });
 
-test('设置开启时 create 通知（id 去重、图标、文案）', async () => {
+test('通知只显示文件名（chrome.downloads 给的是绝对路径）', () => {
+  const completion = buildCompletionNotification({
+    filename: 'C:\\Users\\me\\Downloads\\OVD\\白宫国宴，特朗普请了谁？.mp4',
+    sizeBytes: 1024 * 1024,
+  });
+  assert.equal(completion.message, '白宫国宴，特朗普请了谁？.mp4（1.0 MB）');
+
+  const failure = buildFailureNotification({
+    filename: '/home/me/Downloads/OVD/clip.mp4',
+    reason: 'NETWORK_FAILED',
+  });
+  assert.equal(failure.message, 'clip.mp4：NETWORK_FAILED');
+});
+
+test('设置开启时 create 通知（固定 id、图标、文案），同一 downloadId 只提示一次', async () => {
   const { calls, chromeApi, settingsStore } = createMockChrome();
   const manager = new DownloadNotificationManager({ chromeApi, settingsStore });
 
   await manager.notifyComplete(42, { filename: 'movie.mp4', fileSize: 1024 * 1024 });
   await manager.notifyComplete(42, { filename: 'movie.mp4', fileSize: 1024 * 1024 });
 
-  assert.equal(calls.create.length, 2);
+  // 重复的完成事件（如中断→续传→完成）不应重复弹横幅
+  assert.equal(calls.create.length, 1);
   const [notificationId, options] = calls.create[0];
   assert.equal(notificationId, 'ovd-download-42');
   assert.equal(options.type, 'basic');
   assert.equal(options.iconUrl, 'chrome-extension://test-id/icons/icon128.png');
   assert.equal(options.title, '下载完成');
+});
+
+test('不同 downloadId 各自提示一次', async () => {
+  const { calls, chromeApi, settingsStore } = createMockChrome();
+  const manager = new DownloadNotificationManager({ chromeApi, settingsStore });
+
+  await manager.notifyComplete(1, { filename: 'a.mp4' });
+  await manager.notifyComplete(2, { filename: 'b.mp4' });
+  await manager.notifyComplete(2, { filename: 'b.mp4' });
+
+  assert.deepEqual(calls.create.map(([id]) => id), ['ovd-download-1', 'ovd-download-2']);
+});
+
+test('同一视频（taskKey）的重复下载只提示一次', async () => {
+  const { calls, chromeApi, settingsStore } = createMockChrome();
+  const manager = new DownloadNotificationManager({ chromeApi, settingsStore });
+
+  // 同一次点击在不同时间/多个 frame 各下一份时，downloadId 不同但 taskKey 相同
+  await manager.notifyComplete(8, { filename: 'video.mp4', fileSize: 1024 * 1024 }, { dedupeKey: 'BV1:42138208263' });
+  await manager.notifyComplete(9, { filename: 'video (1).mp4', fileSize: 1024 * 1024 }, { dedupeKey: 'BV1:42138208263' });
+  await manager.notifyComplete(10, { filename: 'other.mp4' }, { dedupeKey: 'BV2:99' });
+
+  assert.deepEqual(calls.create.map(([id]) => id), ['ovd-download-8', 'ovd-download-10']);
 });
 
 test('设置关闭时不创建通知', async () => {

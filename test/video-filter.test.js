@@ -100,3 +100,60 @@ test('filterVideos 返回保留项并支持空列表', () => {
   ]);
   assert.deepEqual(mod.filterVideos(null, {}), []);
 });
+
+// ---------------------------------------------------------------
+// 列表去噪：MSE blob 重复项（B 站视频页曾出现 1 条结构化 + 多条同名 blob）
+// ---------------------------------------------------------------
+
+test('shouldHideRedundantDetection：B 站视频页有 bilibili 结构化结果时隐藏 blob / audio 噪声', () => {
+  const mod = loadModule();
+  const context = { hasBilibiliMeta: true, isBilibiliVideoPage: true };
+
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'blob', url: 'blob:https://www.bilibili.com/x' }, context), true);
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'audio', url: 'https://www.bilibili.com/s/search/audio/open.mp3' }, context), true);
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'bilibili-meta', url: 'https://www.bilibili.com/video/BV1' }, context), false);
+});
+
+test('shouldHideRedundantDetection：没有结构化结果时 blob 照常展示', () => {
+  const mod = loadModule();
+  assert.equal(
+    mod.shouldHideRedundantDetection({ type: 'blob', url: 'blob:https://example.com/x' }, { isBilibiliVideoPage: true }),
+    false
+  );
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'blob', url: 'blob:https://example.com/x' }, {}), false);
+});
+
+test('shouldHideRedundantDetection：保留 YouTube 既有规则', () => {
+  const mod = loadModule();
+
+  // 非观看页整页噪声
+  assert.equal(
+    mod.shouldHideRedundantDetection({ type: 'direct', url: 'https://cdn/y.mp4' }, { isYouTubePage: true, isYouTubeWatchPage: false }),
+    true
+  );
+  // 观看页 + 有解析结果：隐藏页面内音效与同源 blob
+  const watch = { hasYouTubeAdaptive: true, isYouTubePage: true, isYouTubeWatchPage: true };
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'audio', url: 'https://www.youtube.com/s/search/audio/failure.mp3' }, watch), true);
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'blob', url: 'blob:https://www.youtube.com/abc' }, watch), true);
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'blob', url: 'blob:https://other.site/abc' }, watch), false);
+  assert.equal(mod.shouldHideRedundantDetection({ type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=1' }, watch), false);
+});
+
+test('collapseDuplicateBlobEntries：同 frame 同名 blob 只保留最新一条', () => {
+  const mod = loadModule();
+  const videos = [
+    { frameId: 0, timestamp: 10, title: '同名视频', type: 'blob', url: 'blob:https://www.bilibili.com/old' },
+    { frameId: 0, timestamp: 20, title: '同名视频', type: 'blob', url: 'blob:https://www.bilibili.com/new' },
+    { frameId: 6, timestamp: 15, title: '同名视频', type: 'blob', url: 'blob:https://s1.hdslb.com/frame6' },
+    { frameId: 0, timestamp: 5, title: '另一个视频', type: 'blob', url: 'blob:https://www.bilibili.com/other' },
+    { frameId: 0, timestamp: 30, title: '同名视频', type: 'bilibili-meta', url: 'https://www.bilibili.com/video/BV1' },
+  ];
+
+  assert.deepEqual(mod.collapseDuplicateBlobEntries(videos).map((video) => video.url), [
+    'blob:https://www.bilibili.com/new',
+    'blob:https://s1.hdslb.com/frame6',
+    'blob:https://www.bilibili.com/other',
+    'https://www.bilibili.com/video/BV1',
+  ]);
+  assert.deepEqual(mod.collapseDuplicateBlobEntries([]), []);
+});

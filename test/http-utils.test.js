@@ -178,3 +178,61 @@ test('createRangeRequestHeaders 支持 end 且剔除原有 Range（避免冲突�
   );
   assert.deepEqual(api.createRangeRequestHeaders({ Range: 'bytes=5-' }, 0), {});
 });
+
+// --- 候设备用地址回退（B 站主地址为 PCDN 节点，失败时要用 backupUrl） ---
+
+test('hostOfUrl 返回 hostname，非法 URL 返回空串', () => {
+  const { hostOfUrl } = mod();
+  assert.equal(
+    hostOfUrl('https://xy106x227x71x161xy.mcdn.bilivideo.cn:8082/a.m4s?x=1'),
+    'xy106x227x71x161xy.mcdn.bilivideo.cn'
+  );
+  assert.equal(hostOfUrl('not-a-url'), '');
+  assert.equal(hostOfUrl(null), '');
+});
+
+test('fetchFirstAvailableUrl 返回第一个成功的地址与结果', async () => {
+  const { fetchFirstAvailableUrl } = mod();
+  const tried = [];
+  const result = await fetchFirstAvailableUrl(['https://a.example/1.m4s', 'https://b.example/1.m4s'], async (url) => {
+    tried.push(url);
+    return `data:${url}`;
+  });
+
+  assert.deepEqual(tried, ['https://a.example/1.m4s']);
+  assert.deepEqual(result, { url: 'https://a.example/1.m4s', value: 'data:https://a.example/1.m4s' });
+});
+
+test('fetchFirstAvailableUrl 主地址失败时回退到备用地址', async () => {
+  const { fetchFirstAvailableUrl } = mod();
+  const tried = [];
+  const result = await fetchFirstAvailableUrl(['https://primary.example/1.m4s', 'https://backup.example/1.m4s'], async (url) => {
+    tried.push(url);
+    if (url.includes('primary')) {
+      throw new Error('Failed to fetch');
+    }
+    return 'ok';
+  });
+
+  assert.deepEqual(tried, ['https://primary.example/1.m4s', 'https://backup.example/1.m4s']);
+  assert.equal(result.url, 'https://backup.example/1.m4s');
+  assert.equal(result.value, 'ok');
+});
+
+test('fetchFirstAvailableUrl 全部失败时报出每个候选域名与原因', async () => {
+  const { fetchFirstAvailableUrl } = mod();
+  await assert.rejects(
+    () => fetchFirstAvailableUrl(['https://a.example/1.m4s'], async () => { throw new Error('Failed to fetch'); }),
+    (err) => {
+      assert.match(err.message, /所有候选地址均失败/);
+      assert.match(err.message, /a\.example: Failed to fetch/);
+      return true;
+    }
+  );
+});
+
+test('fetchFirstAvailableUrl 空候选或缺少下载实现时直接报错', async () => {
+  const { fetchFirstAvailableUrl } = mod();
+  await assert.rejects(() => fetchFirstAvailableUrl([], async () => 'ok'), /没有可用的候选下载地址/);
+  await assert.rejects(() => fetchFirstAvailableUrl(['https://a.example/1.m4s']), /缺少候选地址下载实现/);
+});

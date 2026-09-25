@@ -230,3 +230,92 @@ test('YouTube page stream progress keeps task metadata when forwarded', () => {
     videoUrl: 'https://www.youtube.com/watch?v=demo',
   }]);
 });
+
+// ---------------------------------------------------------------
+// 多 frame 去重：一次点击只应由持有该视频的 frame 下载（否则 N 个 iframe 各下一份）
+// ---------------------------------------------------------------
+
+function setupFrameGuardRouter() {
+  let listener = null;
+  globalThis.__OVD_safeRuntimeMessage = () => {};
+  globalThis.window = { addEventListener() {} };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: {
+        addListener(handler) {
+          listener = handler;
+        },
+      },
+    },
+  };
+  // content-main 在 MAIN world 注入成功后从 SW 记录本 frame 的 frameId
+  delete globalThis.__OVD_FRAME_ID__;
+
+  const started = [];
+  const router = loadRouter().createMessageRouter({
+    startSourceDownload: (meta) => {
+      started.push(meta);
+      return { ok: true, started: true };
+    },
+  });
+  router.start();
+
+  const dispatch = async (message, sender) => {
+    let responded = false;
+    listener(message, sender, () => {
+      responded = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return responded;
+  };
+
+  return {
+    dispatch,
+    setSelfFrameId(frameId) {
+      globalThis.__OVD_FRAME_ID__ = frameId;
+    },
+    started,
+  };
+}
+
+test('SOURCE_DOWNLOAD 只由上报该视频的 frame 处理（其它 frame 不响应也不下载）', async () => {
+  const { dispatch, setSelfFrameId, started } = setupFrameGuardRouter();
+  const message = { meta: { frameId: 0, url: 'https://www.bilibili.com/video/BV1' }, type: 'SOURCE_DOWNLOAD' };
+
+  setSelfFrameId(6);
+  const foreignResponded = await dispatch(message, {});
+  assert.equal(foreignResponded, false, 'iframe 不应响应（否则会与主 frame 抢答）');
+  assert.equal(started.length, 0, 'iframe 不应启动下载');
+
+  setSelfFrameId(0);
+  const ownerResponded = await dispatch(message, {});
+  assert.equal(ownerResponded, true);
+  assert.equal(started.length, 1, '主 frame 应启动下载');
+});
+
+test('缺少 frameId 的旧消息 / 未知自身 frameId 时仍按广播处理（兼容）', async () => {
+  const { dispatch, setSelfFrameId, started } = setupFrameGuardRouter();
+
+  setSelfFrameId(3);
+  assert.equal(await dispatch({ meta: { url: 'https://cdn.example.com/v.mp4' }, type: 'SOURCE_DOWNLOAD' }, {}), true);
+  assert.equal(started.length, 1);
+
+  delete globalThis.__OVD_FRAME_ID__;
+  assert.equal(await dispatch({ meta: { frameId: 0, url: 'https://cdn.example.com/v.mp4' }, type: 'SOURCE_DOWNLOAD' }, {}), true);
+  assert.equal(started.length, 2);
+});
+
+test('taskMeta.videoInfo.frameId 同样用于判定归属', async () => {
+  const { dispatch, setSelfFrameId, started } = setupFrameGuardRouter();
+  const message = {
+    taskMeta: { videoInfo: { frameId: 12 } },
+    type: 'SOURCE_DOWNLOAD',
+  };
+
+  setSelfFrameId(5);
+  assert.equal(await dispatch(message, {}), false);
+  assert.equal(started.length, 0);
+  setSelfFrameId(12);
+  assert.equal(await dispatch(message, {}), true);
+  assert.equal(started.length, 1);
+});

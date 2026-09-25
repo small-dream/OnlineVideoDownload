@@ -311,8 +311,19 @@
       transfer.reject(new Error(payload?.error || '页面内直链下载失败'));
     }
 
-    async function fetchMediaStreamsAndWait(videoUrl, audioUrl, headers, transferPrefix, timeoutMessage) {
+    function normalizeStreamUrlList(input) {
+      return (Array.isArray(input) ? input : [input])
+        .filter((url) => typeof url === 'string' && url.trim());
+    }
+
+    /**
+     * 让后台抓取视音频流。两个参数都接受候选地址数组：
+     * 后台会按顺序尝试（主地址 → 备用 CDN），单个节点不可达时自动切换。
+     */
+    async function fetchMediaStreamsAndWait(videoUrls, audioUrls, headers, transferPrefix, timeoutMessage) {
       const transferId = `${transferPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const videoCandidates = normalizeStreamUrlList(videoUrls);
+      const audioCandidates = normalizeStreamUrlList(audioUrls);
       const streamsReady = new Promise((resolve, reject) => {
         mediaStreamTransfers.set(transferId, { audioChunks: [], videoChunks: [], resolve, reject });
       });
@@ -321,10 +332,12 @@
       try {
         result = await sendMessageAsync({
           type: MSG.FETCH_MEDIA_STREAMS || 'FETCH_MEDIA_STREAMS',
-          audioUrl,
+          audioUrl: audioCandidates[0] || '',
+          audioUrls: audioCandidates,
           headers,
           transferId,
-          videoUrl,
+          videoUrl: videoCandidates[0] || '',
+          videoUrls: videoCandidates,
         });
       } catch (err) {
         mediaStreamTransfers.delete(transferId);
