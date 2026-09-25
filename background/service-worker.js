@@ -35,6 +35,7 @@ import '../lib/settings-store.js';
 import '../lib/video-filter.js';
 import '../lib/opfs-sink.js';
 import '../lib/page-message-guard.js';
+import '../lib/download-artifact-utils.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
@@ -47,6 +48,8 @@ const assertValidMessage = messageRuntime.assertValidMessage || ((message) => me
 const toErrorResponse = messageRuntime.toErrorResponse || ((error) => ({ ok: false, error: error?.message || String(error) }));
 const toMessageResponse = messageRuntime.toMessageResponse || ((result) => ({ ok: true, ...(result || {}) }));
 const MSG = messageTypes;
+const downloadArtifactUtils = globalThis.__OVD_DOWNLOAD_ARTIFACT_UTILS__ || {};
+const isBrokenTextStubDownload = downloadArtifactUtils.isBrokenTextStubDownload || (() => false);
 
 function parseContentRangeTotalFallback(contentRange) {
   const match = String(contentRange || '').match(/\/(\d+)$/);
@@ -344,6 +347,25 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   }
 
   if (nextState !== 'complete') return;
+
+  // 服务器回 text/plain 错误页时 Chrome 会存成 "xxx.mp4.txt"：
+  // 这种残片没有任何用处，直接删掉并按失败上报，避免用户以为下载成功了
+  const completedItem = await getDownloadItem(downloadId);
+  if (isBrokenTextStubDownload(completedItem)) {
+    const stubName = completedItem?.filename || '';
+    console.warn(`[OVD] 下载结果是错误页残片（text/plain），已删除 downloadId=${downloadId} file=${stubName}`);
+    clearDownloadResumeTracking(downloadId);
+    releaseOpfsTempFile(downloadId);
+    await eraseDownloadArtifact(downloadId);
+    const failedTask = downloadStore.updateTaskByDownloadId(downloadId, {
+      error: '服务器返回的是错误页（text/plain），已删除 .txt 残片；请改选其它清晰度或刷新页面后重试',
+      percent: 0,
+      status: 'failed',
+    });
+    broadcastTaskUpdate(failedTask);
+    void downloadNotifications.notifyFailed(downloadId, completedItem, 'SERVER_RETURNED_ERROR_PAGE').catch(() => {});
+    return;
+  }
 
   console.log(`[OVD] 下载完成 downloadId=${downloadId}`);
   clearDownloadResumeTracking(downloadId);
@@ -1668,6 +1690,24 @@ async function fetchStreamBufferResumable(url, label, headers, onProgress = null
 function getDownloadItem(downloadId) {
   return new Promise((resolve) => {
     chrome.downloads.search({ id: downloadId }, (items) => resolve(items?.[0] || null));
+  });
+}
+
+/** 删除下载记录与其落盘文件（用于清理错误页残片） */
+async function eraseDownloadArtifact(downloadId) {
+  await new Promise((resolve) => {
+    try {
+      chrome.downloads.removeFile(downloadId, () => resolve());
+    } catch (_err) {
+      resolve();
+    }
+  });
+  await new Promise((resolve) => {
+    try {
+      chrome.downloads.erase({ id: downloadId }, () => resolve());
+    } catch (_err) {
+      resolve();
+    }
   });
 }
 
