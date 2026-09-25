@@ -79,7 +79,7 @@
         const variant = hlsPipeline.selectHlsVariant?.(master.variants, m3u8Url, { quality: requestedQuality });
 
         if (!variant) {
-          throw new Error('Master Playlist 中没有可用画质');
+          throw new Error(t('err_noQuality', 'Master Playlist 中没有可用画质'));
         }
 
         selectedQuality = variant.label || '';
@@ -102,7 +102,7 @@
       console.log(`[OVD] 分片数 ${segments.length} 格式=${output.ext} initSegment=${!!playlist.initSegmentUrl} live=${!!playlist.isLive}`);
 
       if (segments.length === 0) {
-        throw new Error('m3u8 中没有找到分片');
+        throw new Error(t('err_noSegmentsRaw', 'm3u8 中没有找到分片'));
       }
 
       if (playlist.isLive) {
@@ -286,7 +286,7 @@
         });
 
       if (downloadResult?.ok === false) {
-        throw new Error(downloadResult.error || '浏览器下载提交失败');
+        throw new Error(downloadResult.error || t('err_handoffFailed', '浏览器下载提交失败'));
       }
 
       emitRuntimeMessage({

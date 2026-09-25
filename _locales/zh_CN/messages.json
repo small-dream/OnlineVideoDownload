@@ -156,6 +156,105 @@
   "edit_title": {
     "message": "编辑标题"
   },
+  "err_aborted": {
+    "message": "下载已取消。"
+  },
+  "err_bilibili": {
+    "message": "Bilibili 下载失败，请确认已登录 B 站账号后重试。"
+  },
+  "err_dashNoRepresentation": {
+    "message": "未找到可用的视频表示"
+  },
+  "err_dashNoUrl": {
+    "message": "DASH manifest URL 为空"
+  },
+  "err_dashNoVideo": {
+    "message": "MPD 中未找到视频自适应集"
+  },
+  "err_dash_tooLarge": {
+    "message": "DASH 流体积超出浏览器内合并上限，将分别保存视频与音频文件。"
+  },
+  "err_diskFull": {
+    "message": "写入临时文件失败（可能是磁盘空间或存储配额不足），已中止下载。"
+  },
+  "err_drm": {
+    "message": "该视频受 DRM 保护，无法下载。"
+  },
+  "err_handoffFailed": {
+    "message": "浏览器下载提交失败"
+  },
+  "err_hlsDelegateUnavailable": {
+    "message": "HLS 委托下载不可用"
+  },
+  "err_hls_decryptFailed": {
+    "message": "视频分片解密失败，任务已中止。"
+  },
+  "err_hls_encryption": {
+    "message": "该视频使用了不支持的加密方式，暂时无法下载。"
+  },
+  "err_hls_keyFailed": {
+    "message": "获取视频加密密钥失败，请确认已登录该站点后重试。"
+  },
+  "err_hls_segmentFailed": {
+    "message": "部分视频分片下载失败（重试后仍不可用），任务已中止，请稍后重试。"
+  },
+  "err_hls_sizeSkip": {
+    "message": "该视频体积超出浏览器内合并上限，已改为后台落盘下载。"
+  },
+  "err_hls_tooLarge": {
+    "message": "视频体积超出浏览器内合并上限，已中止下载，可尝试降低清晰度。"
+  },
+  "err_httpForbidden": {
+    "message": "服务器拒绝了下载请求（403），请确认已登录该站点或刷新页面后重试。"
+  },
+  "err_loginRequired": {
+    "message": "该视频需要登录后才能下载，请先登录站点账号。"
+  },
+  "err_muxerMissing": {
+    "message": "合并工具未加载"
+  },
+  "err_noQuality": {
+    "message": "Master Playlist 中没有可用画质"
+  },
+  "err_noSegments": {
+    "message": "未在播放列表中找到可下载的分片，请刷新页面后重试。"
+  },
+  "err_noSegmentsRaw": {
+    "message": "m3u8 中没有找到分片"
+  },
+  "err_timeout": {
+    "message": "下载请求超时，请检查网络后重试。"
+  },
+  "err_yt_captureFailed": {
+    "message": "录制下载失败，请保持页面处于前台播放状态后重试。"
+  },
+  "err_yt_captureUnsupported": {
+    "message": "当前浏览器或页面不支持录制模式，可尝试「解析下载」。"
+  },
+  "err_yt_noStreams": {
+    "message": "未找到可下载的视频流，请刷新页面后重试，或尝试「录制模式」。"
+  },
+  "err_yt_parseFailed": {
+    "message": "YouTube 解析下载失败，可尝试切换为「录制模式」下载。"
+  },
+  "err_yt_playbackBlocked": {
+    "message": "视频播放被页面阻止，请手动点击播放后再重试。"
+  },
+  "err_yt_saveFailed": {
+    "message": "文件保存失败，请检查浏览器下载设置后重试。"
+  },
+  "err_yt_signature": {
+    "message": "该视频使用了加密签名，暂不支持解析下载，可尝试切换为「录制模式」下载。"
+  },
+  "err_yt_tooLarge": {
+    "message": "视频体积过大，无法通过解析模式下载，可尝试「录制模式」。"
+  },
+  "err_yt_unknown": {
+    "message": "YouTube 下载失败，可尝试切换下载模式后重试。"
+  },
+  "err_yt_videoNotFound": {
+    "message": "未找到页面内的视频元素，请开始播放视频后重试。"
+  },
   "error_noBackground": {
     "message": "无法连接到扩展后台。"
   },
