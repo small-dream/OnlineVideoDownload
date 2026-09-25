@@ -938,3 +938,139 @@ test('downloadHlsSegments aborts mid-flight when the signal is aborted', async (
   );
   assert.ok(batches >= 2);
 });
+
+// ---------------------------------------------------------------
+// 分片顺序写入 sink（峰值内存从 O(总分片) 降到 O(并发数)）
+// ---------------------------------------------------------------
+
+test('createInMemorySink 累积分片、可转 ArrayBuffer/Blob，并在 toBlob 后释放引用', () => {
+  const mod = loadModule();
+  const sink = mod.createInMemorySink();
+
+  assert.equal(sink.byteLength, 0);
+  assert.equal(sink.chunkCount, 0);
+
+  return Promise.resolve()
+    .then(() => sink.write(new Uint8Array([1, 2]).buffer))
+    .then(() => sink.write(new Uint8Array(0).buffer))
+    .then(() => sink.write(null))
+    .then(() => {
+      assert.equal(sink.byteLength, 2);
+      assert.equal(sink.chunkCount, 1);
+
+      const bytes = new Uint8Array(sink.toArrayBuffer());
+      assert.deepEqual(Array.from(bytes), [1, 2]);
+
+      const blob = sink.toBlob('video/mp2t');
+      assert.equal(blob.size, 2);
+      assert.equal(blob.type, 'video/mp2t');
+      // 已交给 Blob，引用被释放但统计值保留
+      assert.equal(sink.chunkCount, 0);
+      assert.equal(sink.byteLength, 2);
+    });
+});
+
+test('createSegmentDecryptor 对空 keyInfo 返回 null', () => {
+  const mod = loadModule();
+  assert.equal(mod.createSegmentDecryptor(null), null);
+  assert.equal(typeof mod.createSegmentDecryptor({ iv: null, key: {} }), 'function');
+});
+
+test('downloadHlsSegments 使用 sink 时按分片顺序写入并放弃整份 buffers', async () => {
+  const mod = loadModule();
+  const sink = mod.createInMemorySink();
+  const writes = [];
+  const maxInFlight = { value: 0 };
+  let downloaded = 0;
+  const originalWrite = sink.write.bind(sink);
+  sink.write = (chunk, meta) => {
+    writes.push({ index: meta.index, size: chunk.byteLength });
+    // 未被写入 sink 的分片数量即内存里驻留的窗口大小
+    maxInFlight.value = Math.max(maxInFlight.value, downloaded - writes.length);
+    return originalWrite(chunk, meta);
+  };
+
+  const result = await mod.downloadHlsSegments(segmentUrls(9), {
+    concurrency: 3,
+    fetchBuffer: async (url) => {
+      // 故意让乱序完成：seg0 最慢、seg2 最快
+      if (url.includes('seg0.ts')) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      downloaded++;
+      return new Uint8Array(4).buffer;
+    },
+    retryDelays: [0],
+    sink,
+  });
+
+  assert.deepEqual(writes.map((item) => item.index), Array.from({ length: 9 }, (_v, i) => i));
+  assert.deepEqual(writes.map((item) => item.size), new Array(9).fill(4));
+  assert.equal(result.buffers, null);
+  assert.equal(result.writtenBytes, 36);
+  assert.equal(result.totalBytes, 36);
+  assert.equal(sink.byteLength, 36);
+  // 关键：驻留窗口不超过并发数，而不是随总分片数增长
+  assert.ok(maxInFlight.value <= 3, `驻留分片数应 ≤ 并发数，实际 ${maxInFlight.value}`);
+});
+
+test('downloadHlsSegments 使用 sink 时跳过失败分片但保持后续顺序', async () => {
+  const mod = loadModule();
+  const sink = mod.createInMemorySink();
+  const writes = [];
+  const originalWrite = sink.write.bind(sink);
+  sink.write = (chunk, meta) => {
+    writes.push(meta.index);
+    return originalWrite(chunk, meta);
+  };
+
+  // 20 个分片阈值 floor(20*0.1)=2，仅 1 个失败不中止
+  const result = await mod.downloadHlsSegments(segmentUrls(20), {
+    concurrency: 5,
+    fetchBuffer: async (url) => {
+      if (url.includes('seg1.ts')) {
+        throw new Error('HTTP 500');
+      }
+      return new Uint8Array(2).buffer;
+    },
+    retryDelays: [0, 0, 0],
+    sink,
+  });
+
+  assert.equal(result.failedCount, 1);
+  assert.equal(writes.length, 19);
+  assert.ok(!writes.includes(1));
+  assert.equal(writes[0], 0);
+  assert.equal(writes.at(-1), 19);
+  assert.equal(sink.byteLength, 38);
+});
+
+test('downloadHlsSegments 在写入 sink 前按分片顺序执行 transform', async () => {
+  const mod = loadModule();
+  const transformed = [];
+  const writes = [];
+  const sink = {
+    async write(chunk) {
+      writes.push(Array.from(new Uint8Array(chunk)));
+    },
+  };
+
+  await mod.downloadHlsSegments(segmentUrls(3), {
+    concurrency: 3,
+    fetchBuffer: async (url) => new Uint8Array([Number(/seg(\d+)\.ts/.exec(url)[1])]).buffer,
+    retryDelays: [0],
+    sink,
+    transform: async (buffer, index) => {
+      transformed.push({ index, value: new Uint8Array(buffer)[0] });
+      // 模拟解密：把原始值 +100 后写出
+      return new Uint8Array([new Uint8Array(buffer)[0] + 100]).buffer;
+    },
+  });
+
+  assert.deepEqual(transformed, [
+    { index: 0, value: 0 },
+    { index: 1, value: 1 },
+    { index: 2, value: 2 },
+  ]);
+  assert.deepEqual(writes, [[100], [101], [102]]);
+});

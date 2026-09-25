@@ -99,6 +99,7 @@ Public surface:
 - `parseByteRange(value)` / `toRangeHeader(byteRange)`
 - `ivFromSequence(sequence)`
 - `createAbortError(message)`
+- `createInMemorySink()` / `createSegmentDecryptor(keyInfo)`
 - `parseHlsEncryption`
 - `parseAttributeList`
 - `parseHlsIV`
@@ -124,6 +125,12 @@ Notes:
 - `downloadHlsSegments` 是 background/content 共用的分片下载循环：失败分片按 `HLS_SEGMENT_RETRY_DELAYS` 指数退避重试（最多 3 次），最终失败数超过 `HLS_MAX_FAILED_RATIO`（分片总数 ≤ 10 时零容忍）时抛 `HLS_SEGMENT_DOWNLOAD_FAILED` 中止任务，不产出含空洞的文件；未超阈值时通过 `onProgress(done, total, { failedCount, retriedCount })` 上报失败/重试统计。
 - 体积守卫：累计下载字节超过 `options.maxTotalBytes`（默认 `constants.MAX_IN_PAGE_MERGE_BYTES`，1.5 GB）时抛 `HLS_OUTPUT_TOO_LARGE`，避免浏览器内合并 OOM。
 - 取消：`options.signal` 为 `AbortSignal`，任一批次开始前检测到 `aborted` 即抛 `DOWNLOAD_ABORTED`（`createAbortError()`）。
+- **顺序写入 sink（内存治理）**：`options.sink` 为 `{ write(chunk, { index, segment }) }` 时，`downloadHlsSegments` 不再返回整份 `buffers` 数组，而是只保留"已下载但还不能按序落盘"的重排窗口（≤ `concurrency` 个分片）。`options.transform(chunk, index, segment)` 在写入前逐分片执行（解密等），因此不需要再额外持有一份解密后的全量数组。返回 `{ buffers: null, writtenBytes, totalBytes, sink }`。
+  - 内存对比：旧路径峰值 ≈ buffers(N) + merged(N) + Blob(N) ≈ 3N；sink 路径 ≈ 分片引用(N) + 窗口(≤并发数)，且 `toBlob()` 后引用立即释放。
+  - `createInMemorySink()` 提供 `write` / `toArrayBuffer()` / `toBlob(mimeType)` / `byteLength` / `chunkCount`；`toBlob` 是消费型出口（交给 Blob 后清空引用）。
+  - `createSegmentDecryptor(keyInfo)` 把密钥轮换 / 媒体序号派生 IV 封装成 `(buffer, index) => Promise<buffer>`，`decryptHlsSegments` 与 `transform` 共用同一实现，避免两条解密路径漂移。
+  - 调用方策略：`content/strategies/hls-strategy.js`、`background/hls-fetcher.js` 在"不需要 fMP4 合并"时使用 sink（需要音轨合并时仍需整体持有视频数据，属 muxer 接口限制）；`content/strategies/dash-strategy.js` 视频/音频各用一个 sink，再用 `toArrayBuffer()` 交给 muxer（少一次全量拼接拷贝）。
+  - 该接口即后续 OPFS / 文件落盘 sink 的挂载点：只需实现 `write` 的落盘版本，下载循环与策略无需改动。
 
 ### `lib/ovd-logger.js`
 

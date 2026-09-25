@@ -102,13 +102,31 @@ export class HlsFetcher {
     }
 
     const keyInfo = await this._resolveKeyInfo(pipeline, playlist, m3u8Content, m3u8Url, headers);
+    const decryptor = keyInfo && typeof pipeline.createSegmentDecryptor === 'function'
+      ? pipeline.createSegmentDecryptor(keyInfo)
+      : null;
 
     const output = pipeline.inferHlsOutputProfile(playlist);
+
+    // 需要把独立音轨合并进视频时必须整体持有视频数据（fMP4 muxer 接口所限）；
+    // 其余情况走顺序写入 sink，避免再拼一份全量 Uint8Array。
+    const audioMergePlanned = !!audioRenditionUrl
+      && output.ext === '.mp4'
+      && typeof globalThis.BilibiliMuxer?.mergeFmp4Streams === 'function';
+    const sink = !audioMergePlanned && typeof pipeline.createInMemorySink === 'function'
+      ? pipeline.createInMemorySink()
+      : null;
+
     const prefixBuffers = [];
     if (playlist.initSegmentUrl) {
-      prefixBuffers.push(await pipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers, {
+      const initBuffer = await pipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers, {
         range: playlist.initSegmentByteRange,
-      }));
+      });
+      if (sink) {
+        await sink.write(initBuffer);
+      } else {
+        prefixBuffers.push(initBuffer);
+      }
     }
 
     const { buffers, failedCount } = await pipeline.downloadHlsSegments(segments, {
@@ -117,21 +135,24 @@ export class HlsFetcher {
       headers,
       maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES,
       onProgress,
+      sink,
+      transform: decryptor,
     });
     if (failedCount > 0) {
       console.warn(`[HLS] ${failedCount}/${segments.length} 个分片下载失败（未超阈值），已按空洞跳过`);
     }
 
-    let finalBuffers = buffers;
-    if (keyInfo) {
-      finalBuffers = await pipeline.decryptHlsSegments(buffers, keyInfo);
-    }
-
-    finalBuffers = prefixBuffers.concat(finalBuffers);
-    let merged = this._concatBuffers(finalBuffers);
-
+    let blob;
     let audioMerged = false;
-    if (audioRenditionUrl) {
+
+    if (audioMergePlanned) {
+      let finalBuffers = buffers || [];
+      if (keyInfo && !decryptor) {
+        finalBuffers = await pipeline.decryptHlsSegments(finalBuffers, keyInfo);
+      }
+      finalBuffers = prefixBuffers.concat(finalBuffers);
+      let merged = this._concatBuffers(finalBuffers);
+
       try {
         const withAudio = await this._mergeAudioRendition(
           pipeline,
@@ -155,9 +176,21 @@ export class HlsFetcher {
           videoUrl: taskMeta.videoUrl || m3u8Url,
         });
       }
+
+      blob = new Blob([merged], { type: output.mimeType });
+    } else if (sink && sink.byteLength > 0 && typeof sink.toBlob === 'function') {
+      blob = sink.toBlob(output.mimeType);
+    } else {
+      // 兜底：下载管线未使用 sink（旧实现）时仍按缓冲数组拼接
+      let finalBuffers = buffers || [];
+      if (keyInfo && !decryptor) {
+        finalBuffers = await pipeline.decryptHlsSegments(finalBuffers, keyInfo);
+      }
+      finalBuffers = prefixBuffers.concat(finalBuffers);
+      blob = new Blob([this._concatBuffers(finalBuffers)], { type: output.mimeType });
     }
 
-    const result = await this._downloadMergedBlob(merged, filename, output, taskMeta);
+    const result = await this._downloadMergedBlob(blob, filename, output, taskMeta);
     return {
       ...(result || {}),
       audioMerged,
@@ -240,9 +273,8 @@ export class HlsFetcher {
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  async _downloadMergedBlob(uint8Array, filename, output, taskMeta = {}) {
+  async _downloadMergedBlob(blob, filename, output, taskMeta = {}) {
     const pipeline = getHlsPipeline();
-    const blob = new Blob([uint8Array], { type: output.mimeType });
     const downloadFilename = await downloadPathUtils.applyDownloadSubdir?.(
       pipeline.ensureExtension(filename, output.ext)
     );

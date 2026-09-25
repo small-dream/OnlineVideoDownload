@@ -295,3 +295,76 @@ test('DASH 多 Period 清单按顺序拼接分片并提示用户', async () => {
   ]);
   assert.ok(statuses.some((message) => /Period/.test(message)));
 });
+
+test('DASH 下载在 sink 可用时按分片顺序累积，不再多拼一份全量数组', async () => {
+  // 用真实 pipeline 的 sink 工厂 + 认这份 sink 的下载替身
+  const pipelinePath = path.resolve(__dirname, '../lib/hls-pipeline.js');
+  delete globalThis.__OVD_HLS_PIPELINE__;
+  delete require.cache[require.resolve(pipelinePath)];
+  require(pipelinePath);
+  const sinkFactory = globalThis.__OVD_HLS_PIPELINE__.createInMemorySink;
+
+  const record = [];
+  const sinks = [];
+  let mergedArgs = null;
+  globalThis.BilibiliMuxer = {
+    async mergeFmp4Streams(videoData, audioData) {
+      mergedArgs = { audio: audioData.byteLength, video: videoData.byteLength };
+      return new Blob([bufferOf(5)], { type: 'video/mp4' });
+    },
+  };
+
+  try {
+    const strategy = loadDashStrategy().createDashStrategy({
+      hlsPipeline: {
+        createInMemorySink() {
+          const sink = sinkFactory();
+          sinks.push(sink);
+          return sink;
+        },
+        async downloadHlsSegments(urls, options) {
+          for (const url of urls) {
+            const buffer = await options.fetchBuffer(url, typeof url === 'object' ? url.byteRange : null);
+            if (options.sink) {
+              await options.sink.write(buffer);
+            }
+            record.push(typeof url === 'object' ? url.url : url);
+          }
+          // sink 路径下管线不再返回整份 buffers
+          return { buffers: null, failedCount: 0, retriedCount: 0, sink: options.sink };
+        },
+        hlsFetchBuffer(url) {
+          return Promise.resolve(url.includes('audio') ? bufferOf(3) : bufferOf(2));
+        },
+        hlsFetchText() {
+          return Promise.resolve('<MPD></MPD>');
+        },
+      },
+      mpdParser: {
+        parseMpdManifest: () => ({ adaptations: [{ contentType: 'video' }, { contentType: 'audio' }], duration: 10 }),
+        selectBestAudioRepresentation: () => ({ id: 'a', segments: [{ url: 'https://cdn.example.com/audio.m4s' }] }),
+        selectBestVideoRepresentation: () => ({ id: 'v', segments: [{ url: 'https://cdn.example.com/video.m4s' }] }),
+      },
+      triggerBlobDownload: () => {},
+    });
+
+    await strategy.download({
+      title: 'Demo',
+      type: 'dash',
+      url: 'https://cdn.example.com/manifest.mpd',
+    }, {
+      progressReporter: { progress() {}, status() {} },
+    });
+
+    assert.equal(sinks.length, 2, '视频与音频各用一个 sink');
+    assert.deepEqual(sinks.map((sink) => sink.byteLength), [2, 3]);
+    assert.deepEqual(mergedArgs, { audio: 3, video: 2 });
+    assert.deepEqual(record, [
+      'https://cdn.example.com/video.m4s',
+      'https://cdn.example.com/audio.m4s',
+    ]);
+  } finally {
+    delete globalThis.BilibiliMuxer;
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
