@@ -7,7 +7,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-    <img src="https://img.shields.io/badge/Chrome-88%2B-green.svg" alt="Chrome 88+">
+    <img src="https://img.shields.io/badge/Chrome-109%2B-green.svg" alt="Chrome 109+">
     <img src="https://img.shields.io/badge/Manifest-V3-purple.svg" alt="Manifest V3">
   </p>
   <p align="center">
@@ -36,7 +36,7 @@
 
 ## 🚀 快速开始（30 秒安装）
 
-> **前提**：你需要有 Chrome 88+ 或 Edge 88+ 浏览器
+> **前提**：你需要有 Chrome 109+ 或 Edge 109+ 浏览器
 
 ### 第 1 步：下载代码
 

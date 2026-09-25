@@ -7,7 +7,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-    <img src="https://img.shields.io/badge/Chrome-88%2B-green.svg" alt="Chrome 88+">
+    <img src="https://img.shields.io/badge/Chrome-109%2B-green.svg" alt="Chrome 109+">
     <img src="https://img.shields.io/badge/Manifest-V3-purple.svg" alt="Manifest V3">
   </p>
   <p align="center">
@@ -33,7 +33,7 @@
 
 ## 🚀 Démarrage rapide (30 secondes)
 
-> **Prérequis** : Chrome 88+ ou Edge 88+
+> **Prérequis** : Chrome 109+ ou Edge 109+
 
 ### Étape 1 : Récupérer le code
 

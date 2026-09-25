@@ -26,8 +26,6 @@
       streamTransferManager = null,
     } = options;
 
-    const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
-    const formatBytes = byteUtils.formatBytes || (() => '');
     // 页面方向的消息一律当不可信数据处理（MAIN world 无法对页面保密）
     const pageMessageGuard = globalThis.__OVD_PAGE_MESSAGE_GUARD__ || {};
 

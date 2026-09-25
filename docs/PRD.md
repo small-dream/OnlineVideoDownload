@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.7
+> **版本**：1.17.8
 > **最后更新**：2026-09-25
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -222,7 +222,7 @@ UI 要求：
 - 不上传用户视频数据或页面私密数据
 - 不加载远程代码
 - 不尝试绕过 Widevine / PlayReady 等 DRM
-- 支持 Chrome / Edge 的 Manifest V3 运行环境；`minimum_chrome_version: 109`（offscreen 依赖），更低版本不支持
+- 仅支持 Chromium 内核（Chrome / Edge 109+）：offscreen document、declarativeNetRequest 动态规则、MAIN world 脚本注入均为硬依赖，Firefox 不做兼容承诺
 - 模块拆分后仍需保持原有下载行为不变
 
 已知限制：
