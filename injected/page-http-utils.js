@@ -532,7 +532,10 @@
   }
 
   function triggerPageBlobDownload(blob, filename) {
-    const objectUrl = URL.createObjectURL(blob);
+    // 有些 CDN 会把有效媒体标成 text/plain：直接用它建 Blob 会让浏览器把文件
+    // 存成 "xxx.mp4.txt"。这里按文件名推断媒体 MIME 覆盖掉不可信的服务器类型。
+    const safeBlob = withFilenameMimeType(blob, filename);
+    const objectUrl = URL.createObjectURL(safeBlob);
     const link = document.createElement('a');
     link.href = objectUrl;
     link.download = filename || 'youtube-video.mp4';
@@ -547,6 +550,36 @@
         console.warn(`[OVD][PAGE] failed to revoke page object URL: ${err.message}`);
       }
     }, 60000);
+  }
+
+  /** 按文件名扩展名纠正 Blob 的 MIME（服务器 MIME 明显不可信时） */
+  function withFilenameMimeType(blob, filename) {
+    const name = String(filename || '').toLowerCase();
+    const byExtension = [
+      [/\.mp4$/, 'video/mp4'],
+      [/\.m4v$/, 'video/mp4'],
+      [/\.webm$/, 'video/webm'],
+      [/\.mkv$/, 'video/x-matroska'],
+      [/\.mov$/, 'video/quicktime'],
+      [/\.ts$/, 'video/mp2t'],
+      [/\.m4a$/, 'audio/mp4'],
+      [/\.mp3$/, 'audio/mpeg'],
+    ].find(([pattern]) => pattern.test(name));
+    if (!byExtension) {
+      return blob;
+    }
+
+    const expected = byExtension[1];
+    const current = String(blob?.type || '').toLowerCase();
+    if (current === expected) {
+      return blob;
+    }
+    // 仅纠正"文本类/空"等明显不可信的类型
+    if (current && !/^(?:text\/|application\/(?:xml|xhtml\+xml|octet-stream))/.test(current)) {
+      return blob;
+    }
+    console.warn(`[OVD][PAGE] 按文件名纠正 Blob MIME type="${current || '(empty)'}" -> ${expected}`);
+    return new Blob([blob], { type: expected });
   }
 
   function safeUrlPathname(url) {
@@ -711,5 +744,6 @@
     originalFetch,
     triggerPageBlobDownload,
     uint8ArrayToBase64,
+    withFilenameMimeType,
   };
 })();
