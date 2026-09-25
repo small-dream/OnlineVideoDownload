@@ -31,7 +31,9 @@ test('isAllowedMediaUrl 只放行 http(s) 与带 origin 的 blob:', () => {
   assert.equal(guard.isAllowedMediaUrl('blob:uuid-without-origin'), false);
   assert.equal(guard.isAllowedMediaUrl(''), false);
   assert.equal(guard.isAllowedMediaUrl(null), false);
-  assert.equal(guard.isAllowedMediaUrl(`https://x/${'a'.repeat(9000)}`), false);
+  // 上限 16K：YouTube HLS 清单地址本身就带完整签名参数（可达数千字符），但仍要挡掉超长载荷
+  assert.equal(guard.isAllowedMediaUrl(`https://x/${'a'.repeat(9000)}`), true);
+  assert.equal(guard.isAllowedMediaUrl(`https://x/${'a'.repeat(17000)}`), false);
 });
 
 test('validateDetectedPayload 校验类型与 URL', () => {
