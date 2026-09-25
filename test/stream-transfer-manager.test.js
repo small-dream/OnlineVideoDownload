@@ -41,6 +41,33 @@ async function createTransfer(harness) {
   return { promise, transferId: harness.sent[0].transferId };
 }
 
+test('抓取请求携带任务身份（只透传身份字段，不含 videoInfo）', async () => {
+  const harness = createHarness();
+  const promise = harness.manager.fetchMediaStreamsAndWait('https://cdn.example/v', 'https://cdn.example/a', {}, 'bili', 'timeout', {
+    sourceId: 'bilibili',
+    strategyId: 'page-api',
+    taskKey: 'bili:BV1:2',
+    title: 'Demo',
+    traceId: 'trace-1',
+    videoInfo: { large: true },
+    videoUrl: 'https://www.bilibili.com/video/BV1',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // 后台据此把抓取阶段进度写进同一任务，不必逐条回传整个 videoInfo
+  assert.deepEqual(harness.sent[0].taskMeta, {
+    sourceId: 'bilibili',
+    strategyId: 'page-api',
+    taskKey: 'bili:BV1:2',
+    title: 'Demo',
+    traceId: 'trace-1',
+    videoUrl: 'https://www.bilibili.com/video/BV1',
+  });
+
+  harness.manager.failMediaStreamTransfer(harness.sent[0].transferId, 'test cleanup');
+  await promise.catch(() => {});
+});
+
 // ---------------------------------------------------------------
 // P0：后台流水线回传后，分片按 seq 还原顺序（到达顺序不再保证）
 // ---------------------------------------------------------------

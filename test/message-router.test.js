@@ -8,6 +8,11 @@ function loadRouter() {
   delete globalThis.__OVD_MESSAGE_ROUTER__;
   const routerPath = path.resolve(__dirname, '../content/message-router.js');
   delete require.cache[routerPath];
+  // 内容脚本真实加载顺序里 progress-scale 先于消息路由
+  const scalePath = path.resolve(__dirname, '../lib/progress-scale.js');
+  delete globalThis.__OVD_PROGRESS_SCALE__;
+  delete require.cache[scalePath];
+  require(scalePath);
 
   globalThis.__OVD_MESSAGE_TYPES__ = {
     MESSAGE_TYPES: {
@@ -161,8 +166,9 @@ test('伪造的页面检测消息（危险协议 / 未知类型）不会转发�
   assert.equal(sent[0].type, 'VIDEO_DETECTED');
 });
 
-test('YouTube page stream progress keeps task metadata when forwarded', () => {
+test('YouTube 页面抓流进度按统一坐标系上报（抓取 50% → 任务 45%）并驱动浮条', () => {
   const emittedMessages = [];
+  const floatProgress = [];
   let messageHandler = null;
   globalThis.__OVD_safeRuntimeMessage = (message) => emittedMessages.push(message);
   globalThis.window = {
@@ -198,7 +204,10 @@ test('YouTube page stream progress keeps task metadata when forwarded', () => {
     }),
   };
 
-  const router = loadRouter().createMessageRouter({ streamTransferManager });
+  const router = loadRouter().createMessageRouter({
+    getFloatButton: () => ({ showProgress: (percent) => floatProgress.push(percent) }),
+    streamTransferManager,
+  });
   router.start();
 
   messageHandler({
@@ -218,7 +227,8 @@ test('YouTube page stream progress keeps task metadata when forwarded', () => {
   assert.deepEqual(emittedMessages, [{
     hasKnownTotal: true,
     loadedBytes: 50,
-    percent: 50,
+    // 抓取阶段占统一进度 0..90，原始 50% → 统一 45%
+    percent: 45,
     phase: 'fetching',
     sourceId: 'youtube',
     strategyId: 'youtube-parse',
@@ -229,6 +239,19 @@ test('YouTube page stream progress keeps task metadata when forwarded', () => {
     type: 'SOURCE_DOWNLOAD_PROGRESS',
     videoUrl: 'https://www.youtube.com/watch?v=demo',
   }]);
+  // 页面浮条读到与 popup 条目/任务列表完全相同的百分比
+  assert.deepEqual(floatProgress, [45]);
+});
+
+test('Bilibili 抓取阶段进度广播（background 已映射）驱动页面浮条', async () => {
+  const floatProgress = [];
+  const harness = setupBackgroundRouter({
+    getFloatButton: () => ({ showProgress: (percent) => floatProgress.push(percent) }),
+  });
+
+  await harness.send({ loadedBytes: 5, percent: 45, phase: 'fetching', transferId: 'bili-1', type: 'BILIBILI_STREAM_PROGRESS' });
+
+  assert.deepEqual(floatProgress, [45]);
 });
 
 // ---------------------------------------------------------------

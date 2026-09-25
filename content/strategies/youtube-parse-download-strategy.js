@@ -27,6 +27,8 @@
   const modeStore = globalThis.__OVD_YOUTUBE_DOWNLOAD_MODE_STORE__ || {};
   const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
   const constants = globalThis.__OVD_CONSTANTS__ || {};
+  // 阶段进度 → 统一进度（抓取 0..90、合并 90..99），与 message-router 抓取阶段共用同一映射
+  const progressScale = globalThis.__OVD_PROGRESS_SCALE__ || {};
 
   function createYouTubeParseDownloadStrategy(options = {}) {
     const {
@@ -302,9 +304,11 @@
       floatButton?.showMessage(t('yt_merging', '正在合并 YouTube 视音频...'), false, 0);
       progressReporter?.status(t('yt_merging', '正在合并 YouTube 视音频...'));
       const blob = await BilibiliMuxer.mergeFmp4Streams(videoBuffer, audioBuffer, (percent) => {
-        floatButton?.showMessage(t('yt_mergingPercent', '正在合并 YouTube 视音频... $1%', [String(percent)]), false, 0);
-        floatButton?.showProgress(percent);
-        progressReporter?.progress(percent, { phase: 'merging' });
+        // 与抓取阶段同一坐标系：抓取到 90% 后，合并阶段接着走到 99%
+        const unifiedPercent = progressScale.mapPhasePercent?.('merging', percent) ?? percent;
+        floatButton?.showMessage(t('yt_mergingPercent', '正在合并 YouTube 视音频... $1%', [String(unifiedPercent)]), false, 0);
+        floatButton?.showProgress(unifiedPercent);
+        progressReporter?.progress(unifiedPercent, { phase: 'merging' });
       });
 
       const filename = videoUtils.buildMediaFilename({

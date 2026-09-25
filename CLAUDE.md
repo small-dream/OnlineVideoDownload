@@ -110,6 +110,7 @@ function loadModule(globalKey, filePath) {
 | lib/video-utils.js | test/video-utils.test.js |
 | lib/video-source-utils.js | test/video-source-utils.test.js |
 | lib/constants.js | test/constants.test.js |
+| lib/progress-scale.js | test/progress-scale.test.js |
 | lib/bilibili-quality-utils.js | test/bilibili-quality-utils.test.js |
 | lib/youtube-stream-utils.js | test/youtube-stream-utils.test.js |
 | lib/hls-pipeline.js | test/hls-pipeline.test.js |
@@ -119,6 +120,7 @@ function loadModule(globalKey, filePath) {
 | lib/ui-dom-utils.js | test/ui-dom-utils.test.js |
 | content/progress-reporter.js | test/progress-reporter.test.js |
 | content/source-handlers.js | test/source-handlers.test.js |
+| content/strategies/bilibili-strategy.js | test/bilibili-strategy.test.js |
 | background/download-history-store.js | test/download-history-store.test.js |
 | background/download-state-store.js | test/download-state-store.test.js |
 

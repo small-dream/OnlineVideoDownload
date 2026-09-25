@@ -319,8 +319,10 @@
     /**
      * 让后台抓取视音频流。两个参数都接受候选地址数组：
      * 后台会按顺序尝试（主地址 → 备用 CDN），单个节点不可达时自动切换。
+     * taskMeta 为任务身份（taskKey/traceId/title/videoUrl 等），随抓取请求一起
+     * 交给后台，让抓取阶段进度能落到同一任务上（三个展示位置共用同一百分比）。
      */
-    async function fetchMediaStreamsAndWait(videoUrls, audioUrls, headers, transferPrefix, timeoutMessage) {
+    async function fetchMediaStreamsAndWait(videoUrls, audioUrls, headers, transferPrefix, timeoutMessage, taskMeta = null) {
       const transferId = `${transferPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const videoCandidates = normalizeStreamUrlList(videoUrls);
       const audioCandidates = normalizeStreamUrlList(audioUrls);
@@ -335,6 +337,7 @@
           audioUrl: audioCandidates[0] || '',
           audioUrls: audioCandidates,
           headers,
+          taskMeta: taskMeta ? normalizeTaskMeta(taskMeta) : {},
           transferId,
           videoUrl: videoCandidates[0] || '',
           videoUrls: videoCandidates,

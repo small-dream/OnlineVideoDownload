@@ -28,6 +28,7 @@ import {
 import '../lib/byte-utils.js';
 import '../lib/http-utils.js';
 import '../lib/constants.js';
+import '../lib/progress-scale.js';
 import '../lib/download-path.js';
 import '../lib/message-types.js';
 import '../lib/settings-store.js';
@@ -38,6 +39,7 @@ import '../lib/page-message-guard.js';
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
 const constants = globalThis.__OVD_CONSTANTS__ || {};
+const progressScale = globalThis.__OVD_PROGRESS_SCALE__ || {};
 const downloadPathUtils = globalThis.__OVD_DOWNLOAD_PATH__ || {};
 const messageRuntime = globalThis.__OVD_MESSAGE_TYPES__ || {};
 const messageTypes = messageRuntime.MESSAGE_TYPES || {};
@@ -623,7 +625,8 @@ async function handleMessage(msg, sender) {
         msg.headers,
         tabId,
         msg.transferId,
-        frameId
+        frameId,
+        msg.taskMeta || null
       );
 
     case MSG.BILIBILI_MUXER_LOG || 'BILIBILI_MUXER_LOG':
@@ -1396,7 +1399,12 @@ async function fetchMediaStreamWithFallback(candidates, label, headers, onProgre
   }
 }
 
-async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferId, frameId = null) {
+/**
+ * 抓取 Bilibili 视音频流并回传给内容侧。
+ * taskMeta 为内容侧任务身份（taskKey/traceId/videoUrl 等），用于把抓取阶段进度写进
+ * 同一任务，使「下载任务列表 / Popup 条目 / 页面浮条」三处进度一致。
+ */
+async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferId, frameId = null, taskMeta = null) {
   const videoCandidates = normalizeMediaUrlList(videoUrls);
   const audioCandidates = normalizeMediaUrlList(audioUrls);
   const cleanups = [];
@@ -1408,6 +1416,36 @@ async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferI
 
   if (videoCandidates.length === 0 || audioCandidates.length === 0) {
     throw new Error('缺少视音频流地址');
+  }
+
+  /**
+   * 广播抓取阶段的统一进度：任务表（DownloadStateStore）+ 发起该任务的 frame（页面浮条）。
+   * percent 已按 `lib/progress-scale.js` 的阶段权重映射（抓取阶段 0..90），
+   * 与内容侧合并阶段的上报同一坐标系，避免合并开始时进度回退。
+   */
+  function reportFetchProgress(percent, loadedBytes, totalBytes) {
+    const taskIdentity = taskMeta && (taskMeta.taskKey || taskMeta.traceId);
+    if (taskIdentity) {
+      broadcastTaskUpdate(downloadStore.upsertTask({
+        ...taskMeta,
+        percent,
+        phase: 'fetching',
+        status: 'running',
+        tabId,
+        videoUrl: taskMeta.videoUrl || '',
+      }));
+    }
+
+    broadcast(tabId, {
+      type: MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS',
+      // frameId 让 tabs.sendMessage 只发往发起下载的 frame，浮条不会出现在同页 iframe 里
+      ...(frameId != null ? { frameId } : {}),
+      loadedBytes,
+      percent,
+      phase: 'fetching',
+      totalBytes,
+      transferId,
+    });
   }
 
   function onStreamProgress(label, loadedBytes, totalBytes) {
@@ -1425,20 +1463,15 @@ async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferI
       return;
     }
 
-    const percent = Math.min(100, Math.round((combinedLoaded / combinedTotal) * 100));
-    if (percent === lastBroadcastPercent) {
+    const rawPercent = Math.min(100, Math.round((combinedLoaded / combinedTotal) * 100));
+    const percent = progressScale.mapPhasePercent?.('fetching', rawPercent) ?? rawPercent;
+    // 两个流的总长度可能先后才拿到（分母变大→百分比回退），只允许单调递增
+    if (percent <= lastBroadcastPercent) {
       return;
     }
 
     lastBroadcastPercent = percent;
-    broadcast(tabId, {
-      type: MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS',
-      loadedBytes: combinedLoaded,
-      percent,
-      phase: 'fetching',
-      totalBytes: combinedTotal,
-      transferId,
-    });
+    reportFetchProgress(percent, combinedLoaded, combinedTotal);
   }
 
   try {
