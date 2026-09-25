@@ -859,12 +859,15 @@ async function getVisibleVideosForTab(tabId) {
 
   registry.enrichTitles(tabId, tabTitle);
   const videos = registry.getForTab(tabId);
-  const detectionFilterContext = buildDetectionFilterContext(tabUrl, videos);
   const collapseBlobs = videoFilter.collapseDuplicateBlobEntries || ((list) => list);
   const mergeYouTubeHls = videoFilter.mergeYouTubeHlsEntries || ((list) => list);
   const shouldHide = videoFilter.shouldHideRedundantDetection || (() => false);
   // 同一视频的 YouTube HLS 条目先并入 youtube-adaptive 条目（一条 = 一行）
-  const visibleVideos = mergeYouTubeHls(collapseBlobs(videos))
+  const mergedVideos = mergeYouTubeHls(collapseBlobs(videos));
+  // 过滤上下文必须基于**合并后**的列表：否则被吸收掉的 HLS 条目仍会让
+  // "隐藏 youtube-adaptive 行"的规则生效，导致带"需合并"选项的那一行整体消失
+  const detectionFilterContext = buildDetectionFilterContext(tabUrl, mergedVideos);
+  const visibleVideos = mergedVideos
     .filter((video) => !shouldHide(video, detectionFilterContext));
 
   // 用户级过滤（域名黑名单/最小时长/最小体积）：在读取时应用，

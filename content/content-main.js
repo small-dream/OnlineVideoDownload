@@ -282,6 +282,7 @@
     emitRuntimeMessage,
     getFloatButton,
     hlsPipeline,
+    injectRequestHeaders: injectDownloadHeaders,
     triggerBlobDownload,
   });
 
