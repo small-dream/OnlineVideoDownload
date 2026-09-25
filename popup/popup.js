@@ -396,6 +396,13 @@ function populatePopupSettings(settings = {}) {
   if (youtubeModeSelect && settings.youtubeDefaultMode) {
     youtubeModeSelect.value = settings.youtubeDefaultMode;
   }
+  // 「YouTube 下载模式」设置项与解析/录制偏好存在两个 store 里（generalSettings vs
+  // youtubeDownloadPrefs）。下载路径读的是后者，之前只写前者会让"设置成解析下载、
+  // 实际仍走录制模式"——这里在加载设置时把两者对齐。
+  if (settings.youtubeDefaultMode && settings.youtubeDefaultMode !== youtubePreferenceCache.mode) {
+    youtubePreferenceCache = { ...youtubePreferenceCache, mode: settings.youtubeDefaultMode };
+    void youtubeModeStore.updatePreferences?.({ mode: settings.youtubeDefaultMode });
+  }
   if (filenameFormatSelect && settings.filenameFormat) {
     filenameFormatSelect.value = settings.filenameFormat;
   }
@@ -446,7 +453,13 @@ function wirePopupSettings() {
     const el = document.getElementById(id);
     el?.addEventListener('change', async () => {
       try {
-        await generalSettingsStore.updateSettings?.({ [key]: readValue(el) });
+        const value = readValue(el);
+        await generalSettingsStore.updateSettings?.({ [key]: value });
+        // 模式同样要写进下载偏好 store，否则下载仍然按旧模式走（录制/解析不一致）
+        if (key === 'youtubeDefaultMode') {
+          youtubePreferenceCache = { ...youtubePreferenceCache, mode: value };
+          await youtubeModeStore.updatePreferences?.({ mode: value });
+        }
         showMessage(t('settings_saved', '设置已保存。'), 'success');
       } catch (err) {
         showMessage(t('settings_saveFailed', '设置保存失败: $1', [err.message]), 'error');

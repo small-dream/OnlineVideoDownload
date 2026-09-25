@@ -99,7 +99,7 @@ async function fetchParallelRangeBuffer(url, label, headers, totalBytesHint = 0,
   onProgress?.(label, 0, hintedTotalBytes);
 
   const probeResponse = await fetch(url, {
-    credentials: 'omit',
+    credentials: 'include',
     headers: buildRangeRequestHeaders(headers, 0, 0),
   });
   const totalBytes = inferTotalBytesFromResponse(probeResponse, 0, hintedTotalBytes, url);
@@ -139,7 +139,7 @@ async function fetchParallelRangeBuffer(url, label, headers, totalBytesHint = 0,
 
       try {
         const response = await fetch(url, {
-          credentials: 'omit',
+          credentials: 'include',
           headers: buildRangeRequestHeaders(headers, segment.start, segment.end),
           signal: abortController.signal,
         });
@@ -205,7 +205,7 @@ async function fetchResumableBuffer(url, label, headers, totalBytesHint = 0, onP
     const rangeStart = loadedBytes;
     try {
       const response = await fetch(url, {
-        credentials: 'omit',
+        credentials: 'include',
         headers: buildRangeRequestHeaders(headers, rangeStart),
       });
 
@@ -352,8 +352,11 @@ async function mergeAdaptiveStreams(meta, target, context) {
   try {
     // injectHeaders 创建 declarativeNetRequest 规则，作为 fetch 的保底（如遇到跨域重定向导致 headers 被剥离时生效）
     // fetchResumableBuffer 内部也通过闭包直接将 headers 传给 fetch()，两套机制互为补充
-    cleanups.push(await injectHeaders(videoStream.url, headers));
-    cleanups.push(await injectHeaders(audioStream.url, headers));
+    // 这些地址来自"直下客户端"（如 visionOS），可能与会话绑定：带上浏览器 Cookie，
+    // 并让 CORS 响应头回显扩展来源（credentials:'include' 下 ACAO 不能是 *）
+    const corsOrigin = chrome?.runtime?.getURL ? chrome.runtime.getURL('').replace(/\/$/, '') : '';
+    cleanups.push(await injectHeaders(videoStream.url, headers, { corsOrigin }));
+    cleanups.push(await injectHeaders(audioStream.url, headers, { corsOrigin }));
 
     const [videoBuffer, audioBuffer] = await Promise.all([
       fetchAdaptiveMediaBuffer(videoStream, 'video', headers, reportFetchProgress),
