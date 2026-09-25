@@ -6,6 +6,8 @@ import { RequestInterceptor } from './request-interceptor.js';
 import { Downloader } from './downloader.js';
 import { DownloadStateStore } from './download-state-store.js';
 import { DownloadHistoryStore } from './download-history-store.js';
+import { SessionMirror } from './session-mirror.js';
+import { recoverDownloadTasks } from './download-task-recovery.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
@@ -83,15 +85,19 @@ const STREAM_FETCH_RETRY_DELAYS = constants.STREAM_FETCH_RETRY_DELAYS || [0, 100
 console.log(`[OVD] Service Worker 启动 browser=${browserInfo.name}`);
 cleanupAllRules();
 
-const registry = new VideoRegistry();
+// storage.session 镜像：任务表与检测列表随浏览器会话存续，SW 回收后可恢复
+const taskSnapshotMirror = new SessionMirror('ovd.downloadTasks');
+const registrySnapshotMirror = new SessionMirror('ovd.videoRegistry');
+const registry = new VideoRegistry(registrySnapshotMirror);
 const downloader = new Downloader();
-const downloadStore = new DownloadStateStore();
+const downloadStore = new DownloadStateStore(taskSnapshotMirror);
 const historyStore = new DownloadHistoryStore();
 const downloadResumeAttempts = new Map();
 const downloadResumeTimers = new Map();
 const lastKnownTabUrls = new Map();
 
-historyStore.init().then(async () => {
+// SW 启动恢复：先初始化历史库，再从 storage.session 读回任务表与注册表
+const restorePersistedStatePromise = historyStore.init().then(async () => {
   try {
     const items = await chrome.storage.local.get(['ovd.generalSettings']);
     const retentionDays = items?.['ovd.generalSettings']?.historyRetentionDays ?? 30;
@@ -101,6 +107,8 @@ historyStore.init().then(async () => {
   } catch (_err) {}
 }).catch((err) => {
   console.warn('[OVD] download history store init failed:', err);
+}).then(() => restorePersistedState()).catch((err) => {
+  console.warn('[OVD] persisted state restore failed:', err);
 });
 
 async function onVideoDetected(tabId) {
@@ -111,11 +119,62 @@ async function onVideoDetected(tabId) {
   }
 }
 
+/** SW 启动恢复：读回注册表与任务表，核对 chrome.downloads 实际状态 */
+async function restorePersistedState() {
+  try {
+    const registrySnapshot = await registrySnapshotMirror.load();
+    if (registrySnapshot) {
+      registry.restoreAll(registrySnapshot);
+    }
+  } catch (err) {
+    console.warn(`[OVD] video registry restore failed: ${err.message}`);
+  }
+
+  const taskSnapshot = await taskSnapshotMirror.load();
+  if (!Array.isArray(taskSnapshot) || !taskSnapshot.length) {
+    return;
+  }
+
+  const restoredCount = downloadStore.restoreTasks(taskSnapshot);
+  if (!restoredCount) {
+    return;
+  }
+  console.log(`[OVD] SW 重启恢复任务数=${restoredCount}`);
+
+  const recovery = await recoverDownloadTasks(downloadStore, {
+    getDownloadItem,
+    tryResumeDownload: tryAutoResumeDownload,
+    onTaskUpdate: (task) => broadcastTaskUpdate(task),
+  });
+  console.log(`[OVD] 任务恢复核对 resumed=${recovery.resumed} interrupted=${recovery.interrupted} ghost=${recovery.ghost} completed=${recovery.completed}`);
+
+  // SW 回收期间完成的下载补写历史（addRecord 按 downloadId 去重）
+  for (const task of recovery.completedTasks) {
+    try {
+      const tab = task.tabId ? await chrome.tabs.get(task.tabId).catch(() => null) : null;
+      await historyStore.addRecord({
+        taskId: task.taskId || '',
+        url: task.videoUrl || '',
+        title: getTaskDisplayTitle(task),
+        type: task.sourceId || 'direct',
+        filename: task.filename || '',
+        downloadId: task.downloadId,
+        tabUrl: tab?.url || '',
+        status: 'complete',
+      });
+    } catch (err) {
+      console.warn(`[OVD] failed to backfill download history on restore: ${err.message}`);
+    }
+  }
+}
+
 const interceptor = new RequestInterceptor(registry, onVideoDetected);
 interceptor.start();
 
 chrome.downloads.onChanged.addListener(async (delta) => {
   const downloadId = delta.id;
+  // 等待启动恢复完成，确保 downloadId->tabId 映射已重建
+  await restorePersistedStatePromise;
   if (downloadStore.isDeletedDownload(downloadId)) {
     clearDownloadResumeTracking(downloadId);
     return;
@@ -297,6 +356,8 @@ async function tryAutoResumeDownload(downloadId, tabId, reason) {
 async function handleMessage(msg, sender) {
   assertValidMessage(msg);
   const tabId = sender.tab?.id ?? msg.tabId;
+  // 内容脚本注入所有 frame，用 sender.frameId 区分主/子框架（0 = 主框架）
+  const frameId = sender.frameId ?? msg.frameId ?? null;
 
   if (msg.type === (MSG.FETCH_MEDIA_STREAMS || 'FETCH_MEDIA_STREAMS') && !tabId) {
     throw new Error('Unable to resolve tabId for media stream fetch');
@@ -308,7 +369,7 @@ async function handleMessage(msg, sender) {
 
   switch (msg.type) {
     case MSG.VIDEO_DETECTED || 'VIDEO_DETECTED':
-      return handleVideoDetected(msg.payload, tabId);
+      return handleVideoDetected(msg.payload, tabId, frameId);
 
     case MSG.GET_VIDEOS || 'GET_VIDEOS':
       return getVideosForTab(tabId ?? msg.tabId);
@@ -332,7 +393,7 @@ async function handleMessage(msg, sender) {
       return deleteDownloadTask(msg.taskId);
 
     case MSG.DOWNLOAD_BLOB_DATA || 'DOWNLOAD_BLOB_DATA':
-      return downloadBlobData(msg, tabId);
+      return downloadBlobData(msg, tabId, frameId);
 
     case MSG.HLS_PROGRESS_UPDATE || 'HLS_PROGRESS_UPDATE':
       if (hasTaskIdentity(msg)) {
@@ -359,7 +420,7 @@ async function handleMessage(msg, sender) {
       if (!tabId) {
         return { ok: false, error: '无法获取 tabId' };
       }
-      return fetchMediaStreams(msg.videoUrl, msg.audioUrl, msg.headers, tabId, msg.transferId);
+      return fetchMediaStreams(msg.videoUrl, msg.audioUrl, msg.headers, tabId, msg.transferId, frameId);
 
     case MSG.BILIBILI_MUXER_LOG || 'BILIBILI_MUXER_LOG':
       logMuxerMessage(tabId, msg.level, msg.message);
@@ -414,6 +475,12 @@ async function handleMessage(msg, sender) {
     case MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS': {
       const clearTabId = tabId ?? msg.tabId;
       if (clearTabId) {
+        // 子框架导航/卸载只清理该 frame 上报的条目，主框架才做 tab 级清理
+        if (frameId) {
+          registry.clearFrame(clearTabId, frameId);
+          void notifyVisibleVideoCount(clearTabId);
+          return { ok: true, frameCleared: true };
+        }
         const previousUrl = lastKnownTabUrls.get(clearTabId) || '';
         const nextUrl = msg.url || '';
         lastKnownTabUrls.set(clearTabId, nextUrl || previousUrl);
@@ -585,19 +652,23 @@ async function notifyVisibleVideoCount(tabId) {
   return videos.length;
 }
 
-async function handleVideoDetected(payload, tabId) {
+async function handleVideoDetected(payload, tabId, frameId = null) {
   if (!payload?.url || !tabId) {
     throw new Error('Missing video payload or tabId');
   }
 
-  lastKnownTabUrls.set(tabId, payload.url);
-
-  if (payload.url.startsWith('blob:')) {
-    console.log(`[OVD] 忽略 blob URL tab=${tabId} url=${payload.url}`);
-    return { ok: false };
+  const isBlobVideo = payload.url.startsWith('blob:');
+  // blob URL 不是页面地址，不能写入 lastKnownTabUrls 影响 SPA 导航判断
+  if (!isBlobVideo && !frameId) {
+    lastKnownTabUrls.set(tabId, payload.url);
   }
 
-  const registryResult = registry.add(tabId, payload);
+  // blob: URL 只在创建它的页面上下文有效，注册时标记需要 tab 上下文，
+  // 下载时由 DOWNLOAD_VIDEO 链路委托回该 tab 的 content script 提取数据
+  const detectedInfo = frameId != null ? { ...payload, frameId } : payload;
+  const registryResult = registry.add(tabId, isBlobVideo
+    ? { ...detectedInfo, type: 'blob', requiresTabContext: true }
+    : detectedInfo);
   const count = await notifyVisibleVideoCount(tabId);
 
   if (registryResult === 'new') {
@@ -877,11 +948,14 @@ async function handleDownloadVideo(payload, tabId, taskOptions = {}) {
 
     console.log(`[OVD] blob 下载委托给 content script tab=${tabId} url=${result.url}`);
     try {
+      const frameOptions = payload?.frameId != null ? { frameId: payload.frameId } : undefined;
       const response = await sendTabMessageAsync(tabId, {
         type: MSG.FETCH_BLOB || 'FETCH_BLOB',
         blobUrl: result.url,
         filename: result.filename,
-      });
+        // 透传任务元数据，让 content 侧回传 DOWNLOAD_BLOB_DATA 时更新同一任务
+        taskMeta,
+      }, frameOptions);
 
       if (response?.ok) {
         broadcastTaskUpdate(downloadStore.upsertTask({
@@ -967,7 +1041,7 @@ async function handleDownloadVideo(payload, tabId, taskOptions = {}) {
   return result;
 }
 
-async function downloadBlobData(message = {}, tabId) {
+async function downloadBlobData(message = {}, tabId, frameId = null) {
   const objectUrl = message.objectUrl;
   const filename = message.filename;
   const finalFilename = await downloadPathUtils.applyDownloadSubdir?.(filename || 'video.mp4');
@@ -987,6 +1061,7 @@ async function downloadBlobData(message = {}, tabId) {
           strategyId: message.strategyId || 'browser-download',
           requiresTabContext: true,
           tabId,
+          taskId: message.taskId || null,
           taskKey: message.taskKey || '',
           title: message.title || filename || '',
           traceId: message.traceId || '',
@@ -1006,6 +1081,7 @@ async function downloadBlobData(message = {}, tabId) {
         strategyId: message.strategyId || 'browser-download',
         requiresTabContext: true,
         tabId,
+        taskId: message.taskId || null,
         taskKey: message.taskKey || '',
         title: message.title || filename || '',
         traceId: message.traceId || '',
@@ -1032,7 +1108,7 @@ async function downloadBlobData(message = {}, tabId) {
           safeTabMessage(tabId, {
             type: MSG.REVOKE_OBJECT_URL || 'REVOKE_OBJECT_URL',
             objectUrl,
-          });
+          }, undefined, frameId != null ? { frameId } : undefined);
         }
       }, OBJECT_URL_REVOKE_DELAY);
 
@@ -1041,7 +1117,7 @@ async function downloadBlobData(message = {}, tabId) {
   });
 }
 
-async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId) {
+async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId, frameId = null) {
   const cleanups = [];
   let videoLoaded = 0;
   let audioLoaded = 0;
@@ -1093,7 +1169,8 @@ async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId)
     ]);
 
     const chunkSize = BLOB_TRANSFER_CHUNK_SIZE;
-    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_START || 'MEDIA_STREAM_START', transferId });
+    const frameOptions = frameId != null ? { frameId } : undefined;
+    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_START || 'MEDIA_STREAM_START', transferId }, frameOptions);
 
     for (const [label, buffer] of [['video', videoBuffer], ['audio', audioBuffer]]) {
       const bytes = new Uint8Array(buffer);
@@ -1104,11 +1181,11 @@ async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId)
           transferId,
           label,
           chunkBase64: uint8ArrayToBase64(chunk),
-        });
+        }, frameOptions);
       }
     }
 
-    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_FINISH || 'MEDIA_STREAM_FINISH', transferId });
+    await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_FINISH || 'MEDIA_STREAM_FINISH', transferId }, frameOptions);
     return { ok: true };
   } finally {
     for (const cleanup of cleanups) {
@@ -1188,7 +1265,7 @@ async function fetchStreamBufferResumable(url, label, headers, onProgress = null
         throw new Error(`${label} stream returned HTTP ${response.status} ${response.statusText}`);
       }
 
-      totalBytes = inferTotalBytesFromResponse(response, rangeStart, totalBytes);
+      totalBytes = inferTotalBytesFromResponse(response, rangeStart, totalBytes, url);
 
       if (!response.body || typeof response.body.getReader !== 'function') {
         const buffer = await response.arrayBuffer();
@@ -1227,7 +1304,8 @@ async function fetchStreamBufferResumable(url, label, headers, onProgress = null
     }
   }
 
-  const merged = new Uint8Array(totalBytes || loadedBytes);
+  // 使用实际接收的字节数分配，避免 totalBytes 不准确导致尾部填充零
+  const merged = new Uint8Array(loadedBytes);
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);

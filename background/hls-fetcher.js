@@ -73,29 +73,13 @@ export class HlsFetcher {
       prefixBuffers.push(await pipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers));
     }
 
-    const buffers = new Array(segments.length).fill(null);
-    let done = 0;
-    let failedCount = 0;
-
-    for (let i = 0; i < segments.length; i += HLS_SEGMENT_CONCURRENCY) {
-      const batch = segments.slice(i, Math.min(i + HLS_SEGMENT_CONCURRENCY, segments.length));
-      const results = await Promise.all(
-        batch.map((url, batchIdx) => pipeline.hlsFetchBuffer(url, headers)
-          .then((buffer) => ({ buffer, idx: i + batchIdx }))
-          .catch((err) => ({ err, idx: i + batchIdx })))
-      );
-
-      for (const result of results) {
-        if (result.err) {
-          failedCount++;
-          buffers[result.idx] = new ArrayBuffer(0);
-        } else {
-          buffers[result.idx] = result.buffer;
-        }
-
-        done++;
-        onProgress?.(done, segments.length);
-      }
+    const { buffers, failedCount } = await pipeline.downloadHlsSegments(segments, {
+      concurrency: HLS_SEGMENT_CONCURRENCY,
+      headers,
+      onProgress,
+    });
+    if (failedCount > 0) {
+      console.warn(`[HLS] ${failedCount}/${segments.length} 个分片下载失败（未超阈值），已按空洞跳过`);
     }
 
     let finalBuffers = buffers;

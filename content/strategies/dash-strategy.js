@@ -63,33 +63,19 @@
         return [];
       }
 
-      const buffers = new Array(segmentUrls.length).fill(null);
-      let done = 0;
-      let failedCount = 0;
+      // 与 HLS 共用的 fail-fast 下载：分片重试 + 超阈值中止，不产出含空洞的文件
+      const { buffers, failedCount, retriedCount } = await hlsPipeline.downloadHlsSegments(segmentUrls, {
+        concurrency: SEGMENT_CONCURRENCY,
+        fetchBuffer: (url) => fetchBuffer(url, headers),
+        onProgress: (done, total) => {
+          const percent = Math.round((done / total) * 50);
+          progressReporter?.progress(percent, { phase: `fetching-${label}` });
+        },
+      });
 
-      for (let i = 0; i < segmentUrls.length; i += SEGMENT_CONCURRENCY) {
-        const batch = segmentUrls.slice(i, Math.min(i + SEGMENT_CONCURRENCY, segmentUrls.length));
-        const results = await Promise.all(
-          batch.map((url, index) => fetchBuffer(url, headers)
-            .then((buffer) => ({ buffer, idx: i + index }))
-            .catch((err) => {
-              console.warn(`[OVD] DASH ${label} 分片 ${i + index} 下载失败: ${err.message}`);
-              failedCount++;
-              return { buffer: new ArrayBuffer(0), idx: i + index };
-            }))
-        );
-
-        for (const result of results) {
-          buffers[result.idx] = result.buffer;
-          done++;
-        }
-
-        const percent = Math.round((done / segmentUrls.length) * 50);
-        progressReporter?.progress(percent, { phase: `fetching-${label}` });
-
-        if (i % (SEGMENT_CONCURRENCY * 4) === 0) {
-          console.log(`[OVD] DASH ${label} 下载进度 ${done}/${segmentUrls.length} 失败=${failedCount}`);
-        }
+      if (failedCount > 0 || retriedCount > 0) {
+        console.warn(`[OVD] DASH ${label} 分片下载完成 失败=${failedCount} 重试成功=${retriedCount}`);
+        progressReporter?.status(`DASH ${label} 有 ${failedCount} 个分片下载失败（未超阈值），已跳过`);
       }
 
       return buffers.filter((b) => b && b.byteLength > 0);

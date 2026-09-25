@@ -1,5 +1,5 @@
 export class DownloadStateStore {
-  constructor() {
+  constructor(snapshotMirror = null) {
     this._states = new Map();
     this._tasks = new Map();
     this._cleanupFns = new Map();
@@ -10,6 +10,8 @@ export class DownloadStateStore {
     this._deletedTaskIds = new Set();
     this._deletedTraceIds = new Set();
     this._nextTaskOrder = 1;
+    // SessionMirror 实例，任务变更自动镜像到 storage.session，供 SW 重启恢复
+    this._mirror = snapshotMirror;
   }
 
   registerResult(result, context) {
@@ -244,7 +246,54 @@ export class DownloadStateStore {
       this._clearTaskDeleteTimer(taskId);
     }
 
+    this._persistTasks();
     return this._cloneTask(next);
+  }
+
+  /** 任务表镜像到 storage.session（去抖写入） */
+  _persistTasks() {
+    this._mirror?.scheduleSave([...this._tasks.values()].map((task) => this._cloneTask(task)));
+  }
+
+  /**
+   * SW 启动时从快照恢复任务表，重建 downloadId→tabId 映射。
+   * SW 回收期间 scheduleTaskDelete 定时器丢失，过期终态任务在恢复时直接清理。
+   * @returns {number} 恢复的任务数
+   */
+  restoreTasks(tasks = []) {
+    if (!Array.isArray(tasks)) return 0;
+    const now = Date.now();
+    let restored = 0;
+
+    for (const raw of tasks) {
+      if (!raw?.taskId) continue;
+      if (
+        ['complete', 'failed', 'interrupted'].includes(raw.status) &&
+        now - (raw.updatedAt || 0) > 30 * 60 * 1000
+      ) {
+        continue;
+      }
+
+      this._tasks.set(raw.taskId, { ...raw });
+      this._nextTaskOrder = Math.max(this._nextTaskOrder, (raw.sortOrder || 0) + 1);
+      restored++;
+
+      // 仅进行中的浏览器下载需要重建 downloadId→tabId 映射供 onChanged 使用
+      if (raw.downloadId != null && ['running', 'retrying'].includes(raw.status)) {
+        this._states.set(raw.downloadId, {
+          requiresTabContext: raw.requiresTabContext !== false,
+          tabId: raw.tabId ?? null,
+          videoUrl: raw.videoUrl || '',
+          percent: raw.percent || 0,
+          state: raw.status === 'retrying' ? 'retrying' : 'downloading',
+        });
+      }
+    }
+
+    if (restored) {
+      this._persistTasks();
+    }
+    return restored;
   }
 
   updateTaskByDownloadId(downloadId, updates = {}) {
@@ -338,6 +387,7 @@ export class DownloadStateStore {
     }
     this._clearTaskDeleteTimer(taskId);
     this._tasks.delete(taskId);
+    this._persistTasks();
   }
 
   isDeletedDownload(downloadId) {

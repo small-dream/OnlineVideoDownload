@@ -47,7 +47,7 @@ export class RequestInterceptor {
     if (details.type === 'main_frame') return;
     if (details.tabId < 0) return;
 
-    const { url, tabId } = details;
+    const { url, tabId, frameId } = details;
 
     // YouTube 媒体流由 page-context-script 的 processYouTubePlayerResponse 统一处理
     if (this._isYouTubeMediaUrl(url)) return;
@@ -62,6 +62,7 @@ export class RequestInterceptor {
       type,
       title: '',
       requestHeaders: {},
+      frameId,
     });
 
     if (result === 'new') {
@@ -74,7 +75,7 @@ export class RequestInterceptor {
     if (details.type === 'main_frame') return;
     if (details.tabId < 0) return;
 
-    const { url, tabId, responseHeaders } = details;
+    const { url, tabId, frameId, responseHeaders } = details;
 
     try {
       const u = new URL(url);
@@ -106,6 +107,7 @@ export class RequestInterceptor {
       type,
       mimeType: contentType || undefined,
       fileSize: Number.isFinite(fileSize) ? fileSize : undefined,
+      frameId,
     });
     if (result === 'new') {
       console.log(`[OVD] registered ${this._logMediaLabel(type)} candidate from mime tab=${tabId}`);
@@ -118,7 +120,7 @@ export class RequestInterceptor {
   _onSendHeaders(details) {
     if (details.tabId < 0) return;
 
-    const { url, tabId, requestHeaders } = details;
+    const { url, tabId, frameId, requestHeaders } = details;
     if (!requestHeaders) return;
 
     const type = this._detectTypeByUrl(url);
@@ -134,7 +136,7 @@ export class RequestInterceptor {
 
     if (Object.keys(headersObj).length > 0) {
       console.log(`[OVD] captured request headers tab=${tabId} keys=${Object.keys(headersObj).join(',')} url=${url}`);
-      this.registry.add(tabId, { url, type, requestHeaders: headersObj });
+      this.registry.add(tabId, { url, type, requestHeaders: headersObj, frameId });
     }
   }
 

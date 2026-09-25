@@ -52,42 +52,29 @@
         prefixBuffers.push(await hlsPipeline.hlsFetchBuffer(playlist.initSegmentUrl, headers, fetchOptions));
       }
 
-      const concurrency = constants.HLS_SEGMENT_CONCURRENCY || 5;
-      const buffers = new Array(segments.length).fill(null);
-      let done = 0;
-      let failedCount = 0;
-
-      for (let i = 0; i < segments.length; i += concurrency) {
-        const batch = segments.slice(i, Math.min(i + concurrency, segments.length));
-        const results = await Promise.all(
-          batch.map((url, index) => hlsPipeline.hlsFetchBuffer(url, headers, fetchOptions)
-            .then((buffer) => ({ buffer, idx: i + index }))
-            .catch((err) => {
-              console.warn(`[OVD] 分片 ${i + index} 下载失败: ${err.message}`);
-              failedCount++;
-              return { buffer: new ArrayBuffer(0), idx: i + index };
-            }))
-        );
-
-        for (const result of results) {
-          buffers[result.idx] = result.buffer;
-          done++;
-        }
-
-        const percent = Math.min(95, Math.round((done / segments.length) * 95));
-        if (i % (concurrency * 4) === 0) {
-          console.log(`[OVD] 委托下载进度 ${done}/${segments.length} 失败=${failedCount}`);
-        }
-
-        emitRuntimeMessage({
-          percent,
-          phase: 'segments',
-          taskMeta,
-          type: 'HLS_PROGRESS_UPDATE',
-          videoUrl: taskMeta.videoUrl || sourceUrl,
-        });
-        getFloatButton()?.showProgress(percent);
-      }
+      const { buffers, failedCount, retriedCount } = await hlsPipeline.downloadHlsSegments(segments, {
+        concurrency: constants.HLS_SEGMENT_CONCURRENCY || 5,
+        fetchBuffer: (url) => hlsPipeline.hlsFetchBuffer(url, headers, fetchOptions),
+        onProgress: (done, total, stats) => {
+          const percent = Math.min(95, Math.round((done / total) * 95));
+          const message = {
+            percent,
+            phase: 'segments',
+            taskMeta,
+            type: 'HLS_PROGRESS_UPDATE',
+            videoUrl: taskMeta.videoUrl || sourceUrl,
+          };
+          // 分片失败/重试未超阈值时通过进度消息告知用户
+          if (stats?.failedCount > 0 || stats?.retriedCount > 0) {
+            message.failedCount = stats.failedCount;
+            message.retriedCount = stats.retriedCount;
+            message.warning = `${stats.failedCount}/${total} 个分片下载失败，${stats.retriedCount} 个分片重试后成功`;
+          }
+          emitRuntimeMessage(message);
+          getFloatButton()?.showProgress(percent);
+        },
+      });
+      console.log(`[OVD] 分片下载完成 总数=${segments.length} 失败=${failedCount} 重试成功=${retriedCount}`);
 
       let finalBuffers = buffers;
       if (keyInfo) {
