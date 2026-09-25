@@ -40,8 +40,7 @@
       videoUtils = {},
     } = options;
 
-    // 与后台对齐：合并期峰值 ≈ 3~4× 总字节，1.7GB 的视频按 2GB 上限放行必然分配失败
-    const MAX_IN_PAGE_MERGE_BYTES = constants.YOUTUBE_MERGE_MAX_BYTES || 768 * 1024 * 1024;
+    const MAX_IN_PAGE_MERGE_BYTES = constants.MAX_IN_PAGE_MERGE_BYTES || 1.5 * 1024 * 1024 * 1024;
 
     function createLogger(traceId, meta, downloadOptions) {
       return loggerFactory.createLogger?.('youtube-parse', {
@@ -234,29 +233,21 @@
       const progressReporter = context.progressReporter;
       const videoStream = target.videoStream;
       const audioStream = target.audioStream;
-      // contentLength 缺失时用 bitrate×时长估算，否则大文件会绕过上限直接 OOM
-      const durationSeconds = Number(meta?.duration || meta?.lengthSeconds) || 0;
-      const estimateOf = (stream) => (Number(stream?.contentLength) || 0)
-        || (streamUtils.estimateStreamBytes?.(stream, durationSeconds) || 0);
-      const estimatedVideoBytes = estimateOf(videoStream);
-      const estimatedAudioBytes = estimateOf(audioStream);
+      const estimatedVideoBytes = Number(videoStream?.contentLength) || 0;
+      const estimatedAudioBytes = Number(audioStream?.contentLength) || 0;
       const estimatedTotalBytes = estimatedVideoBytes + estimatedAudioBytes;
       const estimatedLabel = formatBytes(estimatedTotalBytes);
 
       if (estimatedTotalBytes > MAX_IN_PAGE_MERGE_BYTES) {
         throw errorFactory.createYouTubeDownloadError?.(
           'YT_PARSE_TOO_LARGE',
-          `该清晰度预计约 ${estimatedLabel}，超出浏览器内合并上限（${formatBytes(MAX_IN_PAGE_MERGE_BYTES)}）：`
-          + '请改选「HLS 预合并」清晰度或更低清晰度，也可用录制模式',
+          `当前清晰度预计需要抓取约 ${estimatedLabel}，浏览器内合并不稳定，请改用更低清晰度或录制模式`,
           {
             audioBytes: estimatedAudioBytes,
             estimatedTotalBytes,
             videoBytes: estimatedVideoBytes,
           }
-        ) || new Error(
-          `该清晰度预计约 ${estimatedLabel}，超出浏览器内合并上限（${formatBytes(MAX_IN_PAGE_MERGE_BYTES)}）：`
-          + '请改选「HLS 预合并」清晰度或更低清晰度，也可用录制模式'
-        );
+        ) || new Error(`当前清晰度预计需要抓取约 ${estimatedLabel}，浏览器内合并不稳定，请改用更低清晰度或录制模式`);
       }
 
       floatButton?.showMessage(
