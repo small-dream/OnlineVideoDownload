@@ -278,3 +278,30 @@ test('hls download forwards the selected quality to both the page context and th
     quality: variantUrl,
   });
 });
+
+test('页面侧因体积超限中止时自动回退到后台（OPFS 落盘）路径', async () => {
+  mockChrome({
+    tabMessageResponses: [{
+      error: '流体积超过 1500 MB 上限，浏览器内合并可能失败，已中止下载以保证不产出损坏文件',
+      ok: false,
+    }],
+  });
+  const { createHlsDownloadStrategy } = await loadStrategy();
+
+  let fetcherCalls = 0;
+  const result = await createHlsDownloadStrategy().download(HLS_VIDEO, {
+    filenameBase: 'video',
+    hlsFetcher: {
+      downloadAndMerge: async () => {
+        fetcherCalls += 1;
+        return { downloadId: 21, ok: true, opfsName: 'ovd-stream-big' };
+      },
+    },
+    tabId: 5,
+    taskMeta: {},
+  });
+
+  assert.equal(fetcherCalls, 1, '内容侧超限后必须回退到后台下载');
+  assert.equal(result.downloadId, 21);
+  assert.equal(result.opfsName, 'ovd-stream-big');
+});

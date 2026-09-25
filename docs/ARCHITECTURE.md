@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.0
+> Version: 1.17.1
 > Last Updated: 2026-09-25
 
 ## Goals
@@ -293,6 +293,43 @@ Notes:
 - 过滤在 `background/service-worker.js#getVisibleVideosForTab` 读取时应用，因此改设置后无需重新检测即可生效，徽章计数与 popup 列表始终一致。
 - 时长/体积未知（0 或缺失）时不过滤，避免误杀。
 
+### `lib/opfs-sink.js`
+
+Responsibilities:
+
+- 把分片顺序写进扩展自身 origin 的 OPFS，避免 GB 级文件常驻内存；接口与 `createInMemorySink` 一致（`write` / `byteLength` / `mode`）。
+- 提供自适应 sink：小文件全程内存，累计超过 `OPFS_SPILL_THRESHOLD_BYTES`（默认 128 MB）后把已缓冲内容一次性溢出到 OPFS 并继续落盘；不支持 OPFS 或溢出失败时退回纯内存，由调用方的体积守卫兜底。
+- `cleanupStale()` 清理异常退出遗留的临时文件（按 `lastModified` 与 `OPFS_STALE_MS` 判断，避免误删在跑的任务）。
+- Expose helpers through `globalThis.__OVD_OPFS_SINK__`.
+
+Public surface:
+
+- `isSupported()`
+- `createFileName(prefix)`
+- `createOpfsSink({ name })` → `{ mode:'opfs', name, byteLength, chunkCount, write, finalize, remove }`
+- `createSpillSink({ name, thresholdBytes })` → 追加 `spill()` / `toBlob(mime)` / `supportsSpill` / `spillFailed`
+- `readFile(name)` / `removeFile(name)` / `listNames()`
+- `cleanupStale({ prefix, maxAgeMs, now })`
+
+Notes:
+
+- 写入失败（例如配额不足）抛 `OPFS_WRITE_FAILED`，调用方据此中止任务，不产出损坏文件。
+- manifest 已声明 `unlimitedStorage`，否则 GB 级写入会先撞到存储配额。
+- 这就是 `downloadHlsSegments({ sink })` 的挂载点：策略层只看到 `mode`/`name`，不感知存储介质。
+
+### `background/opfs-temp-registry.js`
+
+Responsibilities:
+
+- 登记 `downloadId → OPFS 文件名`，供 service worker 在下载完成/失败/中断后释放对象 URL 并删除临时文件。
+- 不持久化：SW 重启前遗留的文件由 `lib/opfs-sink.js#cleanupStale` 兜底。
+
+Public surface:
+
+- `registerOpfsTempFile(downloadId, name)`
+- `takeOpfsTempFile(downloadId)`（取出即移除）
+- `listOpfsTempFiles()` / `clearOpfsTempFiles()`
+
 ## Page Context Runtime
 
 ### Loader Entry
@@ -529,6 +566,7 @@ Responsibilities:
 - Reuse `lib/hls-pipeline.js` for parsing and decryption logic.
 - Inject temporary `Referer` / `Origin` request headers plus permissive CORS response headers via `injectHeaders` before fetching.
 - Master Playlist 画质选择（`options.quality`）、`EXT-X-BYTERANGE`/`Range`、密钥轮换、直播（无 `ENDLIST`）显式提示，以及独立音轨（`EXT-X-MEDIA`）通过 `lib/bilibili-muxer.js` 合并进视频。
+- 大文件流式落盘：使用 `lib/opfs-sink.js` 的自适应 sink，超过阈值（默认 128 MB）自动切到 OPFS，输出上限随之变为 `OPFS_MAX_OUTPUT_BYTES`（默认 8 GB）而不是内存 1.5 GB；下载完成后经 offscreen 文档按文件名换取对象 URL 交给 `chrome.downloads`，并在下载结束/中断时删除临时文件。
 - 体积超过 `MAX_IN_PAGE_MERGE_BYTES` 时抛 `HLS_OUTPUT_TOO_LARGE`，不进入合并。
 
 ### Download Queue
@@ -716,6 +754,7 @@ Examples:
 Notes:
 
 - `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options`（`fetchOptions` 默认 `{ credentials: 'include' }`，用户选定的画质以 `quality`（变体 URL 或标签）透传）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount, quality, isLive, audioMerged }`，任务据此写入真实 `downloadId`。
+- 内容侧 HLS 因体积超限（`HLS_OUTPUT_TOO_LARGE`）中止时，`hls-download-strategy` 视为委托失败并自动回退到 `HlsFetcher`；后台路径用 OPFS 落盘，因此大文件不会因为内容侧的内存上限而整体失败。
 - `ABORT_SOURCE_DOWNLOAD` 由 popup 任务视图发往 content，字段 `taskKey` / `traceId` / `videoUrl`（任一匹配即可）。content 侧两种任务都会响应：`download-coordinator` 的内容任务（Bilibili/DASH/YouTube 录制）会 `abort()` 其 `AbortController` 并广播 `SOURCE_DOWNLOAD_RESULT{ ok:false, error:'已取消' }`；HLS 委托下载由 `message-router` 按 `taskMeta.taskKey`/`taskId` 保存的控制器中止，返回 `{ hlsCancelled: true }`。
 - 委托下载期间 background 通过 `injectHeaders(url, headers, { corsOrigin })` 注册临时 DNR 规则，让页面上下文的带 Cookie 请求能通过 CDN 的 CORS 校验；content 无响应或返回失败时，同一任务自动回退到 `HlsFetcher`。
 
@@ -731,6 +770,21 @@ Notes:
 - The popup requests Bilibili quality options lazily from the content runtime using the current video's `bvid` and `cid`.
 - The content router delegates that request to `bilibili-strategy.fetchQualities()` so popup UI does not need to duplicate Bilibili API logic.
 - HLS 画质同理：popup 用 `{ m3u8Url, headers }` 请求 `HLS_FETCH_QUALITIES`，content 复用 `hlsDelegateHandler.fetchQualities()`（内部 `parseHlsMasterPlaylist`）返回 `{ isMaster, qualities: [{ url, label, detail, bandwidth, height }] }`；选中项以 `downloadOptions.variantUrl`（精确变体 URL）随下载请求回传。
+
+### Background <-> Offscreen
+
+Examples:
+
+- `OFFSCREEN_BLOB_DOWNLOAD_START` / `OFFSCREEN_BLOB_DOWNLOAD_CHUNK` / `OFFSCREEN_BLOB_DOWNLOAD_FINISH` / `OFFSCREEN_BLOB_DOWNLOAD_ABORT`
+- `OFFSCREEN_OPFS_DOWNLOAD_OPEN`
+- `OFFSCREEN_OPFS_DOWNLOAD_RELEASE`
+
+Notes:
+
+- SW 里没有 `URL.createObjectURL`，因此对象 URL 一律由 offscreen 文档创建。
+- `OFFSCREEN_OPFS_DOWNLOAD_OPEN { name }` 由 offscreen 按文件名打开**同一份 OPFS 文件**（扩展 origin 共享）并返回 `{ ok, objectUrl, byteLength }`——只传文件名，不传输字节。
+- `OFFSCREEN_OPFS_DOWNLOAD_RELEASE { name, objectUrl }` 撤销对象 URL 并删除 `ovd-` 前缀的临时文件；由 `background/service-worker.js` 在 `chrome.downloads.onChanged` 的 `complete` / `interrupted` 分支通过 `background/opfs-temp-registry.js` 触发。
+- 小文件仍走 `OFFSCREEN_BLOB_DOWNLOAD_*` 的 base64 分片中转（既有路径，会多一份复制）。
 
 ## Content Script Load Order
 
@@ -809,8 +863,9 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. Second-wave UX pass: download completion/failure system notifications gated by `downloadNotification` (click opens the download folder via `download-notification.js`); `filenameFormat` naming rule enforced in `lib/download-path.js` (`title` / `title-quality` / `title-date`); batch download UI restored (visible per-item checkboxes, header select-all with indeterminate state, 「下载所选 (N)」 button, concurrency from `concurrentDownloadLimit`, DRM items not selectable); toolbar badge now shows the per-tab detected-video count (>99 → `99+`) via `action-badge.js` while running-task count moves to the popup tasks-button badge; downloading items show 「下载中 N%」; in-page floating feedback bar restored (`content/float-button.js`) for long tasks; errors render as friendly Chinese text via `popup-error-messages.js` (15 error-code mappings + keyword fallbacks); 「清列表」 also clears the background `VideoRegistry` via `CLEAR_TAB_VIDEOS` with popup/main-frame/subframe scope resolved by `clear-video-scope.js`. |
+| 1.17.1 | 2026-09-25 | Third-wave follow-up: large-file memory治理与分离文件降级。`downloadHlsSegments` 新增 `options.sink` / `options.transform`：有 sink 时不再返回整份 buffers，只保留 ≤ 并发数的有序重排窗口，解密在写入前逐分片执行（`createSegmentDecryptor` 与 `decryptHlsSegments` 共用实现，峰值内存从 ≈3N 降到 ≈N）。新增 `lib/opfs-sink.js`：`createInMemorySink` / `createOpfsSink` / `createSpillSink`（超过 `OPFS_SPILL_THRESHOLD_BYTES` 自动溢出到扩展 origin 的 OPFS，输出上限改用 `OPFS_MAX_OUTPUT_BYTES`）+ `cleanupStale()`；manifest 增加 `unlimitedStorage`。后台 HLS 路径使用自适应 sink，完成后经 offscreen 的 `OFFSCREEN_OPFS_DOWNLOAD_OPEN`（只传文件名、不传字节）换取对象 URL 交给 `chrome.downloads`，`background/opfs-temp-registry.js` 记录 `downloadId → 文件名`，SW 在 `onChanged` 的 complete/interrupted 分支删除临时文件；内容侧因 `HLS_OUTPUT_TOO_LARGE` 中止后仍会自动回退到这条后台路径。分离文件降级：HLS 独立音轨无法合并（视频非 fMP4 或 muxer 抛错）时单独保存 `_audio` 文件而不是丢弃；DASH 超过 `DASH_MAX_MERGE_BYTES`、Bilibili 超过内存上限时改为保存 `-video` / `-audio` 两个文件而不是直接失败。 |
 | 1.17.0 | 2026-09-25 | Third-wave coverage parity with Video DownloadHelper. HLS: `parseHlsMasterPlaylist` + `selectHlsVariant` expose every variant (with `width/height/bandwidth/codecs/audioGroupId`) to a new popup clarity dropdown backed by `HLS_FETCH_QUALITIES` (selection travels as `downloadOptions.variantUrl`); the media playlist parser now returns rich segments (`seq`/`byteRange`/`keyIndex`/`discontinuity`) and handles `EXT-X-BYTERANGE`, `EXT-X-KEY` rotation, `EXT-X-MEDIA-SEQUENCE`-derived IVs, `EXT-X-MAP` byte ranges, `EXT-X-DISCONTINUITY` and `EXT-X-ENDLIST` (live playlists show a 「仅下载当前窗口」 warning instead of silently producing a truncated file); `EXT-X-MEDIA` audio renditions are muxed into the video via `bilibili-muxer` when both sides are fMP4. Streams larger than `MAX_IN_PAGE_MERGE_BYTES` abort with `HLS_OUTPUT_TOO_LARGE` (also enforced for Bilibili muxing via `BILIBILI_OUTPUT_TOO_LARGE`). DASH: `lib/mpd-parser.js` gains `$Number%05d$`/`$Time%08d$` template formatting, `mediaRange`/`indexRange`/`SegmentBase@indexRange` byte ranges, correct multi-Period grouping (`periods`, `isMultiPeriod`, `collectRepresentationsAcrossPeriods`) and `SegmentTimeline r="-1"`, plus a built-in XML fallback so the parser runs (and is tested) without `DOMParser`; the content DASH strategy injects Referer/CORS through `INJECT_DOWNLOAD_HEADERS`/`RELEASE_DOWNLOAD_HEADERS` and passes byte ranges to the fetcher. Detection: `video/mp2t`, `video/quicktime`, `video/x-matroska` and `application/octet-stream` (confirmed by extension or `Content-Disposition`) are recognised, and generic pages watch `MutationObserver` + media events instead of scanning twice. Injection: page scripts are loaded through `chrome.scripting.executeScript({ world: 'MAIN' })` (`INJECT_PAGE_SCRIPTS`) with the `<script src>` path kept as fallback. Settings: `domainBlacklist` / `minVideoDurationSec` / `minVideoSizeMb` filter noisy entries at read time via `lib/video-filter.js`, and `askSaveLocation` drives `saveAs`. Tasks: `ABORT_SOURCE_DOWNLOAD` cancels content-side tasks through `AbortController`/`DOWNLOAD_ABORTED`, the popup task list has a 取消 button, and `background/download-queue.js` applies `concurrentDownloadLimit` to every background download entry point. |
+| 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. Second-wave UX pass: download completion/failure system notifications gated by `downloadNotification` (click opens the download folder via `download-notification.js`); `filenameFormat` naming rule enforced in `lib/download-path.js` (`title` / `title-quality` / `title-date`); batch download UI restored (visible per-item checkboxes, header select-all with indeterminate state, 「下载所选 (N)」 button, concurrency from `concurrentDownloadLimit`, DRM items not selectable); toolbar badge now shows the per-tab detected-video count (>99 → `99+`) via `action-badge.js` while running-task count moves to the popup tasks-button badge; downloading items show 「下载中 N%」; in-page floating feedback bar restored (`content/float-button.js`) for long tasks; errors render as friendly Chinese text via `popup-error-messages.js` (15 error-code mappings + keyword fallbacks); 「清列表」 also clears the background `VideoRegistry` via `CLEAR_TAB_VIDEOS` with popup/main-frame/subframe scope resolved by `clear-video-scope.js`. |
 | 1.15.0 | 2026-09-24 | HLS downloads now run in the page context first: `hls-download-strategy` delegates to `HLS_DOWNLOAD_DELEGATE` so requests carry page cookies/origin/`Sec-Fetch` (fixes CDN WAF 403s seen from service-worker fetches), echoes the tab origin in CORS response headers via `injectHeaders(url, headers, { corsOrigin })`, adds optional `credentials` support to `hlsFetch`/`hlsFetchText`/`hlsFetchBuffer`/`parseHlsEncryption`, returns the real `downloadId` from the delegated blob download, and falls back to `HlsFetcher` when the content script is unavailable or fails. |
 | 1.14.1 | 2026-06-12 | Fixed subdirectory setting not working for content-script blob downloads (HLS, blob, DASH). `triggerBlobDownload` now delegates to service worker via `DOWNLOAD_BLOB_DATA` message so `chrome.downloads.download` handles the subdirectory path correctly; falls back to `<a download>` only when the service worker is unavailable. |
 | 1.14.0 | 2026-06-12 | Added `downloadSubdir` setting (default `OnlineVideoDownload`) to save downloads into a subdirectory under Chrome's default download folder. `Downloader._buildFilenameBase` and `downloadBlobData` now prepend the configured subdirectory. |

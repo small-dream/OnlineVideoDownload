@@ -368,3 +368,56 @@ test('DASH 下载在 sink 可用时按分片顺序累积，不再多拼一份全
     delete globalThis.__OVD_HLS_PIPELINE__;
   }
 });
+
+test('DASH 体积超过合并上限时降级为分离文件而不是直接失败', async () => {
+  // 用很小的合并上限触发降级分支
+  globalThis.__OVD_CONSTANTS__ = { DASH_MAX_MERGE_BYTES: 4 };
+  const blobDownloads = [];
+  const statuses = [];
+
+  try {
+    const strategy = loadDashStrategy().createDashStrategy({
+      hlsPipeline: {
+        async downloadHlsSegments(urls, options) {
+          const buffers = [];
+          for (const url of urls) {
+            buffers.push(await options.fetchBuffer(url));
+          }
+          return { buffers, failedCount: 0, retriedCount: 0 };
+        },
+        hlsFetchBuffer: async (url) => (url.includes('audio') ? bufferOf(3) : bufferOf(2)),
+        hlsFetchText: async () => '<MPD></MPD>',
+      },
+      mpdParser: {
+        parseMpdManifest: () => ({ adaptations: [{ contentType: 'video' }, { contentType: 'audio' }], duration: 10 }),
+        selectBestAudioRepresentation: () => ({ id: 'a', segments: [{ url: 'https://cdn.example.com/audio.m4s' }] }),
+        selectBestVideoRepresentation: () => ({ id: 'v', segments: [{ url: 'https://cdn.example.com/video.m4s' }] }),
+      },
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ filename, size: blob.size });
+      },
+      videoUtils: { buildMediaFilename: () => 'demo.mp4' },
+    });
+
+    const result = await strategy.download({
+      title: 'Demo',
+      type: 'dash',
+      url: 'https://cdn.example.com/manifest.mpd',
+    }, {
+      progressReporter: {
+        progress() {},
+        status(message) {
+          statuses.push(message);
+        },
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.separateFiles, ['demo-video.mp4', 'demo-audio.mp4']);
+    assert.deepEqual(blobDownloads.map((item) => item.filename), ['demo-video.mp4', 'demo-audio.mp4']);
+    assert.deepEqual(blobDownloads.map((item) => item.size), [2, 3]);
+    assert.ok(statuses.some((message) => /分别保存/.test(message)));
+  } finally {
+    delete globalThis.__OVD_CONSTANTS__;
+  }
+});

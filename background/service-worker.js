@@ -13,6 +13,8 @@ import { createTabBadgeManager } from './action-badge.js';
 import { resolveClearVideoScope } from './clear-video-scope.js';
 import { DownloadQueue } from './download-queue.js';
 import { resolveSaveAs } from './save-location.js';
+import { releaseOpfsDownload } from './offscreen-download.js';
+import { takeOpfsTempFile } from './opfs-temp-registry.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
@@ -30,6 +32,7 @@ import '../lib/download-path.js';
 import '../lib/message-types.js';
 import '../lib/settings-store.js';
 import '../lib/video-filter.js';
+import '../lib/opfs-sink.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
@@ -112,6 +115,9 @@ let headerInjectionToken = 0;
 
 // 全局下载并发队列：让 concurrentDownloadLimit 覆盖所有下载入口，而非仅 popup 批量下载
 const downloadQueue = new DownloadQueue({ limit: 3 });
+
+// OPFS 落盘能力（临时文件登记见 background/opfs-temp-registry.js）
+const opfsSink = globalThis.__OVD_OPFS_SINK__ || {};
 downloadNotifications.attach();
 const tabBadge = createTabBadgeManager();
 
@@ -129,6 +135,15 @@ const restorePersistedStatePromise = historyStore.init().then(async () => {
 }).then(() => restorePersistedState()).catch((err) => {
   console.warn('[OVD] persisted state restore failed:', err);
 });
+
+// 启动时清理上次异常退出遗留的 OPFS 临时文件（超过保留时间才删，避免误删在跑的任务）
+Promise.resolve(opfsSink.cleanupStale?.({ maxAgeMs: constants.OPFS_STALE_MS }))
+  .then((result) => {
+    if (result?.removed > 0) {
+      console.log(`[OVD] 清理 OPFS 残留临时文件 removed=${result.removed} scanned=${result.scanned}`);
+    }
+  })
+  .catch((err) => console.warn(`[OVD] OPFS 残留清理失败: ${err.message}`));
 
 async function onVideoDetected(tabId) {
   try {
@@ -245,6 +260,7 @@ chrome.downloads.onChanged.addListener(async (delta) => {
       }));
       downloadStore.cleanupRules(downloadId);
       clearDownloadResumeTracking(downloadId);
+      releaseOpfsTempFile(downloadId);
       void downloadNotifications.notifyFailed(downloadId, await getDownloadItem(downloadId), reason).catch(() => {});
     }
     return;
@@ -254,6 +270,7 @@ chrome.downloads.onChanged.addListener(async (delta) => {
 
   console.log(`[OVD] 下载完成 downloadId=${downloadId}`);
   clearDownloadResumeTracking(downloadId);
+  releaseOpfsTempFile(downloadId);
   downloadStore.markComplete(downloadId);
   const completedTask = downloadStore.updateTaskByDownloadId(downloadId, {
     percent: 100,
@@ -330,6 +347,18 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 下载结束（完成/失败/取消）后释放 OPFS 临时文件。
+ * 不等待：清理失败只记日志，避免拖慢下载状态回调。
+ */
+function releaseOpfsTempFile(downloadId) {
+  const entry = takeOpfsTempFile(downloadId);
+  if (!entry) {
+    return;
+  }
+  void releaseOpfsDownload({ name: entry.name });
 }
 
 function clearDownloadResumeTracking(downloadId) {

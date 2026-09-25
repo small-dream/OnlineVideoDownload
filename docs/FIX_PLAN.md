@@ -55,13 +55,16 @@
 | 3.4 | MPD 解析修复 | 支持 `$Number%05d$` 宽度格式符（`lib/mpd-parser.js:135-151` 当前只做字面替换，产出含 `$` 的坏 URL）、SegmentURL `mediaRange`/`indexRange`、多 Period 正确分组、SegmentTimeline `r="-1"` | ✅ 另加 `$Time%08d$`、`$$` 转义、`SegmentBase@indexRange`、内置无 DOMParser 回退解析器（测试不再 skip） |
 | 3.5 | 通用嗅探增强 | MIME 增加 `video/mp2t`、`video/quicktime`、`application/octet-stream`（结合扩展名/Content-Disposition 二次确认）；通用站点加 MutationObserver 持续监听动态插入的 `<video>/<audio>`（当前仅 init/load 扫描两次） | ✅ 另加 `video/x-matroska`；`injected/page-context-script.js` 新增防抖 MutationObserver + `loadstart`/`loadedmetadata` 监听 |
 | 3.6 | 页面注入改用 `chrome.scripting.executeScript({world:'MAIN'})` | 当前 DOM `<script>` 注入在 Twitter/X 等 CSP 严格站点静默失败，导致全部 hook 失效（`content/content-main.js:16-51`） | ✅ 新增 `INJECT_PAGE_SCRIPTS`（按 `sender.frameId` 定向、`injectImmediately`），DOM `<script>` 注入保留为回退 |
-| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 1.5GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ 两步：①`downloadHlsSegments({ maxTotalBytes })` 统一守卫（`HLS_OUTPUT_TOO_LARGE`）、Bilibili 改为报错（`BILIBILI_OUTPUT_TOO_LARGE`）；②下载循环新增顺序写入 sink + 逐分片 transform，峰值内存从 ≈3N 降到 ≈N+并发窗口（HLS 纯拼接与 DASH 均已接入，逐分片解密走同一通道）。OPFS 真实落盘未做（见下方遗留） |
+| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 1.5GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ 三步：①`downloadHlsSegments({ maxTotalBytes })` 统一守卫；②顺序写入 sink + 逐分片 transform，峰值内存 ≈3N → ≈N+并发窗口；③新增 `lib/opfs-sink.js`（内存→OPFS 自适应溢出，`unlimitedStorage`），后台 HLS 大文件真正落盘（上限改 `OPFS_MAX_OUTPUT_BYTES` 8GB），临时文件由 SW 在下载结束/中断时清理、启动时清理残留；内容侧超限自动回退到后台落盘路径 |
 | 3.8 | 过滤与黑名单 | 增加大小/时长阈值与域名黑名单，过滤广告片段、音效等噪声条目 | ✅ 新增 `lib/video-filter.js` + 三个设置项，读取列表时过滤，结构化来源不受阈值影响 |
-| 3.9 | 任务管理补全 | 内容侧任务 ABORT 消息通道（当前只能取消有 downloadId 的任务）、落实全局并发队列（`concurrentDownloadLimit` 当前仅 popup 批量入口生效）、`saveAs` 可选保存位置 | ✅ `ABORT_SOURCE_DOWNLOAD` + `AbortController`（`DOWNLOAD_ABORTED`）、popup 任务「取消」按钮、`background/download-queue.js` 全局并发、`askSaveLocation` → `saveAs` |
+| 3.9 | 任务管理补全 | 内容侧任务 ABORT 消息通道（当前只能取消有 downloadId 的任务）、落实全局并发队列（`concurrentDownloadLimit` 当前仅 popup 批量入口生效）、`saveAs` 可选保存位置 | ✅ `ABORT_SOURCE_DOWNLOAD` + `AbortController`（`DOWNLOAD_ABORTED`）、popup 任务「取消」按钮、`background/download-queue.js` 全局并发、`askSaveLocation` → `saveAs`；过大文件改为保存分离文件（3.7 三步之外的第 4 个降级点：DASH/Bilibili/HLS 音轨） |
 
 ### 第三波遗留（未做，建议并入第四波）
 
-- OPFS / File System Access API 真实落盘：内存已从 ≈3N 降到 ≈N（`createInMemorySink` 也是 OPFS sink 的挂载点，实现 `write` 即可接入），但数据仍常驻内存，超过 1.5 GB 依旧明确拒绝而不是崩页面；`offscreen/offscreen.js` 的 base64 分片中转仍会再复制一份，属后台回退路径。
+- 内容侧（页面上下文）路径仍是纯内存：OPFS 只有扩展 origin 可见，content script 侧不落盘，因此内容侧超过 1.5 GB 会中止并回退到后台 OPFS 路径（会重复下载一次已抓取的部分）。
+- DASH / Bilibili 合并仍需整体持有两路数据（fMP4 muxer 接口限制），超过上限时已降级为分离文件，但没有流式 mux。
+- File System Access API（用户直接选保存位置并流式写入）未做：需要可见页面 + 用户手势，属 UX 变更。
+- `offscreen/offscreen.js` 的小文件中转（base64 分片）仍会再复制一份，仅在内存路径上。
 - HLS 直播续录、`EXT-X-PROGRAM-DATE-TIME` 对齐、DRM（SAMPLE-AES/CENC）仍然不支持。
 
 ## 第四波：工程健康
@@ -91,7 +94,7 @@
 | 图标徽章 | 检测到的视频数 | 已对齐（第二波 2.4 ✅） | 第二波 2.4 |
 | MSE/blob 嗅探 | 核心能力 | 检测到但被丢弃 | 第一波 1.3 |
 | iframe 视频 | 支持 | 不支持 | 第一波 1.4 |
-| 大文件 | companion app 流式落盘 | 纯内存合并，但 HLS/Bilibili/DASH 统一 1.5GB 守卫 ✅ | 第三波 3.7（OPFS 落盘待第四波） |
+| 大文件 | companion app 流式落盘 | 后台 HLS 走 OPFS 流式落盘（≈无内存上限）✅；内容侧/DASH/Bilibili 超限降级为分离文件 ✅ | 第三波 3.7（已完成） |
 | 清晰度选择 | 全档位 | YouTube/Bilibili/HLS 均可选 ✅ | 第三波 3.1 |
 | 任务管理 | 暂停/取消/队列/黑名单 | 取消 ✅、全局并发队列 ✅、黑名单 ✅；暂停/断点续传仍未做 | 第三波 3.8/3.9 |
 | 国际化 | 20+ 语言 | 仅中文 | 第四波 4.4 |

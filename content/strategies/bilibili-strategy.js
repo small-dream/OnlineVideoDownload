@@ -198,16 +198,46 @@
       const maxMergeBytes = constants.MAX_IN_PAGE_MERGE_BYTES || DEFAULT_MAX_MERGE_BYTES;
       const estimatedTotal = videoBuffer.byteLength + audioBuffer.byteLength;
       if (maxMergeBytes > 0 && estimatedTotal > maxMergeBytes) {
-        const tooLarge = new Error(
-          `Bilibili 视频体积过大 (${(estimatedTotal / 1024 / 1024).toFixed(0)} MB，`
-          + `上限 ${Math.round(maxMergeBytes / 1024 / 1024)} MB)，浏览器内合并可能失败。`
-          + '请降低清晰度后重试。'
+        // 分离文件降级：体积超限不再直接失败，改为分别保存视频与音频两个文件
+        const totalMb = (estimatedTotal / 1024 / 1024).toFixed(0);
+        const maxMb = Math.round(maxMergeBytes / 1024 / 1024);
+        const message = `Bilibili 视频体积 ${totalMb} MB 超过浏览器内合并上限 ${maxMb} MB，`
+          + '改为分别保存视频与音频文件（可用本地工具合并）';
+        console.warn(`[OVD] ${message}`);
+        progressReporter?.status?.(message);
+        getFloatButton()?.showMessage(message, false, 0);
+
+        const baseName = videoUtils.buildMediaFilename?.({
+          ext: '.mp4',
+          fallback: 'bilibili_video',
+          title,
+        }) || 'bilibili_video.mp4';
+        const stem = baseName.replace(/\.mp4$/i, '');
+        const videoFilename = `${stem}-video.mp4`;
+        const audioFilename = `${stem}-audio.mp4`;
+
+        const videoSave = await saveBlobViaBrowserDownload(
+          new Blob([videoBuffer], { type: 'video/mp4' }),
+          videoFilename,
+          context,
+          meta
         );
-        tooLarge.code = 'BILIBILI_OUTPUT_TOO_LARGE';
-        tooLarge.totalBytes = estimatedTotal;
-        tooLarge.maxTotalBytes = maxMergeBytes;
-        progressReporter?.status?.(tooLarge.message);
-        throw tooLarge;
+        await saveBlobViaBrowserDownload(
+          new Blob([audioBuffer], { type: 'audio/mp4' }),
+          audioFilename,
+          context,
+          meta
+        );
+
+        progressReporter?.progress(100, { phase: 'complete' });
+        getFloatButton()?.showProgress(100);
+        return {
+          ...videoSave,
+          filename: videoFilename,
+          ok: true,
+          separateFiles: [videoFilename, audioFilename],
+          size: estimatedTotal,
+        };
       }
 
       getFloatButton()?.showMessage('正在合并 Bilibili 视音频...', false, 0);
