@@ -28,6 +28,8 @@
 
     const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
     const formatBytes = byteUtils.formatBytes || (() => '');
+    // 页面方向的消息一律当不可信数据处理（MAIN world 无法对页面保密）
+    const pageMessageGuard = globalThis.__OVD_PAGE_MESSAGE_GUARD__ || {};
 
     let started = false;
     // HLS 委托下载（SW 发起）的取消控制器：taskKey/taskId → AbortController
@@ -169,6 +171,14 @@
         videoId: payload.videoId,
         videoStreamsCount: payload.videoStreams?.length || 0,
       });
+
+      // 伪造的页面消息可以塞进任意 URL（含 file:/data:）或伪造媒体类型，
+      // 校验不通过直接丢弃，避免污染注册表并诱导用户下载非媒体内容。
+      const guardResult = pageMessageGuard.validateDetectedPayload?.(payload);
+      if (guardResult && !guardResult.ok) {
+        console.warn(`[OVD] 丢弃可疑的页面检测结果: ${guardResult.reason}`);
+        return;
+      }
 
       chrome.runtime.sendMessage({ type: MSG.VIDEO_DETECTED || 'VIDEO_DETECTED', payload }, (response) => {
         if (chrome.runtime.lastError) {

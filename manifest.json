@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "109",
   "name": "Online Video Downloader",
   "version": "1.0.0",
   "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
@@ -35,6 +36,7 @@
         "lib/http-utils.js",
         "lib/constants.js",
         "lib/message-types.js",
+        "lib/page-message-guard.js",
         "lib/video-utils.js",
         "lib/ui-dom-utils.js",
         "lib/video-source-utils.js",
@@ -73,7 +75,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["injected/*.js", "lib/*", "icons/*"],
+      "resources": ["injected/*.js", "lib/message-types.js", "icons/*"],
       "matches": ["<all_urls>"]
     }
   ],
