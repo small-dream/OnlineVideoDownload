@@ -418,6 +418,9 @@
   "quality_auto": {
     "message": "Auto (highest quality)"
   },
+  "quality_hlsAuto": {
+    "message": "Auto (HLS pre-merged, highest quality)"
+  },
   "quality_loading": {
     "message": "Loading..."
   },

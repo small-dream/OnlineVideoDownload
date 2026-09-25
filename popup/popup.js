@@ -77,6 +77,8 @@ let youtubePreferenceCache = {
 let bilibiliQualityCache = {
   ...(bilibiliQualityStore.DEFAULT_PREFERENCES || { qualityId: 'auto' }),
 };
+// YouTube HLS 清单 → 变体列表缓存（清晰度下拉与 HLS 下载共用）
+const hlsVariantCache = new Map();
 
 const activeSourceTaskByTraceId = new Map();
 const activeSourceTaskByTaskKey = new Map();
@@ -694,6 +696,11 @@ function cloneVideoWithDefaults(video) {
 }
 
 function normalizeResolutionForVideo(video, resolution) {
+  // HLS 预合并选项：'hls:auto' 或 'hls:<variantUrl>'，不要被下面的"取可用清晰度"逻辑改写
+  if (typeof resolution === 'string' && resolution.startsWith('hls:')) {
+    return resolution;
+  }
+
   const available = getYouTubeQualityOptions(video).map((item) => item.value);
 
   if (!resolution || resolution === 'auto' || !available.includes(resolution)) {
@@ -1422,7 +1429,9 @@ function buildYouTubeControlsHtml(video, index) {
   const qualityOptions = getYouTubeQualityOptions(video);
   const modeValue = options.mode || 'capture';
   const resolutionValue = normalizeResolutionForVideo(video, options.resolution);
-  const resolutionDisabled = modeValue !== 'parse';
+  // 有 HLS 预合并选项时不需要切到解析模式：这些选项与录制/解析模式无关
+  const hasHlsOptions = typeof video.hlsManifestUrl === 'string' && !!video.hlsManifestUrl;
+  const resolutionDisabled = modeValue !== 'parse' && !hasHlsOptions;
 
   return `
     <div class="youtube-controls" data-index="${index}">
@@ -1459,6 +1468,21 @@ function getYouTubeQualityOptions(video) {
     });
   });
 
+  // YouTube 的高清晰度现在多以"预合并 HLS"提供（不要求 pot、音视频已合并），
+  // 把它们追加到同一个清晰度下拉里：选它就按 HLS 清单下载，不必再合并。
+  if (typeof video?.hlsManifestUrl === 'string' && video.hlsManifestUrl) {
+    options.unshift({
+      label: t('quality_hlsAuto', '自动（HLS 预合并，最高画质）'),
+      value: 'hls:auto',
+    });
+    for (const variant of hlsVariantCache.get(video.hlsManifestUrl) || []) {
+      options.push({
+        label: `${variant.label}${variant.detail ? `（${variant.detail}）` : ''}·HLS`,
+        value: `hls:${variant.url}`,
+      });
+    }
+  }
+
   return options;
 }
 
@@ -1471,6 +1495,12 @@ function wireYouTubeControls(item, index) {
   const resolutionSelect = item.querySelector('.youtube-resolution-select');
   if (!resolutionSelect) {
     return;
+  }
+
+  // 视频带 YouTube HLS 清单时，异步拉一次 Master Playlist 变体，
+  // 把它们作为"HLS 预合并"选项补进同一个下拉（1080p 等常常只有 HLS 能下）
+  if (typeof video.hlsManifestUrl === 'string' && video.hlsManifestUrl) {
+    void ensureYouTubeHlsVariants(index, video, resolutionSelect);
   }
 
   resolutionSelect.addEventListener('change', async () => {
@@ -1491,6 +1521,50 @@ function wireYouTubeControls(item, index) {
 
     refreshVideoMeta(item, index);
   });
+}
+
+/**
+ * 拉取 YouTube HLS 清单的变体列表并刷新清晰度下拉。
+ * 复用 HLS 条目那套 `HLS_FETCH_QUALITIES` 通道（页面上下文解析 Master Playlist）。
+ */
+async function ensureYouTubeHlsVariants(index, video, resolutionSelect) {
+  const manifestUrl = video?.hlsManifestUrl || '';
+  if (!manifestUrl || hlsVariantCache.has(manifestUrl)) {
+    return;
+  }
+
+  try {
+    const response = await sendTabMessageAsync(currentTabId, {
+      frameId: video.frameId,
+      headers: video.requestHeaders || {},
+      m3u8Url: manifestUrl,
+      type: MSG.HLS_FETCH_QUALITIES || 'HLS_FETCH_QUALITIES',
+    });
+    if (!response?.ok || !response.qualities?.length) {
+      return;
+    }
+
+    hlsVariantCache.set(manifestUrl, response.qualities);
+    console.log(`[OVD] YouTube HLS 变体已加载 count=${response.qualities.length}`);
+  } catch (err) {
+    console.warn(`[OVD] YouTube HLS 变体获取失败: ${err.message}`);
+    return;
+  }
+
+  const current = currentVideos[index];
+  if (!current || current.type !== 'youtube-adaptive') {
+    return;
+  }
+
+  const selected = resolutionSelect.value;
+  resolutionSelect.innerHTML = getYouTubeQualityOptions(current)
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join('');
+  if (Array.from(resolutionSelect.options).some((option) => option.value === selected)) {
+    resolutionSelect.value = selected;
+  }
+  resolutionSelect.disabled = (current.downloadOptions?.mode || 'capture') !== 'parse'
+    && !(typeof current.hlsManifestUrl === 'string' && current.hlsManifestUrl);
 }
 
 /**
@@ -1905,17 +1979,31 @@ async function triggerDownload(video, btn) {
         ...youtubePreferenceCache,
         ...(video.downloadOptions || {}),
       };
-      downloadVideo = {
-        ...video,
-        downloadOptions: {
-          ...normalizedOptions,
-          resolution: normalizeResolutionForVideo(video, normalizedOptions.resolution),
-        },
-      };
-      youtubePreferenceCache = await youtubeModeStore.updatePreferences?.({
-        mode: downloadVideo.downloadOptions.mode,
-        resolution: downloadVideo.downloadOptions.resolution,
-      }) || youtubePreferenceCache;
+      const resolution = normalizeResolutionForVideo(video, normalizedOptions.resolution);
+
+      if (typeof resolution === 'string' && resolution.startsWith('hls:') && video.hlsManifestUrl) {
+        // 选了"HLS 预合并"清晰度：改走 HLS 下载链路（清单 + 变体），不需要再合并音视频
+        const variantUrl = resolution === 'hls:auto' ? '' : resolution.slice('hls:'.length);
+        downloadVideo = {
+          ...video,
+          // 'hls:auto' 时不传 quality（交给 HLS 链路选最高画质），选了具体变体才带上
+          downloadOptions: { ...normalizedOptions, quality: variantUrl ? resolution : '', variantUrl },
+          type: 'hls',
+          url: video.hlsManifestUrl,
+        };
+      } else {
+        downloadVideo = {
+          ...video,
+          downloadOptions: {
+            ...normalizedOptions,
+            resolution,
+          },
+        };
+        youtubePreferenceCache = await youtubeModeStore.updatePreferences?.({
+          mode: downloadVideo.downloadOptions.mode,
+          resolution: downloadVideo.downloadOptions.resolution,
+        }) || youtubePreferenceCache;
+      }
     }
 
     const executionMode = sourceUtils.getExecutionMode?.(downloadVideo) || 'background';

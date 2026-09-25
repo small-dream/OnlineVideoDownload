@@ -861,8 +861,10 @@ async function getVisibleVideosForTab(tabId) {
   const videos = registry.getForTab(tabId);
   const detectionFilterContext = buildDetectionFilterContext(tabUrl, videos);
   const collapseBlobs = videoFilter.collapseDuplicateBlobEntries || ((list) => list);
+  const mergeYouTubeHls = videoFilter.mergeYouTubeHlsEntries || ((list) => list);
   const shouldHide = videoFilter.shouldHideRedundantDetection || (() => false);
-  const visibleVideos = collapseBlobs(videos)
+  // 同一视频的 YouTube HLS 条目先并入 youtube-adaptive 条目（一条 = 一行）
+  const visibleVideos = mergeYouTubeHls(collapseBlobs(videos))
     .filter((video) => !shouldHide(video, detectionFilterContext));
 
   // 用户级过滤（域名黑名单/最小时长/最小体积）：在读取时应用，

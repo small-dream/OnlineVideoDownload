@@ -418,6 +418,9 @@
   "quality_auto": {
     "message": "自动（最高画质）"
   },
+  "quality_hlsAuto": {
+    "message": "自动（HLS 预合并，最高画质）"
+  },
   "quality_loading": {
     "message": "加载中…"
   },
