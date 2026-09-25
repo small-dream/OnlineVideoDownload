@@ -30,9 +30,9 @@ test('BLOB_TRANSFER_CHUNK_SIZE is 262144', () => {
   assert.ok(typeof constants.BLOB_TRANSFER_CHUNK_SIZE === 'number');
 });
 
-test('MAX_IN_PAGE_MERGE_BYTES is 1610612736', () => {
+test('MAX_IN_PAGE_MERGE_BYTES is 2GB（muxer 零拷贝后放宽）', () => {
   const constants = mod();
-  assert.equal(constants.MAX_IN_PAGE_MERGE_BYTES, 1610612736);
+  assert.equal(constants.MAX_IN_PAGE_MERGE_BYTES, 2147483648);
   assert.ok(typeof constants.MAX_IN_PAGE_MERGE_BYTES === 'number');
 });
 

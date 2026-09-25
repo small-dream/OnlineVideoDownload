@@ -9,7 +9,7 @@
   const MSG = messageTypes;
   const qualityUtils = globalThis.__OVD_BILIBILI_QUALITY_UTILS__ || {};
   const constants = globalThis.__OVD_CONSTANTS__ || {};
-  const DEFAULT_MAX_MERGE_BYTES = 1500 * 1024 * 1024;
+  const DEFAULT_MAX_MERGE_BYTES = 2 * 1024 * 1024 * 1024;
 
   function createBilibiliStrategy(options = {}) {
     const {

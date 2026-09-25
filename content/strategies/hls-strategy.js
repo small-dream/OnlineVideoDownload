@@ -131,7 +131,7 @@
 
       // 体积预估：内容侧是纯内存路径（上限 MAX_IN_PAGE_MERGE_BYTES），
       // 预估超限时直接让后台接手（后台走 OPFS 落盘），避免"先下满 1.5 GB 再中止重下"。
-      const contentMaxBytes = constants.MAX_IN_PAGE_MERGE_BYTES || 1500 * 1024 * 1024;
+      const contentMaxBytes = constants.MAX_IN_PAGE_MERGE_BYTES || 2 * 1024 * 1024 * 1024;
       const effectiveBandwidth = selectedVariant
         ? (selectedVariant.averageBandwidth || selectedVariant.bandwidth || 0)
         : 0;
@@ -345,7 +345,7 @@
       return hlsPipeline.downloadHlsSegments(playlist.segments, {
         concurrency: constants.HLS_SEGMENT_CONCURRENCY || 5,
         fetchBuffer: (url, range) => hlsPipeline.hlsFetchBuffer(url, headers, { ...fetchOptions, range }),
-        maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES || 1500 * 1024 * 1024,
+        maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES || 2 * 1024 * 1024 * 1024,
         signal: requestOptions.signal || null,
         sink: sinkOptions.sink || null,
         transform: sinkOptions.transform || null,
@@ -409,7 +409,7 @@
       const { buffers } = await hlsPipeline.downloadHlsSegments(audioPlaylist.segments, {
         concurrency: constants.HLS_SEGMENT_CONCURRENCY || 5,
         fetchBuffer: (url, range) => hlsPipeline.hlsFetchBuffer(url, headers, { ...fetchOptions, range }),
-        maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES || 1500 * 1024 * 1024,
+        maxTotalBytes: constants.MAX_IN_PAGE_MERGE_BYTES || 2 * 1024 * 1024 * 1024,
         retryDelays: constants.HLS_SEGMENT_RETRY_DELAYS,
       });
 
