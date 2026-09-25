@@ -853,6 +853,23 @@ The page-context loader injects child scripts in this order:
 
 This order is required because the page runtime uses `window.__OVD_PAGE_*__` namespaces for dependency wiring.
 
+## 浏览器矩阵（Browser Matrix）
+
+**决策：仅支持 Chromium 内核（Chrome / Edge 109+，Opera/Chromium 同源亦可）。**
+
+依赖的 Chromium 专有能力：
+
+| 能力 | 用途 | Firefox 现状 |
+| --- | --- | --- |
+| `chrome.offscreen` | 页面关闭后创建 blob 对象 URL、打开 OPFS 临时文件 | 无等价 API |
+| `declarativeNetRequest` 动态规则 | 下载时临时注入 `Referer`/CORS，绕过防盗链 403 | 语义与可用性不同，需重写为 webRequest 阻塞式 |
+| `chrome.scripting.executeScript({ world: 'MAIN' })` | CSP 严格站点下注入页面 hook | 需 `contentScripts.register` + 不同世界模型 |
+| `chrome.runtime.getContexts` | 判断 offscreen 文档是否已存在 | 无对应概念 |
+| MV3 Service Worker + module | 后台全部逻辑 | 事件页模型不同 |
+
+`lib/browser-compat.js` 只做信息采集：`browserInfo.supported` 为 false 时 Service Worker
+启动日志会明确提示"不在支持矩阵内"，不做看似兼容的降级尝试。
+
 ## Extension Rules
 
 When adding a new source:
@@ -873,6 +890,7 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.17.8 | 2026-09-25 | 第四波（4.8 浏览器矩阵决策 + 4.5 死代码清理）。4.8：明确**仅支持 Chromium 内核（Chrome / Edge 109+）**并写进 README 四语与 manifest（`minimum_chrome_version: "109"`）；`lib/browser-compat.js` 移除 `isFirefox` 探测，改为 `isChromium` / `supported`（Chrome/Edge/Opera/Chromium），Service Worker 启动时对不受支持的浏览器发出明确警告而非静默降级。放弃 Firefox 的理由：offscreen document、declarativeNetRequest 动态规则、`scripting.executeScript({ world: 'MAIN' })`、`runtime.getContexts` 均无等价方案，真支持等于重写离线下载与页面注入两条链路。4.5：删除 popup 中恒返回空串的 `buildQualityHtml`（及其调用点）、未被引用的 `DOWNLOAD_BUTTON_LABELS`、`content/message-router.js` 中未使用的 `byteUtils`/`formatBytes`；`background/download-strategies/dash-download-strategy.js` 已在第三波注册启用，不再是死代码。 |
 | 1.17.7 | 2026-09-25 | 第四波（4.6 安全收紧 + 4.7 文件名健壮性）。安全：新增 `lib/page-message-guard.js`，把「页面 → 内容脚本」的检测结果当不可信数据处理——类型必须在白名单内（audio/hls/dash/direct/blob/youtube-adaptive/bilibili-meta/drm-detected…），URL 只允许 `http(s):` 与带 origin 的 `blob:`（挡掉 `file:`/`data:`/`chrome:`/`javascript:`/裸 `blob:`），并限制 URL 与 title 长度；`content/message-router.js` 在转发 `VIDEO_DETECTED` 前校验，`service-worker.js#handleVideoDetected` 再做一次纵深防御。`web_accessible_resources` 由 `lib/*` 收紧为仅 `lib/message-types.js`（DOM 注入回退所需）+ `injected/*.js` + `icons/*`；manifest 增加 `minimum_chrome_version: "109"`（offscreen 依赖）。文件名：`sanitizeFilename` 规避 Windows 保留设备名（CON/PRN/NUL/COM1-9/LPT1-9，含带扩展名）、去掉结尾点与空格（Windows 会静默剥离）、剔除控制字符，并改为按码点截断（不再切断 emoji 代理对）；重名冲突沿用 `chrome.downloads` 默认的 uniquify 策略。 |
 | 1.17.6 | 2026-09-25 | `downloadHlsSegments` 的 sink 写入与分片下载重叠：写入排到一条串行链上（保证顺序文件不错位），只有「未落盘分片数 > `options.sinkWindow`（默认 = 并发数）」时才回压等待，写入/解密错误经 `writeError` 在批次检查点与收尾处抛出。此前每批 `await flushSink()` 会把 OPFS 落盘延迟叠加到下载关键路径上；现在节省量 ≈ (批次数 − 1) × 单批抓取等待。新增用例：下载与写入重叠的结构断言（写入期间确有抓取发生、写入仍串行、写入顺序 = 分片顺序）、串行 vs 重叠的耗时下界对比、sink 写入失败透出错误码。 |
 | 1.17.5 | 2026-09-25 | `bilibili-muxer` 解析健壮性收尾（4.2 剩余三项）：①`parseFragment` 现在遵循 `trun` 的 `data-offset`（含 `tfhd` `base-data-offset`，基准为 moof 起点），越界抛 `FMP4_TRUN_OFFSET_OUT_OF_RANGE`；未声明偏移时游标按 ISO 14496-12 §8.8.8 跨 traf 连续推进，首个 run 落在 mdat payload 起点。②一个 moof 内的多个 `traf`、同一 `traf` 内的多个 `trun` 全部解析（此前 `parseBoxes` 返回数组时只取第一个，静默丢样本）。③样本写入失败不再 `muxerWarn` 后继续：抛 `FMP4_SAMPLE_WRITE_FAILED`（带 track/sampleIndex），样本 size 为 0 抛 `FMP4_SAMPLE_SIZE_INVALID`，视频或音频解析结果为空抛 `FMP4_NO_SAMPLES`——避免产出静默丢帧/音画不同步的 MP4。新增 7 个用例覆盖 data-offset 跳过填充与越界、多 traf、多 trun 连续、写入失败、空样本。 |

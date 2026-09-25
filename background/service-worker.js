@@ -93,6 +93,11 @@ const OBJECT_URL_REVOKE_DELAY = constants.OBJECT_URL_REVOKE_DELAY || 60000;
 const STREAM_FETCH_RETRY_DELAYS = constants.STREAM_FETCH_RETRY_DELAYS || [0, 1000, 2500, 5000];
 
 console.log(`[OVD] Service Worker 启动 browser=${browserInfo.name}`);
+if (browserInfo.supported === false) {
+  // 非 Chromium 内核缺少 offscreen / DNR 动态规则 / 脚本注入等能力，
+  // 明确告知而不是让用户在"功能静默失效"里排查。
+  console.warn('[OVD] 当前浏览器不在支持矩阵内：本扩展仅支持 Chrome / Edge 109+ 等 Chromium 内核浏览器');
+}
 cleanupAllRules();
 
 // storage.session 镜像：任务表与检测列表随浏览器会话存续，SW 回收后可恢复

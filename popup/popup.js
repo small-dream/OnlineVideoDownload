@@ -20,7 +20,6 @@ const {
   formatSize,
   getMediaFormatLabel,
   getVideoTypeLabel,
-  shortenUrl,
 } = videoUtils;
 const {
   setButtonState,
@@ -57,13 +56,6 @@ const selectAllCheckboxEl = document.getElementById('selectAllCheckbox');
 const batchDownloadBtnEl = document.getElementById('batchDownloadBtn');
 
 const selectedIndices = new Set();
-
-const DOWNLOAD_BUTTON_LABELS = Object.freeze({
-  completed: '已完成',
-  downloading: '下载中...',
-  idle: '下载',
-  pending: '处理中...',
-});
 
 const DOWNLOAD_DISPLAY_LABELS = Object.freeze({
   completed: '已完成',
@@ -1322,15 +1314,10 @@ function createVideoItem(video, index) {
   return item;
 }
 
-function buildQualityHtml(video) {
-  return '';
-}
-
 function buildFormatPillHtml(video, typeClass, typeLabel) {
   return `
     <div class="format-pill">
       <span class="type-badge ${typeClass}">${typeLabel}</span>
-      ${buildQualityHtml(video)}
     </div>
   `;
 }

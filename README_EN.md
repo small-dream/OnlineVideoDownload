@@ -7,7 +7,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-    <img src="https://img.shields.io/badge/Chrome-88%2B-green.svg" alt="Chrome 88+">
+    <img src="https://img.shields.io/badge/Chrome-109%2B-green.svg" alt="Chrome 109+">
     <img src="https://img.shields.io/badge/Manifest-V3-purple.svg" alt="Manifest V3">
   </p>
   <p align="center">
@@ -33,7 +33,7 @@
 
 ## 🚀 Quick Start (30 seconds)
 
-> **Prerequisites**: Chrome 88+ or Edge 88+
+> **Prerequisites**: Chrome 109+ or Edge 109+
 
 ### Step 1: Get the code
 

@@ -7,7 +7,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
-    <img src="https://img.shields.io/badge/Chrome-88%2B-green.svg" alt="Chrome 88+">
+    <img src="https://img.shields.io/badge/Chrome-109%2B-green.svg" alt="Chrome 109+">
     <img src="https://img.shields.io/badge/Manifest-V3-purple.svg" alt="Manifest V3">
   </p>
   <p align="center">
@@ -33,7 +33,7 @@
 
 ## 🚀 クイックスタート（30秒）
 
-> **前提条件**: Chrome 88+ または Edge 88+
+> **前提条件**: Chrome 109+ または Edge 109+
 
 ### ステップ 1: コードを取得
 
