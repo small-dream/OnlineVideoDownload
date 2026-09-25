@@ -696,9 +696,14 @@ function cloneVideoWithDefaults(video) {
 }
 
 function normalizeResolutionForVideo(video, resolution) {
-  // HLS 预合并选项：'hls:auto' 或 'hls:<variantUrl>'，不要被下面的"取可用清晰度"逻辑改写
+  // HLS 预合并选项：'hls:auto' 或 'hls:<variantUrl>'，不要被下面的"取可用清晰度"逻辑改写；
+  // 但该视频没有 HLS 清单时（例如偏好被记住后换了视频）要退回普通清晰度逻辑
   if (typeof resolution === 'string' && resolution.startsWith('hls:')) {
-    return resolution;
+    const hasManifest = typeof video?.hlsManifestUrl === 'string' && !!video.hlsManifestUrl;
+    if (hasManifest) {
+      return resolution;
+    }
+    resolution = 'auto';
   }
 
   const available = getYouTubeQualityOptions(video).map((item) => item.value);
@@ -1541,6 +1546,9 @@ async function ensureYouTubeHlsVariants(index, video, resolutionSelect) {
       type: MSG.HLS_FETCH_QUALITIES || 'HLS_FETCH_QUALITIES',
     });
     if (!response?.ok || !response.qualities?.length) {
+      console.warn(
+        `[OVD] YouTube HLS 变体获取失败: ${response?.error || 'no qualities'} url=${manifestUrl.slice(0, 120)}`
+      );
       return;
     }
 
@@ -1618,6 +1626,9 @@ function wireHlsControls(item, index) {
       });
 
       if (!response?.ok || !response.qualities?.length) {
+        console.warn(
+          `[OVD] HLS 画质获取失败: ${response?.error || 'no qualities'} url=${String(video.url || '').slice(0, 120)}`
+        );
         return;
       }
 
