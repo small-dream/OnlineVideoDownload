@@ -283,3 +283,107 @@ test('inferHlsOutputProfile returns ts profile for plain ts segments', () => {
   assert.equal(result.ext, '.ts');
   assert.equal(result.mimeType, 'video/mp2t');
 });
+
+// ---------------------------------------------------------------
+// hlsFetchText / hlsFetchBuffer 凭证模式
+// ---------------------------------------------------------------
+
+test('hlsFetchText passes headers and credentials to fetch', async () => {
+  const mod = loadModule();
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    seen.push({ init, url });
+    return { ok: true, status: 200, text: async () => '#EXTM3U\n' };
+  };
+
+  try {
+    const text = await mod.hlsFetchText(
+      'https://cdn.example.com/index.m3u8',
+      { Referer: 'https://movie.example.com/' },
+      { credentials: 'include' }
+    );
+
+    assert.equal(text, '#EXTM3U\n');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].init.credentials, 'include');
+    assert.deepEqual(seen[0].init.headers, { Referer: 'https://movie.example.com/' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('hlsFetchText omits credentials when options are not provided', async () => {
+  const mod = loadModule();
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    seen.push({ init, url });
+    return { ok: true, status: 200, text: async () => '#EXTM3U\n' };
+  };
+
+  try {
+    await mod.hlsFetchText('https://cdn.example.com/index.m3u8', {});
+    assert.equal('credentials' in seen[0].init, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('hlsFetchBuffer retries without credentials when CORS rejects the credentialed request', async () => {
+  const mod = loadModule();
+  const attempts = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    attempts.push(init);
+    if (init.credentials) {
+      throw new TypeError('Failed to fetch');
+    }
+    return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) };
+  };
+
+  try {
+    const buffer = await mod.hlsFetchBuffer(
+      'https://cdn.example.com/segment001.ts',
+      { Referer: 'https://movie.example.com/' },
+      { credentials: 'include' }
+    );
+
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].credentials, 'include');
+    assert.equal('credentials' in attempts[1], false);
+    assert.deepEqual(attempts[1].headers, { Referer: 'https://movie.example.com/' });
+    assert.equal(buffer.byteLength, 8);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('parseHlsEncryption forwards fetch options to the key request', async () => {
+  const mod = loadModule();
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    seen.push({ init, url });
+    return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer };
+  };
+
+  try {
+    const keyInfo = await mod.parseHlsEncryption(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:1,\nseg.ts',
+      'https://cdn.example.com/video/index.m3u8',
+      {},
+      { credentials: 'include' }
+    );
+
+    assert.ok(keyInfo);
+    assert.equal(seen[0].url, 'https://cdn.example.com/video/key.bin');
+    assert.equal(seen[0].init.credentials, 'include');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

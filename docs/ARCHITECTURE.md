@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.14.0
-> Last Updated: 2026-06-12
+> Version: 1.15.0
+> Last Updated: 2026-09-24
 
 ## Goals
 
@@ -94,8 +94,14 @@ Public surface:
 - `inferHlsOutputProfile`
 - `extFromUrl`
 - `ensureExtension`
-- `hlsFetchText`
-- `hlsFetchBuffer`
+- `hlsFetch`
+- `hlsFetchText(url, headers, options)`
+- `hlsFetchBuffer(url, headers, options)`
+
+Notes:
+
+- `options.credentials` 用于页面上下文请求：content script 中带 Cookie 的跨域请求若被目标站 CORS 拒绝（TypeError），`hlsFetch` 会自动去掉 credentials 重试一次，保证兼容只返回 `Access-Control-Allow-Origin: *` 的 CDN。
+- `parseHlsEncryption(m3u8, baseUrl, headers, options)` 会把同样的 options 透传给密钥请求。
 
 ### `lib/ovd-logger.js`
 
@@ -315,7 +321,7 @@ Responsibilities:
 - `youtube-parse-download-strategy`: select YouTube streams by requested mode/resolution and mux adaptive tracks in-page.
 - `bilibili-strategy`: call Bilibili APIs, sign WBI requests, fetch available qualities on demand, fetch DASH streams, relay merge progress, mux in-page, and save merged blob via browser download API with in-page blob fallback.
 - `generic-strategy`: delegate background-driven downloads.
-- `hls-strategy`: handle `HLS_DOWNLOAD_DELEGATE` in content using the shared HLS pipeline.
+- `hls-strategy`: handle `HLS_DOWNLOAD_DELEGATE` in content using the shared HLS pipeline; page requests carry site cookies and page origin so CDN bot protection (Cloudflare WAF etc.) does not see an extension-context fetch.
 - `dash-strategy`: handle `DASH_DOWNLOAD_DELEGATE` in content; parse MPD manifest, fetch video and audio segments, and merge them using BilibiliMuxer into a single MP4.
 
 Additional content helpers:
@@ -444,6 +450,7 @@ Responsibilities:
 - Match `videoInfo` to the correct background execution path.
 - Keep each download implementation local to the strategy that owns it.
 - Reuse `submitDirectDownload()` for direct video, audio files, DASH fallback, and YouTube adaptive downloads where possible.
+- `hls-download-strategy` 先尝试把 HLS 下载委托给 content（页面上下文），委托失败或无 tab 上下文时再调用 `HlsFetcher`；委托期间通过 `injectHeaders` 注册 DNR 规则，并把 CORS 响应头回显为页面来源（`access-control-allow-credentials: true`），使带 Cookie 的跨域响应能被浏览器接受。
 
 ### HLS Fetcher
 
@@ -451,10 +458,10 @@ File: [background/hls-fetcher.js](/d:/AI/OnlineVideoDownload/background/hls-fetc
 
 Responsibilities:
 
-- Fetch HLS playlists and segments in the service worker when allowed.
-- Fall back to content-script delegation when SW fetch hits CORS or execution-context limits.
+- Act as the fallback path: fetch HLS playlists and segments in the service worker.
+- Used when page-context delegation is unavailable (no tab/content script), fails, or the source has no tab context.
 - Reuse `lib/hls-pipeline.js` for parsing and decryption logic.
-- Inject the full content runtime when delegated HLS downloads need a content script bootstrap.
+- Inject temporary `Referer` / `Origin` request headers plus permissive CORS response headers via `injectHeaders` before fetching.
 
 ### Download History Store
 
@@ -564,6 +571,11 @@ Examples:
 - `SOURCE_DOWNLOAD_STARTED`
 - `SOURCE_DOWNLOAD_RESULT`
 
+Notes:
+
+- `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options.fetchOptions`（默认 `{ credentials: 'include' }`）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount }`，任务据此写入真实 `downloadId`。
+- 委托下载期间 background 通过 `injectHeaders(url, headers, { corsOrigin })` 注册临时 DNR 规则，让页面上下文的带 Cookie 请求能通过 CDN 的 CORS 校验；content 无响应或返回失败时，同一任务自动回退到 `HlsFetcher`。
+
 ### Popup -> Content
 
 Examples:
@@ -643,6 +655,7 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.15.0 | 2026-09-24 | HLS downloads now run in the page context first: `hls-download-strategy` delegates to `HLS_DOWNLOAD_DELEGATE` so requests carry page cookies/origin/`Sec-Fetch` (fixes CDN WAF 403s seen from service-worker fetches), echoes the tab origin in CORS response headers via `injectHeaders(url, headers, { corsOrigin })`, adds optional `credentials` support to `hlsFetch`/`hlsFetchText`/`hlsFetchBuffer`/`parseHlsEncryption`, returns the real `downloadId` from the delegated blob download, and falls back to `HlsFetcher` when the content script is unavailable or fails. |
 | 1.14.1 | 2026-06-12 | Fixed subdirectory setting not working for content-script blob downloads (HLS, blob, DASH). `triggerBlobDownload` now delegates to service worker via `DOWNLOAD_BLOB_DATA` message so `chrome.downloads.download` handles the subdirectory path correctly; falls back to `<a download>` only when the service worker is unavailable. |
 | 1.14.0 | 2026-06-12 | Added `downloadSubdir` setting (default `OnlineVideoDownload`) to save downloads into a subdirectory under Chrome's default download folder. `Downloader._buildFilenameBase` and `downloadBlobData` now prepend the configured subdirectory. |
 | 1.13.0 | 2026-06-12 | Removed the standalone Options page and `options_ui`; settings and history are now managed only inside the popup. |

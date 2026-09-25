@@ -14,15 +14,20 @@ const _activeRules = new Map();
  * 为指定域名注入请求头 + CORS 响应头，返回清理函数
  * @param {string} targetUrl - 目标 URL（用于提取域名）
  * @param {Object} headers - 要注入的请求头 { Referer?: string, Origin?: string }
+ * @param {Object} [options] - { corsOrigin?: string }
+ *   corsOrigin 用于页面上下文的委托下载：请求由 content script 发起时，
+ *   响应头必须回显页面来源（而不是 `*`），否则带 Cookie 的响应会被浏览器拒绝。
  * @returns {Promise<() => Promise<void>>} cleanup 函数
  */
-export async function injectHeaders(targetUrl, headers) {
+export async function injectHeaders(targetUrl, headers, options = {}) {
   let domain;
   try {
     domain = new URL(targetUrl).hostname;
   } catch {
     domain = targetUrl;
   }
+
+  const corsOrigin = typeof options?.corsOrigin === 'string' ? options.corsOrigin.trim() : '';
 
   const addRules = [];
   const ruleIds = [];
@@ -63,19 +68,26 @@ export async function injectHeaders(targetUrl, headers) {
 
   const corsRuleId = _nextRuleId++;
   ruleIds.push(corsRuleId);
+
+  const corsResponseHeaders = [
+    { header: 'access-control-allow-origin', operation: 'set', value: corsOrigin || '*' },
+    { header: 'access-control-allow-methods', operation: 'set', value: 'GET, HEAD, OPTIONS' },
+  ];
+
+  if (corsOrigin && corsOrigin !== '*') {
+    corsResponseHeaders.push({ header: 'access-control-allow-credentials', operation: 'set', value: 'true' });
+  }
+
   addRules.push({
     id: corsRuleId,
     priority: 1,
     action: {
       type: 'modifyHeaders',
-      responseHeaders: [
-        { header: 'access-control-allow-origin', operation: 'set', value: '*' },
-        { header: 'access-control-allow-methods', operation: 'set', value: 'GET, HEAD, OPTIONS' },
-      ],
+      responseHeaders: corsResponseHeaders,
     },
     condition: { urlFilter: `||${domain}`, resourceTypes: headerResourceTypes },
   });
-  console.log(`[OVD] 注入 CORS 响应头规则 ruleId=${corsRuleId} domain=${domain}`);
+  console.log(`[OVD] 注入 CORS 响应头规则 ruleId=${corsRuleId} domain=${domain} allowOrigin=${corsOrigin || '*'}`);
 
   if (addRules.length === 0) return async () => {};
 
