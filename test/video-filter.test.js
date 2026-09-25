@@ -218,3 +218,33 @@ test('shouldHideRedundantDetection：同一视频有 HLS 条目时隐藏 youtube
     false
   );
 });
+
+test('mergeYouTubeHlsEntries：同一视频合并成一条，HLS 清单挂到 youtube 条目上', () => {
+  const mod = loadModule();
+  const videos = [
+    { type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=gdpvo4w0mZc', videoId: 'gdpvo4w0mZc' },
+    { type: 'hls', url: YT_HLS_URL },
+  ];
+
+  const merged = mod.mergeYouTubeHlsEntries(videos);
+  assert.equal(merged.length, 1, '同一视频只保留一行');
+  assert.equal(merged[0].type, 'youtube-adaptive');
+  assert.equal(merged[0].hlsManifestUrl, YT_HLS_URL);
+});
+
+test('mergeYouTubeHlsEntries：不相关条目与无对应 youtube 条目的 HLS 都保持原样', () => {
+  const mod = loadModule();
+  const others = [
+    { type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=other1', videoId: 'other1' },
+    { type: 'hls', url: YT_HLS_URL },
+    { type: 'hls', url: 'https://cdn.example.com/x.m3u8' },
+  ];
+
+  const merged = mod.mergeYouTubeHlsEntries(others);
+  // other1 没有对应 HLS；YouTube HLS 也找不到对应 youtube 条目 → 三条都保留
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].hlsManifestUrl, undefined);
+
+  // 非数组输入安全
+  assert.deepEqual(mod.mergeYouTubeHlsEntries(null), []);
+});
