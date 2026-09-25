@@ -1,4 +1,5 @@
 import { injectHeaders } from '../header-injector.js';
+import { resolveSaveAs } from '../save-location.js';
 import { browserInfo } from '../../lib/browser-compat.module.js';
 
 export function extFromUrl(url) {
@@ -17,7 +18,7 @@ export async function submitDirectDownload({ url, filenameNoExt, headers, type }
   console.log(`[OVD] direct download${type === 'audio' ? ' (audio)' : ''} filename="${filename}" url=${url} browser=${browserInfo.name}`);
 
   const cleanupRules = await injectHeaders(url, headers);
-  const options = { filename, saveAs: false, url };
+  const options = { filename, saveAs: await resolveSaveAs(), url };
 
   return new Promise((resolve, reject) => {
     chrome.downloads.download(options, (downloadId) => {

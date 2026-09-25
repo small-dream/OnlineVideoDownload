@@ -156,3 +156,142 @@ test('DASH 分片失败超阈值时中止下载且不触发 blob 下载', async 
   );
   assert.equal(blobDownloads, 0);
 });
+
+// ---------------------------------------------------------------
+// 第三波 3.3：防盗链请求头注入、多 Period、字节区间
+// ---------------------------------------------------------------
+
+function createPipelineStub(record) {
+  return {
+    async downloadHlsSegments(urls, options) {
+      const buffers = [];
+      for (const url of urls) {
+        buffers.push(await options.fetchBuffer(url, typeof url === 'object' ? url.byteRange : null));
+      }
+      return { buffers, failedCount: 0, retriedCount: 0 };
+    },
+    hlsFetchBuffer(url, headers, options) {
+      record.push({
+        headers,
+        options: options || {},
+        url: typeof url === 'object' ? url.url : url,
+      });
+      return Promise.resolve(bufferOf(2));
+    },
+    hlsFetchText() {
+      return Promise.resolve('<MPD></MPD>');
+    },
+  };
+}
+
+test('DASH 下载通过 background 注入 Referer/CORS 规则并在结束后清理', async () => {
+  const events = [];
+  const record = [];
+  const strategy = loadDashStrategy().createDashStrategy({
+    hlsPipeline: createPipelineStub(record),
+    injectRequestHeaders: async (url, headers) => {
+      events.push({ headers, type: 'inject', url });
+      return async () => events.push({ type: 'cleanup' });
+    },
+    mpdParser: {
+      parseMpdManifest: () => ({ adaptations: [{ contentType: 'video' }], duration: 10 }),
+      selectBestVideoRepresentation: () => ({
+        id: 'v',
+        initialization: 'https://cdn.example.com/init.mp4',
+        segments: [{ url: 'https://cdn.example.com/v1.m4s' }],
+      }),
+    },
+    triggerBlobDownload: () => {},
+  });
+
+  await strategy.download({
+    requestHeaders: { Referer: 'https://movie.example.com/play/1' },
+    title: 'Demo',
+    type: 'dash',
+    url: 'https://cdn.example.com/manifest.mpd',
+  }, {
+    progressReporter: { progress() {}, status() {} },
+  });
+
+  assert.deepEqual(events.map((event) => event.type), ['inject', 'cleanup']);
+  assert.deepEqual(events[0].headers, { Referer: 'https://movie.example.com/play/1' });
+  assert.ok(record.some((call) => call.url === 'https://cdn.example.com/init.mp4'));
+  assert.ok(record.some((call) => call.url === 'https://cdn.example.com/v1.m4s'));
+});
+
+test('DASH 下载把分片 byteRange 透传给请求（Range 头）', async () => {
+  const record = [];
+  const strategy = loadDashStrategy().createDashStrategy({
+    hlsPipeline: createPipelineStub(record),
+    mpdParser: {
+      parseMpdManifest: () => ({ adaptations: [{ contentType: 'video' }], duration: 10 }),
+      selectBestVideoRepresentation: () => ({
+        id: 'v',
+        initialization: 'https://cdn.example.com/v.mp4',
+        initializationRange: { end: 799, length: 800, start: 0 },
+        segments: [{ byteRange: { end: 1999, length: 1000, start: 1000 }, url: 'https://cdn.example.com/v.mp4' }],
+      }),
+    },
+    triggerBlobDownload: () => {},
+  });
+
+  await strategy.download({
+    title: 'Demo',
+    type: 'dash',
+    url: 'https://cdn.example.com/manifest.mpd',
+  }, {
+    progressReporter: { progress() {}, status() {} },
+  });
+
+  const [initCall, segmentCall] = record;
+  assert.deepEqual(initCall.options.range, { end: 799, length: 800, start: 0 });
+  assert.deepEqual(segmentCall.options.range, { end: 1999, length: 1000, start: 1000 });
+});
+
+test('DASH 多 Period 清单按顺序拼接分片并提示用户', async () => {
+  const record = [];
+  const statuses = [];
+  const strategy = loadDashStrategy().createDashStrategy({
+    hlsPipeline: createPipelineStub(record),
+    mpdParser: {
+      collectRepresentationsAcrossPeriods: (manifest, contentType) => ({
+        hasMultipleInitializations: contentType === 'video',
+        representations: contentType === 'video'
+          ? [
+            { id: 'v1', initialization: 'https://cdn.example.com/p0-init.mp4', segments: [{ url: 'https://cdn.example.com/p0-1.m4s' }] },
+            { id: 'v2', initialization: 'https://cdn.example.com/p1-init.mp4', segments: [{ url: 'https://cdn.example.com/p1-1.m4s' }] },
+          ]
+          : [],
+      }),
+      parseMpdManifest: () => ({
+        adaptations: [{ contentType: 'video' }],
+        duration: 20,
+        isMultiPeriod: true,
+        periods: [{ adaptations: [{ contentType: 'video' }] }, { adaptations: [{ contentType: 'video' }] }],
+      }),
+    },
+    triggerBlobDownload: () => {},
+  });
+
+  await strategy.download({
+    title: 'Demo',
+    type: 'dash',
+    url: 'https://cdn.example.com/manifest.mpd',
+  }, {
+    progressReporter: {
+      progress() {},
+      status(message) {
+        statuses.push(message);
+      },
+    },
+  });
+
+  const fetchedUrls = record.map((call) => call.url);
+  assert.deepEqual(fetchedUrls, [
+    'https://cdn.example.com/p0-init.mp4',
+    'https://cdn.example.com/p0-1.m4s',
+    'https://cdn.example.com/p1-init.mp4',
+    'https://cdn.example.com/p1-1.m4s',
+  ]);
+  assert.ok(statuses.some((message) => /Period/.test(message)));
+});

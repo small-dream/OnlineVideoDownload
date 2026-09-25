@@ -383,6 +383,10 @@ function populatePopupSettings(settings = {}) {
   const downloadSubdirInput = document.getElementById('popupDownloadSubdir');
   const historyRetentionSelect = document.getElementById('popupHistoryRetention');
   const debugLoggingInput = document.getElementById('popupDebugLogging');
+  const minDurationInput = document.getElementById('popupMinDuration');
+  const minSizeInput = document.getElementById('popupMinSize');
+  const domainBlacklistInput = document.getElementById('popupDomainBlacklist');
+  const askSaveLocationInput = document.getElementById('popupAskSaveLocation');
 
   if (concurrentInput && settings.concurrentDownloadLimit != null) {
     concurrentInput.value = String(settings.concurrentDownloadLimit);
@@ -405,6 +409,18 @@ function populatePopupSettings(settings = {}) {
   if (debugLoggingInput && settings.debugLogging != null) {
     debugLoggingInput.checked = !!settings.debugLogging;
   }
+  if (minDurationInput && settings.minVideoDurationSec != null) {
+    minDurationInput.value = String(settings.minVideoDurationSec);
+  }
+  if (minSizeInput && settings.minVideoSizeMb != null) {
+    minSizeInput.value = String(settings.minVideoSizeMb);
+  }
+  if (domainBlacklistInput && settings.domainBlacklist != null) {
+    domainBlacklistInput.value = String(settings.domainBlacklist);
+  }
+  if (askSaveLocationInput && settings.askSaveLocation != null) {
+    askSaveLocationInput.checked = !!settings.askSaveLocation;
+  }
 }
 
 function wirePopupSettings() {
@@ -421,6 +437,10 @@ function wirePopupSettings() {
     ['popupDownloadSubdir', 'downloadSubdir', (el) => el.value.replace(/[\\:*?"<>|]/g, '').trim()],
     ['popupHistoryRetention', 'historyRetentionDays', (el) => parseInt(el.value, 10)],
     ['popupDebugLogging', 'debugLogging', (el) => el.checked],
+    ['popupMinDuration', 'minVideoDurationSec', (el) => Math.max(0, parseInt(el.value, 10) || 0)],
+    ['popupMinSize', 'minVideoSizeMb', (el) => Math.max(0, parseInt(el.value, 10) || 0)],
+    ['popupDomainBlacklist', 'domainBlacklist', (el) => el.value.trim()],
+    ['popupAskSaveLocation', 'askSaveLocation', (el) => el.checked],
   ];
 
   controls.forEach(([id, key, readValue]) => {
@@ -1033,6 +1053,16 @@ function renderTasks(tasks = []) {
     `;
 
     const actions = item.querySelector('.task-actions');
+
+    if ((status === 'running' || status === 'retrying') && task.tabId != null) {
+      const cancelButton = document.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = 'task-action-btn danger';
+      cancelButton.textContent = '取消';
+      cancelButton.addEventListener('click', () => cancelRunningTask(task, cancelButton));
+      actions?.appendChild(cancelButton);
+    }
+
     if ((status === 'failed' || status === 'interrupted') && task.taskId) {
       const retryButton = document.createElement('button');
       retryButton.type = 'button';
@@ -1086,6 +1116,55 @@ function formatTaskDate(timestamp) {
   const h = String(date.getHours()).padStart(2, '0');
   const m = String(date.getMinutes()).padStart(2, '0');
   return `${h}:${m}`;
+}
+
+/**
+ * 取消进行中的任务。
+ * 内容侧任务（Bilibili/DASH/YouTube 录制）通过 ABORT 消息中止；
+ * 已有 downloadId 的后台任务退回 chrome.downloads.cancel。
+ */
+async function cancelRunningTask(task = {}, button = null) {
+  if (button) {
+    button.disabled = true;
+  }
+
+  try {
+    let cancelled = false;
+
+    if (task.tabId != null) {
+      const response = await sendTabMessageAsync(task.tabId, {
+        taskKey: task.taskKey || '',
+        traceId: task.traceId || '',
+        type: MSG.ABORT_SOURCE_DOWNLOAD || 'ABORT_SOURCE_DOWNLOAD',
+        videoUrl: task.videoUrl || '',
+      }).catch(() => null);
+      cancelled = !!response?.cancelled || !!response?.hlsCancelled;
+    }
+
+    if (!cancelled && task.downloadId != null && chrome.downloads?.cancel) {
+      await new Promise((resolve) => chrome.downloads.cancel(task.downloadId, resolve));
+      cancelled = true;
+    }
+
+    if (cancelled && task.taskId) {
+      await sendRuntimeMessageAsync({
+        taskId: task.taskId,
+        type: MSG.DELETE_DOWNLOAD_TASK || 'DELETE_DOWNLOAD_TASK',
+      }).catch(() => null);
+    }
+
+    showMessage(
+      cancelled ? '任务已取消。' : '该任务当前无法取消，可能已在写入文件。',
+      cancelled ? 'success' : 'info'
+    );
+    await loadDownloadTasks({ renderTaskList: true });
+  } catch (err) {
+    showMessage(`取消失败: ${err.message}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
 }
 
 async function retryTask(taskId, button) {
@@ -1192,6 +1271,7 @@ function createVideoItem(video, index) {
         ${buildFormatPillHtml(video, typeClass, typeLabel)}
         ${buildYouTubeControlsHtml(video, index)}
         ${buildBilibiliControlsHtml(video, index)}
+        ${buildHlsControlsHtml(video, index)}
         ${buildMetaHtml(video)}
         <button class="dl-btn" data-index="${index}" ${isDrm ? 'disabled' : ''}>
           <span class="dl-label">${isDrm ? '受保护' : '下载'}</span>
@@ -1228,6 +1308,7 @@ function createVideoItem(video, index) {
 
   wireYouTubeControls(item, index);
   wireBilibiliControls(item, index);
+  wireHlsControls(item, index);
   wireThumbPreview(item, index);
 
   const btn = item.querySelector('.dl-btn');
@@ -1325,6 +1406,10 @@ function buildNoteHtml(video) {
     return '<div class="note-text">Blob 资源会先提取真实数据，再触发保存。</div>';
   }
 
+  if (video.type === 'hls') {
+    return '<div class="note-text">HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。</div>';
+  }
+
   if (video.type === 'audio') {
     return '<div class="note-text">音频资源会走后台直链下载流程。</div>';
   }
@@ -1410,6 +1495,100 @@ function wireYouTubeControls(item, index) {
     }
 
     refreshVideoMeta(item, index);
+  });
+}
+
+/**
+ * HLS 清晰度选择：Master Playlist 暴露的码率变体，选择后按 variantUrl 精确下载。
+ */
+function buildHlsControlsHtml(video, index) {
+  if (video.type !== 'hls') {
+    return '';
+  }
+
+  return `
+    <div class="hls-controls" data-index="${index}">
+      <label class="control-group">
+        <span class="control-label">清晰度</span>
+        <select class="control-select hls-quality-select" data-index="${index}">
+          <option value="" selected>自动（最高画质）</option>
+        </select>
+      </label>
+    </div>
+  `;
+}
+
+function wireHlsControls(item, index) {
+  const video = currentVideos[index];
+  if (!video || video.type !== 'hls') {
+    return;
+  }
+
+  const qualitySelect = item.querySelector('.hls-quality-select');
+  if (!qualitySelect) {
+    return;
+  }
+
+  let qualitiesFetched = false;
+  let fetchInProgress = false;
+
+  async function fetchAndPopulateQualities() {
+    if (qualitiesFetched || fetchInProgress) {
+      return;
+    }
+
+    fetchInProgress = true;
+    qualitySelect.disabled = true;
+
+    try {
+      const response = await sendTabMessageAsync(currentTabId, {
+        frameId: video.frameId,
+        type: MSG.HLS_FETCH_QUALITIES || 'HLS_FETCH_QUALITIES',
+        headers: currentVideos[index]?.requestHeaders || {},
+        m3u8Url: video.url,
+      });
+
+      if (!response?.ok || !response.qualities?.length) {
+        return;
+      }
+
+      qualitySelect.innerHTML = '<option value="">自动（最高画质）</option>';
+
+      for (const quality of response.qualities) {
+        const option = document.createElement('option');
+        option.value = quality.url;
+        option.dataset.label = quality.label;
+        option.textContent = quality.detail ? `${quality.label}（${quality.detail}）` : quality.label;
+        qualitySelect.appendChild(option);
+      }
+
+      const savedVariant = currentVideos[index]?.downloadOptions?.variantUrl;
+      if (savedVariant && response.qualities.some((quality) => quality.url === savedVariant)) {
+        qualitySelect.value = savedVariant;
+      }
+
+      qualitiesFetched = true;
+      console.log(`[OVD] HLS 画质列表已加载 count=${response.qualities.length}`);
+    } catch (err) {
+      console.warn(`[OVD] HLS 画质获取失败: ${err.message}`);
+    } finally {
+      fetchInProgress = false;
+      qualitySelect.disabled = false;
+    }
+  }
+
+  qualitySelect.addEventListener('focus', fetchAndPopulateQualities);
+  qualitySelect.addEventListener('click', fetchAndPopulateQualities);
+
+  void fetchAndPopulateQualities();
+
+  qualitySelect.addEventListener('change', () => {
+    const option = qualitySelect.selectedOptions?.[0];
+    currentVideos[index].downloadOptions = {
+      ...(currentVideos[index].downloadOptions || {}),
+      quality: option?.dataset?.label || '',
+      variantUrl: qualitySelect.value || '',
+    };
   });
 }
 

@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.16.0
+> Version: 1.17.0
 > Last Updated: 2026-09-25
 
 ## Goals
@@ -91,6 +91,14 @@ Public surface:
 
 - `parseHlsPlaylist`
 - `selectBestHlsStream`
+- `parseHlsMasterPlaylist(m3u8, baseUrl)`
+- `selectHlsVariant(variantsOrMaster, baseUrl, { quality })`
+- `findMatchingAudioRendition(master, variant)`
+- `resolveHlsKeys(keyEntries, headers, options)`
+- `parseHlsKeyEntries(m3u8, baseUrl)`
+- `parseByteRange(value)` / `toRangeHeader(byteRange)`
+- `ivFromSequence(sequence)`
+- `createAbortError(message)`
 - `parseHlsEncryption`
 - `parseAttributeList`
 - `parseHlsIV`
@@ -106,10 +114,16 @@ Public surface:
 
 Notes:
 
+- `parseHlsMasterPlaylist` 列出 Master Playlist 的全部码率变体（`{ url, label, detail, bandwidth, width, height, codecs, audioGroupId }`）与 `EXT-X-MEDIA` 独立音轨；`selectHlsVariant(variants, baseUrl, { quality })` 接受变体 URL、`720p` 这类标签、高度数字或 `auto`/`best`，找不到时回退到最高码率。
+- `parseHlsPlaylist` 返回富分片对象：`{ url, seq, duration, byteRange, keyIndex, discontinuity }`，并附带 `keys`（`EXT-X-KEY` 轮换列表）、`initSegmentByteRange`、`mediaSequence`、`discontinuityCount`、`hasEndList`、`isLive`、`playlistType`、`totalDuration`。`segments` 已由字符串数组变为对象数组，`downloadHlsSegments`/`inferHlsOutputProfile`/`extFromUrl` 同时兼容两种形式。
+- 分片下载支持 `EXT-X-BYTERANGE`（含省略偏移的隐式续接）与 `Range` 头：`downloadHlsSegments` 以 `fetchBuffer(url, byteRange)` 调用取数函数，`hlsFetchBuffer(url, headers, { range })` 会追加 `Range: bytes=start-` 形式的请求头，并接受 `206 Partial Content` 响应。
+- 加密支持密钥轮换与 IV 正确派生：`resolveHlsKeys` 逐个抓取并导入 `EXT-X-KEY` 密钥（非 AES-128 抛 `HLS_UNSUPPORTED_ENCRYPTION`，抓取失败抛 `HLS_KEY_FETCH_FAILED`）；`decryptHlsSegments(buffers, { keys, segments })` 按 `segment.keyIndex` 取密钥，无显式 IV 时用 `ivFromSequence(segment.seq)`（`EXT-X-MEDIA-SEQUENCE` + 下标）派生，`METHOD=NONE` 的分片原样保留。
 - `options.credentials` 用于页面上下文请求：content script 中带 Cookie 的跨域请求若被目标站 CORS 拒绝（TypeError），`hlsFetch` 会自动去掉 credentials 重试一次，保证兼容只返回 `Access-Control-Allow-Origin: *` 的 CDN。
 - `parseHlsEncryption(m3u8, baseUrl, headers, options)` 会把同样的 options 透传给密钥请求。
 - 加密相关错误均为 fail-fast：`parseHlsEncryption` 在密钥获取失败（`HLS_KEY_FETCH_FAILED`）或加密方式非 AES-128/NONE（`HLS_UNSUPPORTED_ENCRYPTION`）时抛错；`decryptHlsSegments` 解密失败抛 `HLS_SEGMENT_DECRYPT_FAILED`，绝不回退使用密文。
 - `downloadHlsSegments` 是 background/content 共用的分片下载循环：失败分片按 `HLS_SEGMENT_RETRY_DELAYS` 指数退避重试（最多 3 次），最终失败数超过 `HLS_MAX_FAILED_RATIO`（分片总数 ≤ 10 时零容忍）时抛 `HLS_SEGMENT_DOWNLOAD_FAILED` 中止任务，不产出含空洞的文件；未超阈值时通过 `onProgress(done, total, { failedCount, retriedCount })` 上报失败/重试统计。
+- 体积守卫：累计下载字节超过 `options.maxTotalBytes`（默认 `constants.MAX_IN_PAGE_MERGE_BYTES`，1.5 GB）时抛 `HLS_OUTPUT_TOO_LARGE`，避免浏览器内合并 OOM。
+- 取消：`options.signal` 为 `AbortSignal`，任一批次开始前检测到 `aborted` 即抛 `DOWNLOAD_ABORTED`（`createAbortError()`）。
 
 ### `lib/ovd-logger.js`
 
@@ -214,6 +228,8 @@ Responsibilities:
 - Parse DASH MPD manifests into structured representations.
 - Select the best video and audio Representation by bandwidth and codec.
 - Resolve segment URLs from SegmentTemplate or SegmentList.
+- Resolve `$Number%05d$` / `$Time%08d$` 宽度格式符与 `$$` 转义。
+- Group adaptations by Period and expose per-representation byte ranges.
 - Expose helpers through `globalThis.__OVD_MPD_PARSER__`.
 
 Public surface:
@@ -221,8 +237,17 @@ Public surface:
 - `parseMpdManifest(xmlText, baseUrl)`
 - `selectBestVideoRepresentation(adaptationSet)`
 - `selectBestAudioRepresentation(adaptationSet)`
+- `collectRepresentationsAcrossPeriods(manifest, contentType)`
+- `formatSegmentTemplate(template, variables)` / `formatTemplateNumber(value, widthSpec)`
+- `parseSegmentTimeline(timelineEl, { periodDuration, timescale })`
+- `parseByteRange(value)` / `toRangeHeader(byteRange)`
 - `resolveSegmentUrl(representation, segmentIndex, baseUrl)`
 
+Notes:
+
+- 无 `DOMParser` 的环境（Node 单元测试）自动退回内置最小 XML 解析器，因此 `test/mpd-parser.test.js` 在 Node 下真实执行而非 skip。
+- 返回结构新增 `periods: [{ id, index, start, duration, adaptations }]` 与 `isMultiPeriod`；`adaptations` 仍为扁平列表，且每项附带 `periodIndex` / `periodId` / `start`。
+- `SegmentTimeline` 支持 `r="-1"`（重复到 Period 结束，依赖 `Period@duration`）；`SegmentURL@mediaRange`/`indexRange`、`Initialization@range`、`SegmentBase@indexRange` 解析为 `{ start, end, length }`，开放区间生成 `bytes=start-`。
 ### `lib/settings-store.js`
 
 Responsibilities:
@@ -238,6 +263,28 @@ Public surface:
 - `getSettings()`
 - `getCachedSettings()`
 - `updateSettings(partialSettings)`
+
+Defaults now include `domainBlacklist`（域名黑名单，逗号/换行分隔）、`minVideoDurationSec`、`minVideoSizeMb`（0 = 不限）与 `askSaveLocation`（每次询问保存位置）。
+
+### `lib/video-filter.js`
+
+Responsibilities:
+
+- 按用户设置过滤检测结果，压掉广告片段、音效等噪声条目。
+- 域名黑名单（子域名匹配，blob 条目回退到所属页面域名）、最小时长、最小体积。
+- 阈值过滤只作用于通用嗅探条目，结构化来源（YouTube/Bilibili）永远显示。
+- Expose helpers through `globalThis.__OVD_VIDEO_FILTER__`.
+
+Public surface:
+
+- `shouldFilterVideo(video, settings, context) -> { filtered, reason }`
+- `filterVideos(videos, settings, context)`
+- `parseDomainList(value)` / `normalizeDomain(input)` / `isBlacklistedHost(host, domains)` / `hostOf(url)`
+
+Notes:
+
+- 过滤在 `background/service-worker.js#getVisibleVideosForTab` 读取时应用，因此改设置后无需重新检测即可生效，徽章计数与 popup 列表始终一致。
+- 时长/体积未知（0 或缺失）时不过滤，避免误杀。
 
 ## Page Context Runtime
 
@@ -474,6 +521,27 @@ Responsibilities:
 - Used when page-context delegation is unavailable (no tab/content script), fails, or the source has no tab context.
 - Reuse `lib/hls-pipeline.js` for parsing and decryption logic.
 - Inject temporary `Referer` / `Origin` request headers plus permissive CORS response headers via `injectHeaders` before fetching.
+- Master Playlist 画质选择（`options.quality`）、`EXT-X-BYTERANGE`/`Range`、密钥轮换、直播（无 `ENDLIST`）显式提示，以及独立音轨（`EXT-X-MEDIA`）通过 `lib/bilibili-muxer.js` 合并进视频。
+- 体积超过 `MAX_IN_PAGE_MERGE_BYTES` 时抛 `HLS_OUTPUT_TOO_LARGE`，不进入合并。
+
+### Download Queue
+
+File: [background/download-queue.js](D:/github/OnlineVideoDownload/background/download-queue.js)
+
+Responsibilities:
+
+- 为所有后台下载入口（直链/HLS/DASH/YouTube parse）提供统一并发上限，来源为 `concurrentDownloadLimit` 设置。
+- `handleMessage` 的 `DOWNLOAD_VIDEO` 分支先 `setLimit(settings.concurrentDownloadLimit)` 再 `run()`，超出上限的任务排队等待，长任务持续占用槽位。
+- `acquire()`/`release()` 支持限额调高后立即唤醒等待者；`run(task, { signal })` 对已取消任务抛 `DOWNLOAD_ABORTED`。
+
+### Save Location
+
+File: [background/save-location.js](D:/github/OnlineVideoDownload/background/save-location.js)
+
+Responsibilities:
+
+- `resolveSaveAs()` 读取 `askSaveLocation` 设置，供 `chrome.downloads.download({ saveAs })` 使用。
+- 被 `direct-download-strategy`、`offscreen-download`（HLS blob 落盘）与 `service-worker.downloadBlobData` 共用。
 
 ### Download History Store
 
@@ -605,6 +673,8 @@ Examples:
 - `SET_TAB_MUTED`
 - `CLEAR_TAB_VIDEOS`
 - `HLS_PROGRESS_UPDATE`
+- `INJECT_PAGE_SCRIPTS`（content 请求 background 用 `chrome.scripting.executeScript({ world: 'MAIN' })` 注入页面脚本）
+- `INJECT_DOWNLOAD_HEADERS` / `RELEASE_DOWNLOAD_HEADERS`（content 侧 DASH 下载借用 background 的 DNR 规则）
 - `GET_DOWNLOAD_HISTORY`
 - `CLEAR_DOWNLOAD_HISTORY`
 - `OPEN_DOWNLOAD_FOLDER`
@@ -615,6 +685,8 @@ Notes:
 - Source-download lifecycle payloads now include both `traceId` and `taskKey` so popup UI can keep the correct item in a pending/completed state across async content-side workflows.
 - Bilibili in-page muxing now forwards `BILIBILI_STREAM_PROGRESS` through background so the popup can show the fetching/merging percentage.
 - Download completion now passes `downloadId` (browser download ID) through the history record so the store can deduplicate entries and the options page can open the download folder.
+- `INJECT_PAGE_SCRIPTS` 字段为 `files`（`injected/*` 与 `lib/message-types.js` 的有序列表）；background 用 `sender.frameId` 定向到发起注入的 frame，CSP 严格站点不再依赖 `<script src>`（DOM 注入保留为回退）。
+- `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
 
 ### Background -> Content / Popup
 
@@ -628,6 +700,7 @@ Examples:
 - `HLS_DOWNLOAD_BLOB_CHUNK`
 - `HLS_DOWNLOAD_BLOB_FINISH`
 - `HLS_DOWNLOAD_DELEGATE`
+- `ABORT_SOURCE_DOWNLOAD`
 - `DASH_DOWNLOAD_DELEGATE`
 - `BILIBILI_STREAM_PROGRESS`
 - `SOURCE_DOWNLOAD_STARTED`
@@ -635,7 +708,8 @@ Examples:
 
 Notes:
 
-- `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options.fetchOptions`（默认 `{ credentials: 'include' }`）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount }`，任务据此写入真实 `downloadId`。
+- `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options`（`fetchOptions` 默认 `{ credentials: 'include' }`，用户选定的画质以 `quality`（变体 URL 或标签）透传）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount, quality, isLive, audioMerged }`，任务据此写入真实 `downloadId`。
+- `ABORT_SOURCE_DOWNLOAD` 由 popup 任务视图发往 content，字段 `taskKey` / `traceId` / `videoUrl`（任一匹配即可）。content 侧两种任务都会响应：`download-coordinator` 的内容任务（Bilibili/DASH/YouTube 录制）会 `abort()` 其 `AbortController` 并广播 `SOURCE_DOWNLOAD_RESULT{ ok:false, error:'已取消' }`；HLS 委托下载由 `message-router` 按 `taskMeta.taskKey`/`taskId` 保存的控制器中止，返回 `{ hlsCancelled: true }`。
 - 委托下载期间 background 通过 `injectHeaders(url, headers, { corsOrigin })` 注册临时 DNR 规则，让页面上下文的带 Cookie 请求能通过 CDN 的 CORS 校验；content 无响应或返回失败时，同一任务自动回退到 `HlsFetcher`。
 
 ### Popup -> Content
@@ -643,11 +717,13 @@ Notes:
 Examples:
 
 - `BILIBILI_FETCH_QUALITIES`
+- `HLS_FETCH_QUALITIES`
 
 Notes:
 
 - The popup requests Bilibili quality options lazily from the content runtime using the current video's `bvid` and `cid`.
 - The content router delegates that request to `bilibili-strategy.fetchQualities()` so popup UI does not need to duplicate Bilibili API logic.
+- HLS 画质同理：popup 用 `{ m3u8Url, headers }` 请求 `HLS_FETCH_QUALITIES`，content 复用 `hlsDelegateHandler.fetchQualities()`（内部 `parseHlsMasterPlaylist`）返回 `{ isMaster, qualities: [{ url, label, detail, bandwidth, height }] }`；选中项以 `downloadOptions.variantUrl`（精确变体 URL）随下载请求回传。
 
 ## Content Script Load Order
 
@@ -727,6 +803,7 @@ When adding shared low-level helpers:
 | Version | Date | Changes |
 | --- | --- | --- |
 | 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. Second-wave UX pass: download completion/failure system notifications gated by `downloadNotification` (click opens the download folder via `download-notification.js`); `filenameFormat` naming rule enforced in `lib/download-path.js` (`title` / `title-quality` / `title-date`); batch download UI restored (visible per-item checkboxes, header select-all with indeterminate state, 「下载所选 (N)」 button, concurrency from `concurrentDownloadLimit`, DRM items not selectable); toolbar badge now shows the per-tab detected-video count (>99 → `99+`) via `action-badge.js` while running-task count moves to the popup tasks-button badge; downloading items show 「下载中 N%」; in-page floating feedback bar restored (`content/float-button.js`) for long tasks; errors render as friendly Chinese text via `popup-error-messages.js` (15 error-code mappings + keyword fallbacks); 「清列表」 also clears the background `VideoRegistry` via `CLEAR_TAB_VIDEOS` with popup/main-frame/subframe scope resolved by `clear-video-scope.js`. |
+| 1.17.0 | 2026-09-25 | Third-wave coverage parity with Video DownloadHelper. HLS: `parseHlsMasterPlaylist` + `selectHlsVariant` expose every variant (with `width/height/bandwidth/codecs/audioGroupId`) to a new popup clarity dropdown backed by `HLS_FETCH_QUALITIES` (selection travels as `downloadOptions.variantUrl`); the media playlist parser now returns rich segments (`seq`/`byteRange`/`keyIndex`/`discontinuity`) and handles `EXT-X-BYTERANGE`, `EXT-X-KEY` rotation, `EXT-X-MEDIA-SEQUENCE`-derived IVs, `EXT-X-MAP` byte ranges, `EXT-X-DISCONTINUITY` and `EXT-X-ENDLIST` (live playlists show a 「仅下载当前窗口」 warning instead of silently producing a truncated file); `EXT-X-MEDIA` audio renditions are muxed into the video via `bilibili-muxer` when both sides are fMP4. Streams larger than `MAX_IN_PAGE_MERGE_BYTES` abort with `HLS_OUTPUT_TOO_LARGE` (also enforced for Bilibili muxing via `BILIBILI_OUTPUT_TOO_LARGE`). DASH: `lib/mpd-parser.js` gains `$Number%05d$`/`$Time%08d$` template formatting, `mediaRange`/`indexRange`/`SegmentBase@indexRange` byte ranges, correct multi-Period grouping (`periods`, `isMultiPeriod`, `collectRepresentationsAcrossPeriods`) and `SegmentTimeline r="-1"`, plus a built-in XML fallback so the parser runs (and is tested) without `DOMParser`; the content DASH strategy injects Referer/CORS through `INJECT_DOWNLOAD_HEADERS`/`RELEASE_DOWNLOAD_HEADERS` and passes byte ranges to the fetcher. Detection: `video/mp2t`, `video/quicktime`, `video/x-matroska` and `application/octet-stream` (confirmed by extension or `Content-Disposition`) are recognised, and generic pages watch `MutationObserver` + media events instead of scanning twice. Injection: page scripts are loaded through `chrome.scripting.executeScript({ world: 'MAIN' })` (`INJECT_PAGE_SCRIPTS`) with the `<script src>` path kept as fallback. Settings: `domainBlacklist` / `minVideoDurationSec` / `minVideoSizeMb` filter noisy entries at read time via `lib/video-filter.js`, and `askSaveLocation` drives `saveAs`. Tasks: `ABORT_SOURCE_DOWNLOAD` cancels content-side tasks through `AbortController`/`DOWNLOAD_ABORTED`, the popup task list has a 取消 button, and `background/download-queue.js` applies `concurrentDownloadLimit` to every background download entry point. |
 | 1.15.0 | 2026-09-24 | HLS downloads now run in the page context first: `hls-download-strategy` delegates to `HLS_DOWNLOAD_DELEGATE` so requests carry page cookies/origin/`Sec-Fetch` (fixes CDN WAF 403s seen from service-worker fetches), echoes the tab origin in CORS response headers via `injectHeaders(url, headers, { corsOrigin })`, adds optional `credentials` support to `hlsFetch`/`hlsFetchText`/`hlsFetchBuffer`/`parseHlsEncryption`, returns the real `downloadId` from the delegated blob download, and falls back to `HlsFetcher` when the content script is unavailable or fails. |
 | 1.14.1 | 2026-06-12 | Fixed subdirectory setting not working for content-script blob downloads (HLS, blob, DASH). `triggerBlobDownload` now delegates to service worker via `DOWNLOAD_BLOB_DATA` message so `chrome.downloads.download` handles the subdirectory path correctly; falls back to `<a download>` only when the service worker is unavailable. |
 | 1.14.0 | 2026-06-12 | Added `downloadSubdir` setting (default `OnlineVideoDownload`) to save downloads into a subdirectory under Chrome's default download folder. `Downloader._buildFilenameBase` and `downloadBlobData` now prepend the configured subdirectory. |

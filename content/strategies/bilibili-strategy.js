@@ -8,6 +8,8 @@
   const messageTypes = globalThis.__OVD_MESSAGE_TYPES__?.MESSAGE_TYPES || {};
   const MSG = messageTypes;
   const qualityUtils = globalThis.__OVD_BILIBILI_QUALITY_UTILS__ || {};
+  const constants = globalThis.__OVD_CONSTANTS__ || {};
+  const DEFAULT_MAX_MERGE_BYTES = 1500 * 1024 * 1024;
 
   function createBilibiliStrategy(options = {}) {
     const {
@@ -183,6 +185,31 @@
       );
 
       console.log(`[OVD] Bilibili 视频流大小=${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB 音频流大小=${(audioBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+
+      // 内容侧取消通道：数据已回传但尚未合并时，取消仍然有效
+      if (context?.signal?.aborted) {
+        const aborted = new Error('下载已取消');
+        aborted.code = 'DOWNLOAD_ABORTED';
+        throw aborted;
+      }
+
+      // 与 DASH/HLS 一致的体积守卫：超过上限时明确报错，
+      // 避免浏览器内合并直接 OOM 崩掉整个页面（此前仅打日志）。
+      const maxMergeBytes = constants.MAX_IN_PAGE_MERGE_BYTES || DEFAULT_MAX_MERGE_BYTES;
+      const estimatedTotal = videoBuffer.byteLength + audioBuffer.byteLength;
+      if (maxMergeBytes > 0 && estimatedTotal > maxMergeBytes) {
+        const tooLarge = new Error(
+          `Bilibili 视频体积过大 (${(estimatedTotal / 1024 / 1024).toFixed(0)} MB，`
+          + `上限 ${Math.round(maxMergeBytes / 1024 / 1024)} MB)，浏览器内合并可能失败。`
+          + '请降低清晰度后重试。'
+        );
+        tooLarge.code = 'BILIBILI_OUTPUT_TOO_LARGE';
+        tooLarge.totalBytes = estimatedTotal;
+        tooLarge.maxTotalBytes = maxMergeBytes;
+        progressReporter?.status?.(tooLarge.message);
+        throw tooLarge;
+      }
+
       getFloatButton()?.showMessage('正在合并 Bilibili 视音频...', false, 0);
       progressReporter?.status('正在合并 Bilibili 视音频...');
 

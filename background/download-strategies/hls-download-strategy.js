@@ -24,7 +24,7 @@ async function resolveTabOrigin(tabId) {
  * 可避开 CDN（Cloudflare 等）针对扩展后台裸请求的 403 拦截。
  * 返回 null 表示委托不可用或失败，由调用方回退到 service worker 下载。
  */
-async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta, frameId = null }) {
+async function delegateHlsDownloadToPage({ context, headers, m3u8Url, options = {}, taskMeta, frameId = null }) {
   const tabId = context?.tabId;
   if (!tabId || !m3u8Url) {
     return null;
@@ -46,7 +46,10 @@ async function delegateHlsDownloadToPage({ context, headers, m3u8Url, taskMeta, 
       m3u8Url,
       filename: context.filenameBase,
       headers,
-      options: { fetchOptions: { credentials: 'include' } },
+      options: {
+        fetchOptions: { credentials: 'include' },
+        ...options,
+      },
       taskMeta,
     }, undefined, frameId != null ? { frameId } : undefined);
 
@@ -83,6 +86,15 @@ export function createHlsDownloadStrategy() {
       return videoInfo?.type === 'hls';
     },
     async download(videoInfo, context) {
+      // 用户选择的画质（variantUrl 精确到具体变体，quality 为标签兜底）
+      const selectedQuality = videoInfo?.downloadOptions?.variantUrl
+        || videoInfo?.downloadOptions?.quality
+        || '';
+      const delegateOptions = {
+        fetchOptions: { credentials: 'include' },
+        ...(selectedQuality ? { quality: selectedQuality } : {}),
+      };
+
       const emitProgress = (percent, payload = {}) => {
         const msg = {
           percent,
@@ -114,6 +126,7 @@ export function createHlsDownloadStrategy() {
         context,
         headers: videoInfo?.requestHeaders || {},
         m3u8Url: videoInfo?.url,
+        options: delegateOptions,
         taskMeta: context.taskMeta || {},
         frameId: videoInfo?.frameId,
       });
@@ -128,7 +141,8 @@ export function createHlsDownloadStrategy() {
         videoInfo?.requestHeaders || {},
         onProgress,
         context.tabId,
-        context.taskMeta || {}
+        context.taskMeta || {},
+        delegateOptions
       );
       emitProgress(100, { phase: 'browser-handoff' });
       return result;

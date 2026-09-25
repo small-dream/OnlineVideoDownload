@@ -26,6 +26,102 @@ function loadRouter() {
   return globalThis.__OVD_MESSAGE_ROUTER__;
 }
 
+// ---------------------------------------------------------------
+// 第三波 3.9：内容侧任务取消通道
+// ---------------------------------------------------------------
+
+function setupBackgroundRouter(options = {}) {
+  let listener = null;
+  globalThis.__OVD_safeRuntimeMessage = () => {};
+  globalThis.window = { addEventListener() {} };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: {
+        addListener(handler) {
+          listener = handler;
+        },
+      },
+    },
+  };
+
+  const router = loadRouter().createMessageRouter(options);
+  router.start();
+
+  return {
+    send(message) {
+      return new Promise((resolve) => {
+        listener(message, {}, resolve);
+      });
+    },
+  };
+}
+
+test('ABORT_SOURCE_DOWNLOAD 转发取消请求到内容侧任务', async () => {
+  const cancelled = [];
+  const harness = setupBackgroundRouter({
+    cancelSourceDownload: (target) => {
+      cancelled.push(target);
+      return { cancelled: true, ok: true };
+    },
+  });
+
+  const response = await harness.send({
+    taskKey: 'bili:123:456',
+    traceId: 'trace-9',
+    type: 'ABORT_SOURCE_DOWNLOAD',
+    videoUrl: 'https://www.bilibili.com/video/BV1',
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.cancelled, true);
+  assert.deepEqual(cancelled, [{
+    taskKey: 'bili:123:456',
+    traceId: 'trace-9',
+    videoUrl: 'https://www.bilibili.com/video/BV1',
+  }]);
+});
+
+test('ABORT_SOURCE_DOWNLOAD 中止 HLS 委托下载的 AbortController', async () => {
+  let seenSignal = null;
+  const harness = setupBackgroundRouter({
+    cancelSourceDownload: () => ({ cancelled: false, ok: false, error: '未找到可取消的任务' }),
+    hlsDelegateHandler: {
+      handle(_url, _filename, _headers, _taskMeta, options = {}) {
+        seenSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            const err = new Error('下载已取消');
+            err.code = 'DOWNLOAD_ABORTED';
+            reject(err);
+          });
+        });
+      },
+    },
+  });
+
+  const delegated = harness.send({
+    m3u8Url: 'https://cdn.example.com/index.m3u8',
+    taskMeta: { taskKey: 'hls:task-1', videoUrl: 'https://cdn.example.com/index.m3u8' },
+    type: 'HLS_DOWNLOAD_DELEGATE',
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(seenSignal, 'HLS 委托下载必须拿到 AbortSignal');
+  assert.equal(seenSignal.aborted, false);
+
+  const abortResponse = await harness.send({
+    taskKey: 'hls:task-1',
+    type: 'ABORT_SOURCE_DOWNLOAD',
+  });
+
+  assert.equal(abortResponse.hlsCancelled, true);
+  assert.equal(seenSignal.aborted, true);
+
+  const delegateResponse = await delegated;
+  assert.equal(delegateResponse.ok, false);
+  assert.match(delegateResponse.error, /取消/);
+});
+
 test('YouTube page stream progress keeps task metadata when forwarded', () => {
   const emittedMessages = [];
   let messageHandler = null;

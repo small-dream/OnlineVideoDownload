@@ -698,6 +698,25 @@ body {
   accent-color: #0d8fd3;
 }
 
+.settings-row-stacked {
+  align-items: flex-start;
+  flex-direction: column;
+  padding: 10px 12px;
+}
+
+.settings-row textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 6px;
+  color: #2f333a;
+  font-family: inherit;
+  font-size: 12px;
+  background: #f7f7f8;
+  border: 1px solid #cdd0d5;
+  border-radius: 6px;
+  resize: vertical;
+}
+
 .video-title-input {
   width: 100%;
   min-height: 28px;

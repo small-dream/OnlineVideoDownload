@@ -2,6 +2,7 @@ import '../lib/byte-utils.js';
 import '../lib/constants.js';
 import '../lib/download-path.js';
 import '../lib/message-types.js';
+import { resolveSaveAs } from './save-location.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const constants = globalThis.__OVD_CONSTANTS__ || {};
@@ -142,11 +143,12 @@ async function submitBlobDownloadFromOffscreen(blob, filename, mimeType, taskMet
     taskMeta
   );
   const downloadFilename = await downloadPathUtils.applyDownloadSubdir?.(finalFilename);
+  const saveAs = await resolveSaveAs();
 
   const downloadResult = await new Promise((resolve) => {
     chrome.downloads.download({
       filename: downloadFilename,
-      saveAs: false,
+      saveAs: saveAs,
       url: objectUrl,
     }, (downloadId) => {
       if (chrome.runtime.lastError) {

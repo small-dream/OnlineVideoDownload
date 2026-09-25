@@ -11,6 +11,8 @@ import { recoverDownloadTasks } from './download-task-recovery.js';
 import { DownloadNotificationManager } from './download-notification.js';
 import { createTabBadgeManager } from './action-badge.js';
 import { resolveClearVideoScope } from './clear-video-scope.js';
+import { DownloadQueue } from './download-queue.js';
+import { resolveSaveAs } from './save-location.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
@@ -27,6 +29,7 @@ import '../lib/constants.js';
 import '../lib/download-path.js';
 import '../lib/message-types.js';
 import '../lib/settings-store.js';
+import '../lib/video-filter.js';
 
 const byteUtils = globalThis.__OVD_BYTE_UTILS__ || {};
 const httpUtils = globalThis.__OVD_HTTP_UTILS__ || {};
@@ -100,6 +103,15 @@ const downloadResumeTimers = new Map();
 const lastKnownTabUrls = new Map();
 // 下载完成/失败通知（settings.downloadNotification 控制）与按 tab 的视频数徽章
 const downloadNotifications = new DownloadNotificationManager({ settingsStore: globalThis.__OVD_GENERAL_SETTINGS_STORE__ });
+const videoFilter = globalThis.__OVD_VIDEO_FILTER__ || {};
+const generalSettingsStore = globalThis.__OVD_GENERAL_SETTINGS_STORE__ || {};
+
+// content 侧发起的请求头注入会话：token → declarativeNetRequest 清理函数
+const headerInjectionSessions = new Map();
+let headerInjectionToken = 0;
+
+// 全局下载并发队列：让 concurrentDownloadLimit 覆盖所有下载入口，而非仅 popup 批量下载
+const downloadQueue = new DownloadQueue({ limit: 3 });
 downloadNotifications.attach();
 const tabBadge = createTabBadgeManager();
 
@@ -396,8 +408,19 @@ async function handleMessage(msg, sender) {
     case MSG.GET_VIDEOS_FOR_TAB || 'GET_VIDEOS_FOR_TAB':
       return getVideosForTab(msg.tabId);
 
-    case MSG.DOWNLOAD_VIDEO || 'DOWNLOAD_VIDEO':
-      return handleDownloadVideo(msg.payload, msg.tabId ?? tabId, msg);
+    case MSG.DOWNLOAD_VIDEO || 'DOWNLOAD_VIDEO': {
+      // 所有后台下载入口统一走并发队列（长任务会占用槽位，超出上限时排队）
+      try {
+        const settings = await generalSettingsStore.getSettings?.() || {};
+        downloadQueue.setLimit(settings.concurrentDownloadLimit || 3);
+      } catch (err) {
+        console.warn(`[OVD] 读取并发设置失败，沿用当前上限: ${err.message}`);
+      }
+      if (downloadQueue.pendingCount > 0) {
+        console.log(`[OVD] 下载排队中 pending=${downloadQueue.pendingCount} active=${downloadQueue.activeCount}`);
+      }
+      return downloadQueue.run(() => handleDownloadVideo(msg.payload, msg.tabId ?? tabId, msg));
+    }
 
     case MSG.GET_DOWNLOAD_STATES || 'GET_DOWNLOAD_STATES':
       return { states: downloadStore.getStatesForTab(msg.tabId) };
@@ -413,6 +436,52 @@ async function handleMessage(msg, sender) {
 
     case MSG.DOWNLOAD_BLOB_DATA || 'DOWNLOAD_BLOB_DATA':
       return downloadBlobData(msg, tabId, frameId);
+
+    case MSG.INJECT_PAGE_SCRIPTS || 'INJECT_PAGE_SCRIPTS': {
+      // 页面注入优先走 chrome.scripting.executeScript({ world: 'MAIN' })，
+      // 规避 Twitter/X 等 CSP 严格站点对 <script src> 注入的静默拦截。
+      const targetTabId = msg.tabId ?? tabId;
+      if (!targetTabId) {
+        throw new Error('无法解析 tabId，无法注入页面脚本');
+      }
+      const files = Array.isArray(msg.files) ? msg.files : [];
+      if (files.length === 0) {
+        throw new Error('注入脚本列表为空');
+      }
+      const target = { tabId: targetTabId };
+      if (frameId != null) {
+        target.frameIds = [frameId];
+      } else if (msg.allFrames) {
+        target.allFrames = true;
+      }
+      await chrome.scripting.executeScript({
+        files,
+        injectImmediately: true,
+        target,
+        world: 'MAIN',
+      });
+      console.log(`[OVD] MAIN world 脚本注入完成 tab=${targetTabId} frame=${frameId ?? 'all'} files=${files.length}`);
+      return { ok: true, files: files.length, injected: 'main-world' };
+    }
+
+    case MSG.INJECT_DOWNLOAD_HEADERS || 'INJECT_DOWNLOAD_HEADERS': {
+      // content 侧无法直接写 DNR 规则：由 SW 代注册临时 Referer/CORS 规则
+      const token = `hdr-${++headerInjectionToken}-${Date.now()}`;
+      const cleanup = await injectHeaders(msg.url, msg.headers || {}, {
+        corsOrigin: msg.corsOrigin || '',
+      });
+      headerInjectionSessions.set(token, cleanup);
+      return { ok: true, token };
+    }
+
+    case MSG.RELEASE_DOWNLOAD_HEADERS || 'RELEASE_DOWNLOAD_HEADERS': {
+      const cleanup = headerInjectionSessions.get(msg.token);
+      headerInjectionSessions.delete(msg.token);
+      if (cleanup) {
+        await cleanup();
+      }
+      return { ok: true };
+    }
 
     case MSG.HLS_PROGRESS_UPDATE || 'HLS_PROGRESS_UPDATE':
       if (hasTaskIdentity(msg)) {
@@ -655,7 +724,23 @@ async function getVisibleVideosForTab(tabId) {
   registry.enrichTitles(tabId, tabTitle);
   const videos = registry.getForTab(tabId);
   const hasYouTubeAdaptive = videos.some((video) => video?.type === 'youtube-adaptive');
-  const filteredVideos = videos.filter((video) => !shouldHideVideoFromYouTubeList(video, tabUrl, hasYouTubeAdaptive));
+  const visibleVideos = videos.filter((video) => !shouldHideVideoFromYouTubeList(video, tabUrl, hasYouTubeAdaptive));
+
+  // 用户级过滤（域名黑名单/最小时长/最小体积）：在读取时应用，
+  // 设置变化后无需重新检测即可生效。
+  let settings = {};
+  try {
+    settings = await generalSettingsStore.getSettings?.() || {};
+  } catch (err) {
+    console.warn(`[OVD] 读取过滤设置失败: ${err.message}`);
+  }
+  const filteredVideos = videoFilter.filterVideos
+    ? videoFilter.filterVideos(visibleVideos, settings, { tabUrl })
+    : visibleVideos;
+
+  if (filteredVideos.length !== visibleVideos.length) {
+    console.log(`[OVD] 过滤噪声条目 tab=${tabId} 隐藏=${visibleVideos.length - filteredVideos.length}`);
+  }
 
   return {
     tabTitle,
@@ -1051,12 +1136,13 @@ async function downloadBlobData(message = {}, tabId, frameId = null) {
   const objectUrl = message.objectUrl;
   const filename = message.filename;
   const finalFilename = await downloadPathUtils.applyDownloadSubdir?.(filename || 'video.mp4');
+  const saveAs = await resolveSaveAs();
 
   return new Promise((resolve) => {
     chrome.downloads.download({
       url: objectUrl,
       filename: finalFilename,
-      saveAs: false,
+      saveAs,
     }, (downloadId) => {
       if (chrome.runtime.lastError) {
         const task = downloadStore.upsertTask({
