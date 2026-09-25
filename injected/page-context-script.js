@@ -52,6 +52,7 @@
 
       interceptor.scanVideoElements();
       interceptor.scanAudioElements();
+      watchDomForMedia();
 
       if (isYouTube) {
         scheduleYouTubeExtraction('init');
@@ -81,6 +82,74 @@
       interceptor.scanVideoElements();
       interceptor.scanAudioElements();
     });
+  }
+
+  /**
+   * 通用站点持续监听动态插入的 <video>/<audio>。
+   * 原先只在 init/load 各扫一次，SPA 或懒加载播放器会整场漏检。
+   */
+  function watchDomForMedia() {
+    if (watchDomForMedia.installed) {
+      return;
+    }
+    watchDomForMedia.installed = true;
+
+    const interceptor = window.__OVD_PAGE_INTERCEPTOR__;
+    if (!interceptor || typeof MutationObserver === 'undefined') {
+      return;
+    }
+
+    let scheduled = false;
+    const scheduleScan = () => {
+      if (scheduled) {
+        return;
+      }
+      scheduled = true;
+      setTimeout(() => {
+        scheduled = false;
+        interceptor.scanVideoElements();
+        interceptor.scanAudioElements();
+      }, 300);
+    };
+
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === 'attributes') {
+          scheduleScan();
+          return;
+        }
+        for (const node of record.addedNodes || []) {
+          if (node.nodeType !== 1) {
+            continue;
+          }
+          if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') {
+            scheduleScan();
+            return;
+          }
+          if (typeof node.querySelector === 'function' && node.querySelector('video, audio, source')) {
+            scheduleScan();
+            return;
+          }
+        }
+      }
+    });
+
+    observer.observe(document.documentElement || document, {
+      attributeFilter: ['src'],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+
+    // src 由 JS 直接赋值（property）时属性观察可能不触发，补一条媒体事件监听
+    for (const eventName of ['loadstart', 'loadedmetadata']) {
+      document.addEventListener(eventName, (event) => {
+        const tag = event.target?.tagName;
+        if (tag === 'VIDEO' || tag === 'AUDIO') {
+          scheduleScan();
+        }
+      }, true);
+    }
   }
 
   try {

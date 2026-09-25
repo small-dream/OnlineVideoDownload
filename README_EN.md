@@ -89,7 +89,10 @@ Or download and extract the ZIP.
 
 - For live streams or VOD using HLS, the extension automatically downloads all TS segments
 - Segments are merged in the browser into a single `.ts` file
-- Supports automatic decryption of **AES-128 encrypted streams**
+- Multi-bitrate masters expose a **quality dropdown** (pick any variant; defaults to the highest)
+- Supports automatic decryption of **AES-128 encrypted streams** (including key rotation), `EXT-X-BYTERANGE` segments, and `EXT-X-MEDIA` separate audio tracks (muxed into the video)
+- Live playlists without `ENDLIST` warn that only the current playback window is saved, instead of silently writing a truncated file
+- Streams over 1.5 GB abort with a clear message instead of risking an out-of-memory merge
 - Shows segment progress during download: `Downloaded 45/120 segments`
 
 ### Blob URL / MSE videos

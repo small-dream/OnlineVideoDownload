@@ -71,6 +71,22 @@
           <input type="text" id="popupDownloadSubdir" placeholder="留空为默认目录">
         </label>
         <label class="settings-row">
+          <span>最小时长（秒，0=不限）</span>
+          <input type="number" id="popupMinDuration" min="0" max="36000" step="5" value="0">
+        </label>
+        <label class="settings-row">
+          <span>最小体积（MB，0=不限）</span>
+          <input type="number" id="popupMinSize" min="0" max="102400" step="1" value="0">
+        </label>
+        <label class="settings-row settings-row-stacked">
+          <span>域名黑名单</span>
+          <textarea id="popupDomainBlacklist" rows="2" placeholder="逗号或换行分隔，如 ads.example.com"></textarea>
+        </label>
+        <label class="settings-row">
+          <span>每次询问保存位置</span>
+          <input type="checkbox" id="popupAskSaveLocation">
+        </label>
+        <label class="settings-row">
           <span>历史保留</span>
           <select id="popupHistoryRetention">
             <option value="7">7 天</option>

@@ -200,3 +200,175 @@ test('HLS 委托下载在分片失败未超阈值时通过进度消息告知用�
   assert.equal(warning.failedCount, 1);
   assert.match(warning.warning, /1\/1 个分片下载失败/);
 });
+
+// ---------------------------------------------------------------
+// 第三波：真实管线的画质选择 / 直播提示 / 独立音轨合并
+// ---------------------------------------------------------------
+
+function loadRealPipeline() {
+  delete globalThis.__OVD_HLS_PIPELINE__;
+  const filePath = path.resolve(__dirname, '../lib/hls-pipeline.js');
+  delete require.cache[require.resolve(filePath)];
+  require(filePath);
+  return globalThis.__OVD_HLS_PIPELINE__;
+}
+
+const MASTER_WITH_AUDIO = [
+  '#EXTM3U',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="主音轨",DEFAULT=YES,URI="audio.m3u8"',
+  '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360,AUDIO="aud"',
+  'low.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="aud"',
+  'high.m3u8',
+].join('\n');
+
+function installFetchStub(routes) {
+  const fetched = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    fetched.push(target);
+    for (const [fragment, handler] of routes) {
+      if (target.includes(fragment)) {
+        return typeof handler === 'function' ? handler(target) : handler;
+      }
+    }
+    return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(4).buffer };
+  };
+  return {
+    fetched,
+    restore() {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+const playlistResponse = (body) => ({
+  arrayBuffer: async () => new Uint8Array(4).buffer,
+  ok: true,
+  status: 200,
+  text: async () => body,
+});
+
+test('HLS 委托下载按 quality 选择 Master Playlist 变体', async () => {
+  const pipeline = loadRealPipeline();
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(MASTER_WITH_AUDIO)],
+    ['low.m3u8', playlistResponse('#EXTM3U\n#EXTINF:1,\nlow1.ts\n')],
+    ['high.m3u8', playlistResponse('#EXTM3U\n#EXTINF:1,\nhigh1.ts\n')],
+  ]);
+  const blobDownloads = [];
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ filename, size: blob.size });
+        return { downloadId: 7, ok: true };
+      },
+    });
+
+    const result = await handler.handle(
+      'https://cdn.example.com/master.m3u8',
+      'video',
+      {},
+      {},
+      { quality: '360p' }
+    );
+
+    assert.equal(result.quality, '360p');
+    assert.ok(stub.fetched.includes('https://cdn.example.com/low.m3u8'));
+    assert.ok(!stub.fetched.includes('https://cdn.example.com/high.m3u8'));
+    assert.equal(blobDownloads.length, 1);
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('fetchQualities 返回 Master Playlist 的全部变体，单码率流返回空列表', async () => {
+  const pipeline = loadRealPipeline();
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(MASTER_WITH_AUDIO)],
+    ['single.m3u8', playlistResponse('#EXTM3U\n#EXTINF:1,\nseg1.ts\n')],
+  ]);
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({ hlsPipeline: pipeline });
+
+    const master = await handler.fetchQualities('https://cdn.example.com/master.m3u8', {});
+    assert.equal(master.isMaster, true);
+    assert.deepEqual(master.qualities.map((quality) => quality.label), ['360p', '720p']);
+    assert.ok(master.qualities[1].url.endsWith('high.m3u8'));
+    assert.match(master.qualities[1].detail, /1280x720/);
+
+    const single = await handler.fetchQualities('https://cdn.example.com/single.m3u8', {});
+    assert.deepEqual(single, { isMaster: false, qualities: [] });
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('HLS 直播流显式提示仅下载当前窗口而不是静默产出残片', async () => {
+  const pipeline = loadRealPipeline();
+  const liveBody = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:120\n#EXTINF:6.0,\nseg120.ts\n#EXTINF:6.0,\nseg121.ts\n';
+  const stub = installFetchStub([['live.m3u8', playlistResponse(liveBody)]]);
+  const messages = [];
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      emitRuntimeMessage: (message) => messages.push(message),
+      hlsPipeline: pipeline,
+      triggerBlobDownload: () => ({ downloadId: 1, ok: true }),
+    });
+
+    const result = await handler.handle('https://cdn.example.com/live.m3u8', 'video', {}, {});
+
+    assert.equal(result.isLive, true);
+    const status = messages.find((message) => message.type === 'SOURCE_DOWNLOAD_STATUS');
+    assert.ok(status, '直播流必须给出显式提示');
+    assert.match(status.message, /直播/);
+    assert.match(status.message, /2 个分片/);
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('HLS 独立音轨与视频合并为单文件', async () => {
+  const pipeline = loadRealPipeline();
+  const videoBody = '#EXTM3U\n#EXT-X-MAP:URI="vinit.mp4"\n#EXTINF:1,\nv1.m4s\n';
+  const audioBody = '#EXTM3U\n#EXT-X-MAP:URI="ainit.mp4"\n#EXTINF:1,\na1.m4s\n';
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(MASTER_WITH_AUDIO)],
+    ['high.m3u8', playlistResponse(videoBody)],
+    ['audio.m3u8', playlistResponse(audioBody)],
+  ]);
+  const muxerCalls = [];
+  globalThis.BilibiliMuxer = {
+    async mergeFmp4Streams(videoData, audioData) {
+      muxerCalls.push({ audio: audioData.byteLength, video: videoData.byteLength });
+      return new Blob([new Uint8Array(videoData.byteLength + audioData.byteLength)]);
+    },
+  };
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: () => ({ downloadId: 3, ok: true }),
+    });
+
+    const result = await handler.handle('https://cdn.example.com/master.m3u8', 'video', {}, {});
+
+    assert.equal(result.audioMerged, true);
+    assert.equal(result.quality, '720p');
+    assert.equal(muxerCalls.length, 1);
+    assert.equal(muxerCalls[0].video, 8);
+    assert.equal(muxerCalls[0].audio, 8);
+  } finally {
+    stub.restore();
+    delete globalThis.BilibiliMuxer;
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});

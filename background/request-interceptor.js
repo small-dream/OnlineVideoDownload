@@ -93,7 +93,10 @@ export class RequestInterceptor {
       ?.find((header) => header.name.toLowerCase() === 'content-length')
       ?.value || '';
 
-    const type = this._detectTypeByMime(contentType);
+    const contentDisposition = responseHeaders
+      ?.find((header) => header.name.toLowerCase() === 'content-disposition')
+      ?.value || '';
+    const type = this._detectTypeByMime(contentType, { contentDisposition, url });
     if (!type) return;
 
     const existing = this.registry.getByUrl(tabId, url);
@@ -162,12 +165,63 @@ export class RequestInterceptor {
     }
   }
 
-  _detectTypeByMime(contentType) {
+  _detectTypeByMime(contentType, details = {}) {
     const ct = contentType.toLowerCase();
     if (ct.includes('application/vnd.apple.mpegurl') || ct.includes('application/x-mpegurl')) return 'hls';
     if (ct.includes('application/dash+xml')) return 'dash';
     if (ct.startsWith('audio/')) return 'audio';
-    if (ct.startsWith('video/mp4') || ct.startsWith('video/webm') || ct.startsWith('video/x-flv')) return 'direct';
+    if (
+      ct.startsWith('video/mp4')
+      || ct.startsWith('video/webm')
+      || ct.startsWith('video/x-flv')
+      || ct.startsWith('video/mp2t')
+      || ct.startsWith('video/quicktime')
+      || ct.startsWith('video/x-matroska')
+    ) {
+      return 'direct';
+    }
+    // application/octet-stream 无法区分媒体与任意二进制，
+    // 必须结合扩展名或 Content-Disposition 文件名二次确认。
+    if (ct.startsWith('application/octet-stream')) {
+      return this._detectTypeByFilenameHint(details);
+    }
     return null;
   }
+
+  /**
+   * 从 URL 扩展名 / Content-Disposition 文件名推断类型，
+   * 仅用于 MIME 为 octet-stream 等无信息场景。
+   */
+  _detectTypeByFilenameHint({ url = '', contentDisposition = '' } = {}) {
+    const extension = extensionFromUrl(url) || extensionFromDisposition(contentDisposition);
+    if (!extension) {
+      return null;
+    }
+    if (VIDEO_EXTENSIONS.has(extension)) return 'direct';
+    if (AUDIO_EXTENSIONS.has(extension)) return 'audio';
+    return null;
+  }
+}
+
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'flv', 'm4v', 'mkv', 'mov', 'ts', 'mpg', 'mpeg', 'avi', 'ogv']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'flac', 'oga', 'ogg', 'm4a', 'aac', 'wav', 'opus']);
+
+function extensionFromUrl(url = '') {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const match = /\.([a-z0-9]{2,5})$/.exec(pathname);
+    return match ? match[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+function extensionFromDisposition(contentDisposition = '') {
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(String(contentDisposition || ''));
+  if (!match) {
+    return '';
+  }
+  const name = decodeURIComponent(match[1].trim());
+  const extMatch = /\.([a-z0-9]{2,5})$/i.exec(name);
+  return extMatch ? extMatch[1].toLowerCase() : '';
 }

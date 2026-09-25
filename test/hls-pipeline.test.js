@@ -139,8 +139,8 @@ test('parseHlsPlaylist extracts segments from non-# lines', () => {
 
   const result = mod.parseHlsPlaylist(m3u8, 'https://cdn.example.com/video/index.m3u8');
   assert.equal(result.segments.length, 2);
-  assert.ok(result.segments[0].includes('segment001.ts'));
-  assert.ok(result.segments[1].includes('segment002.ts'));
+  assert.ok(result.segments[0].url.includes('segment001.ts'));
+  assert.ok(result.segments[1].url.includes('segment002.ts'));
 });
 
 test('parseHlsPlaylist parses #EXT-X-MAP for init segment', () => {
@@ -610,4 +610,331 @@ test('downloadHlsSegments reports progress with failure stats below the threshol
   assert.equal(progress.at(-1).done, 20);
   assert.equal(progress.at(-1).total, 20);
   assert.equal(progress.at(-1).failedCount, 2);
+});
+
+// ---------------------------------------------------------------
+// 第三波 3.1：Master Playlist 画质
+// ---------------------------------------------------------------
+
+const MASTER_PLAYLIST = [
+  '#EXTM3U',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="中文",LANGUAGE="zh",DEFAULT=YES,URI="audio/main.m3u8"',
+  '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360,CODECS="avc1.42c01e"',
+  'stream_360.m3u8',
+  '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.64001f",AUDIO="aud"',
+  'stream_720.m3u8',
+].join('\n');
+
+test('parseHlsMasterPlaylist lists variants with resolution and bandwidth', () => {
+  const mod = loadModule();
+  const master = mod.parseHlsMasterPlaylist(MASTER_PLAYLIST, 'https://cdn.example.com/master.m3u8');
+
+  assert.equal(master.isMaster, true);
+  assert.equal(master.variants.length, 2);
+  assert.deepEqual(master.variants.map((variant) => variant.label), ['360p', '720p']);
+  assert.equal(master.variants[1].url, 'https://cdn.example.com/stream_720.m3u8');
+  assert.equal(master.variants[1].audioGroupId, 'aud');
+  assert.equal(master.audioRenditions.length, 1);
+  assert.equal(mod.findMatchingAudioRendition(master, master.variants[1]).uri,
+    'https://cdn.example.com/audio/main.m3u8');
+  assert.equal(mod.findMatchingAudioRendition(master, master.variants[0]), null);
+});
+
+test('selectHlsVariant honours quality labels, heights and falls back to the highest bandwidth', () => {
+  const mod = loadModule();
+  const master = mod.parseHlsMasterPlaylist(MASTER_PLAYLIST, 'https://cdn.example.com/master.m3u8');
+
+  assert.equal(mod.selectHlsVariant(master.variants, null, { quality: '360p' }).height, 360);
+  assert.equal(mod.selectHlsVariant(master.variants, null, { quality: '720' }).height, 720);
+  assert.equal(
+    mod.selectHlsVariant(master.variants, null, { quality: 'https://cdn.example.com/stream_360.m3u8' }).height,
+    360
+  );
+  assert.equal(mod.selectHlsVariant(master.variants, null, {}).height, 720);
+  assert.equal(mod.selectHlsVariant(master.variants, null, { quality: '1080p' }).height, 720);
+});
+
+test('selectBestHlsStream still returns the highest bandwidth variant', () => {
+  const mod = loadModule();
+  const url = mod.selectBestHlsStream(MASTER_PLAYLIST, 'https://cdn.example.com/master.m3u8');
+  assert.ok(url.includes('stream_720.m3u8'));
+});
+
+// ---------------------------------------------------------------
+// 第三波 3.2：Media Playlist 协议补全
+// ---------------------------------------------------------------
+
+test('parseHlsPlaylist records EXT-X-BYTERANGE with implicit offsets', () => {
+  const mod = loadModule();
+  const m3u8 = [
+    '#EXTM3U',
+    '#EXT-X-MAP:URI="init.mp4",BYTERANGE="720@0"',
+    '#EXTINF:5.0,',
+    '#EXT-X-BYTERANGE:1000@0',
+    'video.mp4',
+    '#EXTINF:5.0,',
+    '#EXT-X-BYTERANGE:1000',
+    'video.mp4',
+  ].join('\n');
+
+  const playlist = mod.parseHlsPlaylist(m3u8, 'https://cdn.example.com/index.m3u8');
+  assert.deepEqual(playlist.initSegmentByteRange, { end: 719, length: 720, start: 0 });
+  assert.deepEqual(playlist.segments[0].byteRange, { end: 999, length: 1000, start: 0 });
+  assert.deepEqual(playlist.segments[1].byteRange, { end: 1999, length: 1000, start: 1000 });
+  assert.equal(mod.toRangeHeader(playlist.segments[1].byteRange), 'bytes=1000-1999');
+});
+
+test('parseHlsPlaylist tracks EXT-X-KEY rotation per segment', () => {
+  const mod = loadModule();
+  const m3u8 = [
+    '#EXTM3U',
+    '#EXT-X-KEY:METHOD=AES-128,URI="key1.bin"',
+    '#EXTINF:5.0,',
+    'seg1.ts',
+    '#EXT-X-KEY:METHOD=AES-128,URI="key2.bin",IV=0x0102030405060708090A0B0C0D0E0F10',
+    '#EXTINF:5.0,',
+    'seg2.ts',
+    '#EXT-X-KEY:METHOD=NONE',
+    '#EXTINF:5.0,',
+    'seg3.ts',
+  ].join('\n');
+
+  const playlist = mod.parseHlsPlaylist(m3u8, 'https://cdn.example.com/index.m3u8');
+  assert.equal(playlist.keys.length, 2);
+  assert.equal(playlist.keys[0].keyUrl, 'https://cdn.example.com/key1.bin');
+  assert.equal(playlist.keys[1].ivHex, '0x0102030405060708090A0B0C0D0E0F10');
+  assert.deepEqual(playlist.segments.map((segment) => segment.keyIndex), [0, 1, null]);
+  assert.equal(playlist.isEncrypted, true);
+});
+
+test('resolveHlsKeys imports every rotated AES-128 key', async () => {
+  const mod = loadModule();
+  const requested = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url) => {
+    requested.push(url);
+    return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).fill(9).buffer };
+  };
+
+  try {
+    const keys = await mod.resolveHlsKeys([
+      { ivHex: '', keyUrl: 'https://cdn.example.com/key1.bin', method: 'AES-128' },
+      { ivHex: '0x00', keyUrl: 'https://cdn.example.com/key2.bin', method: 'AES-128' },
+    ], {}, {});
+
+    assert.equal(keys.length, 2);
+    assert.deepEqual(requested, [
+      'https://cdn.example.com/key1.bin',
+      'https://cdn.example.com/key2.bin',
+    ]);
+    assert.ok(keys[0].key);
+    assert.equal(keys[0].explicitIv, false);
+    assert.equal(keys[0].iv, null);
+    assert.equal(keys[1].explicitIv, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('resolveHlsKeys throws for SAMPLE-AES instead of producing garbage', async () => {
+  const mod = loadModule();
+  await assert.rejects(
+    () => mod.resolveHlsKeys([{ keyUrl: 'https://cdn.example.com/key.bin', method: 'SAMPLE-AES' }], {}, {}),
+    (err) => {
+      assert.equal(err.code, 'HLS_UNSUPPORTED_ENCRYPTION');
+      return true;
+    }
+  );
+});
+
+test('decryptHlsSegments derives IV from the media sequence and skips unencrypted segments', async () => {
+  const mod = loadModule();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new Uint8Array(16).fill(5),
+    { name: 'AES-CBC' },
+    false,
+    ['encrypt', 'decrypt']
+  );
+
+  const sequence = 7;
+  const plain = new Uint8Array(16).fill(1).buffer;
+  const cipher = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv: mod.ivFromSequence(sequence) },
+    key,
+    plain
+  );
+  const plaintextSegment = new Uint8Array(4).fill(2).buffer;
+
+  const decrypted = await mod.decryptHlsSegments([cipher, plaintextSegment], {
+    keys: [{ explicitIv: false, iv: null, key, method: 'AES-128' }],
+    segments: [
+      { keyIndex: 0, seq: sequence },
+      { keyIndex: null, seq: sequence + 1 },
+    ],
+  });
+
+  assert.deepEqual(new Uint8Array(decrypted[0]), new Uint8Array(plain));
+  assert.deepEqual(new Uint8Array(decrypted[1]), new Uint8Array(plaintextSegment));
+});
+
+test('decryptHlsSegments fails fast when a rotated key is missing', async () => {
+  const mod = loadModule();
+  await assert.rejects(
+    () => mod.decryptHlsSegments([new Uint8Array(16).fill(3).buffer], {
+      keys: [null],
+      segments: [{ keyIndex: 0, seq: 0 }],
+    }),
+    (err) => {
+      assert.equal(err.code, 'HLS_KEY_FETCH_FAILED');
+      assert.equal(err.segmentIndex, 0);
+      return true;
+    }
+  );
+});
+
+test('parseHlsPlaylist flags live playlists without EXT-X-ENDLIST', () => {
+  const mod = loadModule();
+  const liveM3u8 = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:120\n#EXTINF:6.0,\nseg120.ts\n';
+  const live = mod.parseHlsPlaylist(liveM3u8, 'https://cdn.example.com/live.m3u8');
+  assert.equal(live.isLive, true);
+  assert.equal(live.hasEndList, false);
+  assert.equal(live.mediaSequence, 120);
+  assert.equal(live.segments[0].seq, 120);
+
+  const vod = mod.parseHlsPlaylist(`${liveM3u8}#EXT-X-ENDLIST\n`, 'https://cdn.example.com/live.m3u8');
+  assert.equal(vod.isLive, false);
+  assert.equal(vod.hasEndList, true);
+});
+
+test('parseHlsPlaylist counts EXT-X-DISCONTINUITY markers', () => {
+  const mod = loadModule();
+  const m3u8 = [
+    '#EXTM3U',
+    '#EXTINF:5.0,',
+    'seg1.ts',
+    '#EXT-X-DISCONTINUITY',
+    '#EXTINF:5.0,',
+    'seg2.ts',
+  ].join('\n');
+
+  const playlist = mod.parseHlsPlaylist(m3u8, 'https://cdn.example.com/index.m3u8');
+  assert.equal(playlist.discontinuityCount, 1);
+  assert.equal(playlist.segments[0].discontinuity, false);
+  assert.equal(playlist.segments[1].discontinuity, true);
+  assert.equal(playlist.totalDuration, 10);
+});
+
+// ---------------------------------------------------------------
+// 第三波 3.7：大文件守卫
+// ---------------------------------------------------------------
+
+test('downloadHlsSegments aborts with HLS_OUTPUT_TOO_LARGE when the stream exceeds the limit', async () => {
+  const mod = loadModule();
+
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(4), {
+      fetchBuffer: async () => new Uint8Array(1024 * 1024).buffer,
+      maxTotalBytes: 2 * 1024 * 1024,
+      retryDelays: [0, 0, 0],
+    }),
+    (err) => {
+      assert.equal(err.code, 'HLS_OUTPUT_TOO_LARGE');
+      assert.equal(err.maxTotalBytes, 2 * 1024 * 1024);
+      assert.ok(err.totalBytes > err.maxTotalBytes);
+      return true;
+    }
+  );
+});
+
+test('downloadHlsSegments forwards byte ranges to the fetcher', async () => {
+  const mod = loadModule();
+  const calls = [];
+
+  await mod.downloadHlsSegments([
+    { byteRange: { end: 99, length: 100, start: 0 }, url: 'https://cdn.example.com/v.mp4' },
+    { byteRange: { end: 199, length: 100, start: 100 }, url: 'https://cdn.example.com/v.mp4' },
+  ], {
+    fetchBuffer: async (url, range) => {
+      calls.push({ range, url });
+      return new Uint8Array(100).buffer;
+    },
+    retryDelays: [0],
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].range, { end: 99, length: 100, start: 0 });
+  assert.deepEqual(calls[1].range, { end: 199, length: 100, start: 100 });
+});
+
+test('hlsFetchBuffer sends a Range header when a byte range is provided', async () => {
+  const mod = loadModule();
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    seen.push({ init, url });
+    return { ok: true, status: 206, arrayBuffer: async () => new ArrayBuffer(10) };
+  };
+
+  try {
+    const buffer = await mod.hlsFetchBuffer(
+      'https://cdn.example.com/v.mp4',
+      { Referer: 'https://example.com/' },
+      { range: { end: null, start: 1000 } }
+    );
+    assert.equal(buffer.byteLength, 10);
+    assert.equal(seen[0].init.headers.Range, 'bytes=1000-');
+    assert.equal(seen[0].init.headers.Referer, 'https://example.com/');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('downloadHlsSegments aborts with DOWNLOAD_ABORTED when the signal is aborted', async () => {
+  const mod = loadModule();
+  const controller = new AbortController();
+  controller.abort();
+  let fetchCalls = 0;
+
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(4), {
+      fetchBuffer: async () => {
+        fetchCalls++;
+        return new Uint8Array(1).buffer;
+      },
+      signal: controller.signal,
+    }),
+    (err) => {
+      assert.equal(err.code, 'DOWNLOAD_ABORTED');
+      return true;
+    }
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test('downloadHlsSegments aborts mid-flight when the signal is aborted', async () => {
+  const mod = loadModule();
+  const controller = new AbortController();
+  let batches = 0;
+
+  await assert.rejects(
+    () => mod.downloadHlsSegments(segmentUrls(20), {
+      concurrency: 1,
+      fetchBuffer: async () => {
+        batches++;
+        if (batches === 2) {
+          controller.abort();
+        }
+        return new Uint8Array(1).buffer;
+      },
+      signal: controller.signal,
+    }),
+    (err) => {
+      assert.equal(err.code, 'DOWNLOAD_ABORTED');
+      return true;
+    }
+  );
+  assert.ok(batches >= 2);
 });

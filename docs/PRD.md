@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.16.0
+> **版本**：1.17.0
 > **最后更新**：2026-09-25
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -48,9 +48,11 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 
 - 网络请求拦截
 - 页面注入脚本对 XHR / Fetch 的监听页面
-- `<video>` / `<source>` / `<audio>` 扫描
+- `<video>` / `<source>` / `<audio>` 扫描，并用 `MutationObserver` + 媒体事件持续监听动态插入/懒加载的播放器（不再只在 init/load 各扫一次）
+- MIME 嗅探覆盖 `video/mp2t`、`video/quicktime`、`video/x-matroska`；`application/octet-stream` 必须由扩展名或 `Content-Disposition` 文件名二次确认才登记
 - MediaSource / blob URL 捕获
 - SPA 路由变化感知
+- 页面脚本优先通过 `chrome.scripting.executeScript({ world: 'MAIN' })` 注入（CSP 严格站点不再静默失败），失败时回退 DOM `<script src>` 注入
 
 UI 要求：
 
@@ -61,7 +63,9 @@ UI 要求：
 - Popup 中的 YouTube 条目支持在设置中切换下载模式（录制模式 / 解析下载），解析下载模式下可在条目中选择分辨率
 - Popup 从内容侧发起下载时，条目按钮应保持”进行中”状态直到收到完成或失败结果，避免用户误以为任务未启动并重复点击
 - 支持批量选择多个视频，从 Popup 一键并发下载
+- HLS 条目提供清晰度下拉框（读取 Master Playlist 变体），默认「自动（最高画质）」
 - 下载中的条目按钮直接显示百分比（「下载中 N%」）
+- 任务视图对进行中的任务提供「取消」按钮，取消内容侧任务与 HLS 委托下载
 - 工具栏图标徽章按当前标签页显示检测到的视频数（>99 显示 99+），运行中任务数显示在 Popup「任务」按钮徽章上
 - 下载完成/失败推送系统通知（可在设置中通过 `downloadNotification` 关闭），点击通知打开下载所在文件夹
 - 错误提示使用中文友好文案（错误码映射 + 关键词兜底），不直接透传原始错误信息
@@ -80,9 +84,13 @@ UI 要求：
 
 ### 4.2 HLS 下载
 
-- 解析 Master Playlist 并选择最优流
-- 解析媒体分片列表与 `#EXT-X-MAP`
-- 支持 `#EXT-X-KEY` 的 AES-128 解密
+- 解析 Master Playlist 并列出全部码率变体，条目内下拉框可选清晰度（`HLS_FETCH_QUALITIES` 懒加载，默认「自动」= 最高码率）；选中项按变体 URL 精确下载
+- 解析媒体分片列表与 `#EXT-X-MAP`（含 `BYTERANGE` 初始化段）
+- 支持 `#EXT-X-BYTERANGE` 分片（含省略偏移的隐式续接），按 `Range` 请求抓取
+- 支持 `#EXT-X-KEY` 的 AES-128 解密，含密钥轮换；无显式 IV 时按 `EXT-X-MEDIA-SEQUENCE` 派生，`METHOD=NONE` 分片原样保留
+- 支持 `EXT-X-DISCONTINUITY` 与 `EXT-X-MEDIA` 独立音轨：音轨与视频均为 fMP4 时合并为单文件，否则保存纯视频并提示
+- 无 `EXT-X-ENDLIST` 的直播流明确提示「仅能下载当前播放窗口的 N 个分片」，不静默产出残片
+- 合并前累计体积超过 1.5 GB 即中止（`HLS_OUTPUT_TOO_LARGE`），避免浏览器内合并耗尽内存
 - 合并分片后触发单文件下载
 - 运行时优先委托 content（页面上下文）抓取，携带页面 Cookie 与来源信息；content 无响应或失败时自动回退到 service worker 抓取
 - 携带 Cookie 的跨域请求若被目标站 CORS 拒绝，自动退化为默认凭证模式重试
@@ -91,10 +99,14 @@ UI 要求：
 ### 4.3 DASH 下载
 
 - 完整 MPD manifest 解析，支持多 Period、多 AdaptationSet、多 Representation
+- 支持 `$Number%05d$` / `$Time%08d$` 等宽度格式符、`SegmentURL@mediaRange`/`indexRange`、`SegmentBase@indexRange` 与 `SegmentTimeline r="-1"`
+- 多 Period 按顺序收集同一内容类型的最佳表示并拼接分片，初始化段不一致时提示可能不连续
 - 选择最优视频与音频 Representation
 - 页面内使用 BilibiliMuxer 进行 fMP4 音视频合并
+- 页面侧下载前经 background 注入临时 `Referer`/CORS 规则（`INJECT_DOWNLOAD_HEADERS`），下载结束释放，规避防盗链 CDN 403
+- 合并前总体积超过 1.5 GB 时报错并建议下载分离文件（`DASH_OUTPUT_TOO_LARGE`）
 - 可继续由页面侧执行浏览器内合并的来源，优先保留页面侧方案
-- 通用 background DASH 标记为不支持，委托给 content 侧处理
+- 已解析出音视频分离流的 DASH 由 background 落盘为两个文件（`_video` / `_audio`）；只有 `.mpd` 地址时明确提示「请在视频页面打开扩展后点击下载」，不再返回含义不明的英文错误
 
 ### 4.4 YouTube 下载
 
@@ -141,6 +153,8 @@ UI 要求：
 
 - 设置界面内置在 Popup 中
 - 设置界面包含所有可配置选项（并发下载数、下载目录、历史保留天数等）
+- 过滤设置：最小时长（秒）、最小体积（MB）、域名黑名单（逗号/换行分隔，支持子域名，blob 条目回退到所属页面域名）；阈值 0 表示不限，只过滤通用嗅探条目，YouTube/Bilibili 结构化条目不受影响
+- 「每次询问保存位置」开关控制 `chrome.downloads.download` 的 `saveAs`
 - 使用 `lib/settings-store.js` 统一读写设置，所有运行时通过共享 store 保持一致
 - 支持 `chrome.storage.local` 持久化
 
@@ -183,6 +197,8 @@ UI 要求：
 | 来源下载生命周期 | Popup 状态提示 | `SOURCE_DOWNLOAD_STARTED` / `SOURCE_DOWNLOAD_RESULT` |
 | 页面内抓流 / 录制 | Popup 全局进度与状态文案 | `SOURCE_DOWNLOAD_PROGRESS` / `SOURCE_DOWNLOAD_STATUS` |
 | 下载中任务 | 条目按钮百分比（「下载中 N%」） | background 广播进度 |
+| 直播流 | 全局状态文案（「检测到直播流，仅能下载当前播放窗口的 N 个分片」） | `SOURCE_DOWNLOAD_STATUS` |
+| 任务取消 | 任务视图「取消」按钮 + 取消结果提示 | `ABORT_SOURCE_DOWNLOAD` → `SOURCE_DOWNLOAD_RESULT` |
 | 长任务（HLS / 录制等） | 页面右下角浮动反馈条（Popup 关闭后仍可见） | `content/float-button.js` |
 | 下载完成 / 失败 | 系统通知（设置 `downloadNotification` 控制） | `background/download-notification.js` |
 | 错误提示 | Popup 友好文案（错误码映射 + 关键词兜底） | `popup/popup-error-messages.js` |
@@ -208,6 +224,9 @@ UI 要求：
 - Bilibili 高质量内容可能依赖登录态
 - YouTube `signatureCipher` 复杂场景仍可能受限
 - HLS 下载在页面上下文执行，关闭标签页会中断任务；content 不可用时自动回退到 service worker，部分 CDN 会对后台裸请求返回 403
+- 直播流没有 `EXT-X-ENDLIST`，只能保存当前播放窗口的分片，无法持续录制整场直播
+- 单文件体积超过 1.5 GB 时不进行浏览器内合并（HLS/Bilibili/DASH 一致），需降低清晰度或下载分离文件
+- 域名黑名单在读取检测列表时生效，不会阻止仍在页面内发起的请求
 
 ---
 
@@ -215,6 +234,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.17.0 | 2026-09-25 | 第三波「覆盖面对标 VDH」：HLS 支持 Master Playlist 清晰度选择（条目内下拉框、`HLS_FETCH_QUALITIES` 懒加载、默认最高码率）、`EXT-X-BYTERANGE`、`EXT-X-KEY` 轮换与按媒体序号派生 IV、`EXT-X-MEDIA` 独立音轨合并、`EXT-X-DISCONTINUITY` 计数，并在无 `EXT-X-ENDLIST` 时明确提示直播只能保存当前窗口；HLS/Bilibili 合并补 1.5 GB 体积守卫（`HLS_OUTPUT_TOO_LARGE` / `BILIBILI_OUTPUT_TOO_LARGE`）。DASH 补 `$Number%05d$` 宽度格式、`mediaRange`/`indexRange`、多 Period 分组与 `r="-1"`，页面侧下载经 background 注入 Referer/CORS 规则，background 对已解析的分离流落盘为两个文件并明确提示仅 `.mpd` 地址的场景。通用嗅探新增 `video/mp2t`、`video/quicktime`、`video/x-matroska` 与「`application/octet-stream` + 扩展名/Content-Disposition 二次确认」，并用 `MutationObserver` 持续监听动态播放器。页面注入改用 `chrome.scripting.executeScript({ world: 'MAIN' })`（DOM 注入回退）。新增过滤设置（域名黑名单、最小时长、最小体积）与「每次询问保存位置」开关。任务视图新增「取消」按钮，内容侧任务经 `ABORT_SOURCE_DOWNLOAD` 中止，且 `concurrentDownloadLimit` 通过新的下载队列覆盖全部后台下载入口。 |
 | 1.16.0 | 2026-09-25 | 接通 `notifications` 权限：下载完成/失败按设置（`downloadNotification`）弹出系统通知，含文件名与大小，点击通知打开下载所在文件夹；`filenameFormat` 命名规则生效（标题 / 标题+画质 / 标题+日期，画质后缀取分辨率或平台清晰度）；图标徽章改为按标签页显示检测到的视频数（>99 显示 99+，tab 关闭/清理/注册表恢复时同步刷新），运行中任务数改由 Popup 任务视图展示；恢复页面内长任务浮动反馈条（右下角小条，文本消息 4 秒自动消失、进度百分比、同一时间一条，Popup 关闭后仍可见）；`CLEAR_TAB_VIDEOS` 明确 popup 来源（无 sender.tab）走整 tab 清理、子框架仅清该 frame 的语义，「清列表」同时清空 background 的 VideoRegistry 且不再被旧消息重新填满；批量下载 UI 恢复：条目复选框可见、列表头部全选（含半选态）与「下载所选 (N)」按钮、并发数读取 `concurrentDownloadLimit`、DRM 条目不可勾选；下载中条目按钮显示「下载中 N%」百分比；错误提示改为中文友好文案（`popup-error-messages.js`，15 个错误码映射 + 关键词兜底，如 B 站未登录提示）。 |
 | 1.15.0 | 2026-09-24 | HLS 下载改为优先在页面上下文（content）执行：携带页面 Cookie/Origin/Referer 以规避 CDN（如 Cloudflare WAF）对扩展后台裸请求的 403 拦截，content 不可用或失败时回退到 service worker；委托下载回传真实 downloadId，DNR 规则按页面来源回显 CORS 响应头。 |
 | 1.14.0 | 2026-06-12 | 新增下载目录设置：支持配置子目录名（相对于 Chrome 默认下载目录），默认 `OnlineVideoDownload`。 |

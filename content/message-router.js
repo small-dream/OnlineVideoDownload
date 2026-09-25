@@ -20,6 +20,8 @@
       ensureUi = () => {},
       getFloatButton = () => null,
       hlsDelegateHandler = null,
+      hlsStrategy = null,
+      cancelSourceDownload = () => ({ cancelled: false, ok: false, error: '取消通道不可用' }),
       startSourceDownload = () => ({ ok: false, error: 'not initialized' }),
       streamTransferManager = null,
     } = options;
@@ -28,6 +30,28 @@
     const formatBytes = byteUtils.formatBytes || (() => '');
 
     let started = false;
+    // HLS 委托下载（SW 发起）的取消控制器：taskKey/taskId → AbortController
+    const hlsAbortControllers = new Map();
+
+    function hlsTaskKeyOf(msg = {}) {
+      return msg.taskMeta?.taskKey || msg.taskMeta?.taskId || msg.videoUrl || '';
+    }
+
+    function cancelHlsTask(target = {}) {
+      let cancelled = false;
+      for (const key of [target.taskKey, target.traceId, target.videoUrl]) {
+        if (!key) {
+          continue;
+        }
+        const controller = hlsAbortControllers.get(key);
+        if (controller) {
+          controller.abort();
+          hlsAbortControllers.delete(key);
+          cancelled = true;
+        }
+      }
+      return cancelled;
+    }
 
     function emitRuntimeMessage(message) {
       __OVD_safeRuntimeMessage(message);
@@ -221,16 +245,36 @@
               sendResponse(toErrorResponse(new Error('HLS 委托下载不可用')));
               break;
             }
-            return respondAsync(
-              hlsDelegateHandler.handle(
+            {
+              const taskKey = hlsTaskKeyOf(msg);
+              const controller = typeof AbortController === 'function' ? new AbortController() : null;
+              if (controller && taskKey) {
+                hlsAbortControllers.set(taskKey, controller);
+              }
+              const promise = hlsDelegateHandler.handle(
                 msg.m3u8Url,
                 msg.filename,
                 msg.headers,
                 msg.taskMeta || {},
-                msg.options || {}
-              ),
-              'HLS delegated download failed'
-            );
+                { ...(msg.options || {}), signal: controller?.signal }
+              ).finally(() => {
+                if (taskKey) {
+                  hlsAbortControllers.delete(taskKey);
+                }
+              });
+              return respondAsync(promise, 'HLS delegated download failed');
+            }
+
+          case MSG.ABORT_SOURCE_DOWNLOAD || 'ABORT_SOURCE_DOWNLOAD':
+            respond({
+              ...cancelSourceDownload({
+                taskKey: msg.taskKey,
+                traceId: msg.traceId,
+                videoUrl: msg.videoUrl,
+              }),
+              ...(cancelHlsTask(msg) ? { hlsCancelled: true } : {}),
+            });
+            break;
 
           case MSG.BILIBILI_FETCH_QUALITIES || 'BILIBILI_FETCH_QUALITIES':
             if (!bilibiliStrategy?.fetchQualities) {
@@ -241,6 +285,18 @@
               bilibiliStrategy.fetchQualities(msg.meta),
               'Bilibili 画质获取失败'
             );
+
+          case MSG.HLS_FETCH_QUALITIES || 'HLS_FETCH_QUALITIES': {
+            const hlsQualitiesHandler = hlsStrategy?.fetchQualities || hlsDelegateHandler?.fetchQualities;
+            if (!hlsQualitiesHandler || !msg.m3u8Url) {
+              respond(toErrorResponse(new Error('HLS 画质获取不可用')));
+              break;
+            }
+            return respondAsync(
+              hlsQualitiesHandler(msg.m3u8Url, msg.headers || {}, msg.options || {}),
+              'HLS 画质获取失败'
+            );
+          }
 
           case MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS':
             respond();

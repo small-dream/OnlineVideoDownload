@@ -55,6 +55,7 @@
     if (normalizedContentType.includes('application/dash+xml')) {
       return 'dash';
     }
+    // video/mp4、video/webm、video/mp2t、video/quicktime 等都可直链保存
     if (normalizedContentType.startsWith('video/')) {
       return 'direct';
     }
@@ -66,7 +67,7 @@
       const pathname = new URL(url, location.href).pathname.toLowerCase();
       if (pathname.includes('.m3u8')) return 'hls';
       if (pathname.includes('.mpd')) return 'dash';
-      if (/\.(mp4|webm|flv|m4v|mkv)(\?|$)/.test(pathname)) return 'direct';
+      if (/\.(mp4|webm|flv|m4v|mkv|mov|ts|mpg|mpeg|avi|ogv)(\?|$)/.test(pathname)) return 'direct';
       if (/\.(mp3|flac|oga|ogg|m4a|aac|wav)(\?|$)/.test(pathname)) return 'audio';
     } catch (err) {
       console.warn(`[OVD][PAGE] failed to detect video type from URL: ${err.message}`);

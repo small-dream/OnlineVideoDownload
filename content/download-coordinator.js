@@ -19,6 +19,8 @@
     } = options;
 
     const activeSourceDownloads = new Set();
+    // 内容侧任务取消通道：taskKey/traceId/videoUrl → AbortController
+    const activeAbortControllers = new Map();
 
     function createTraceId(sourceId = 'source') {
       return `${sourceId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -130,6 +132,18 @@
       }
 
       activeSourceDownloads.add(activeKey);
+      const abortController = typeof AbortController === 'function' ? new AbortController() : null;
+      if (abortController) {
+        context.signal = abortController.signal;
+        activeAbortControllers.set(activeKey, {
+          abortController,
+          sourceId,
+          strategyId,
+          taskKey,
+          traceId,
+          videoUrl: meta?.url || '',
+        });
+      }
       emitSourceLifecycleMessage({
         phase: 'STARTED',
         sourceId,
@@ -159,8 +173,9 @@
           });
         })
         .catch((err) => {
+          const aborted = err?.code === 'DOWNLOAD_ABORTED';
           emitSourceLifecycleMessage({
-            error: err.message,
+            error: aborted ? '已取消' : err.message,
             ok: false,
             phase: 'RESULT',
             sourceId,
@@ -174,9 +189,58 @@
         })
         .finally(() => {
           activeSourceDownloads.delete(activeKey);
+          activeAbortControllers.delete(activeKey);
         });
 
       return { ok: true, sourceId, started: true, strategyId, taskKey, traceId };
+    }
+
+    /**
+     * 取消内容侧任务。
+     * 可仅凭 taskKey / traceId / videoUrl 任一匹配（当前 SW 对无 downloadId 的任务
+     * 无法取消，这条通道补齐该能力）。
+     */
+    function cancelSourceDownload(target = {}) {
+      const { taskKey = '', traceId = '', videoUrl = '' } = target;
+      let matched = null;
+
+      for (const [activeKey, entry] of activeAbortControllers) {
+        if (
+          (taskKey && entry.taskKey === taskKey)
+          || (traceId && entry.traceId === traceId)
+          || (videoUrl && entry.videoUrl === videoUrl)
+        ) {
+          matched = { activeKey, entry };
+          break;
+        }
+      }
+
+      if (!matched) {
+        return { cancelled: false, ok: false, error: '未找到可取消的任务' };
+      }
+
+      const { activeKey, entry } = matched;
+      console.log(`[OVD] 取消内容侧任务 taskKey=${entry.taskKey} traceId=${entry.traceId}`);
+      try {
+        entry.abortController.abort();
+      } catch (err) {
+        console.warn(`[OVD] 取消任务失败: ${err.message}`);
+      }
+
+      activeAbortControllers.delete(activeKey);
+      activeSourceDownloads.delete(activeKey);
+      emitSourceLifecycleMessage({
+        error: '已取消',
+        ok: false,
+        phase: 'RESULT',
+        sourceId: entry.sourceId,
+        strategyId: entry.strategyId,
+        taskKey: entry.taskKey,
+        traceId: entry.traceId,
+        videoUrl: entry.videoUrl,
+      });
+
+      return { cancelled: true, ok: true, taskKey: entry.taskKey, traceId: entry.traceId };
     }
 
     async function handleDownload(video, buttonElement) {
@@ -201,6 +265,7 @@
     }
 
     return {
+      cancelSourceDownload,
       createSourceContext,
       emitSourceLifecycleMessage,
       handleDownload,

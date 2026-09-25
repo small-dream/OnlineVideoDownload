@@ -246,3 +246,35 @@ test('hls strategy only supports hls video types', async () => {
   assert.equal(strategy.supports({ type: 'direct' }), false);
   assert.equal(strategy.supports(null), false);
 });
+
+test('hls download forwards the selected quality to both the page context and the fetcher', async () => {
+  const calls = mockChrome({ tabMessageResponses: [] });
+  const { createHlsDownloadStrategy } = await loadStrategy();
+  const fetcherOptions = [];
+  const variantUrl = 'https://cdn10.11yun.space/TAV1/339370/720p.m3u8';
+
+  await createHlsDownloadStrategy().download({
+    ...HLS_VIDEO,
+    downloadOptions: { quality: '720p', variantUrl },
+  }, {
+    filenameBase: 'video',
+    hlsFetcher: {
+      downloadAndMerge: async (...args) => {
+        fetcherOptions.push(args[6]);
+        return { downloadId: 5, ok: true };
+      },
+    },
+    tabId: 5,
+    taskMeta: {},
+  });
+
+  const delegateMessage = calls.tabMessages.find((call) => call.message.type === 'HLS_DOWNLOAD_DELEGATE');
+  assert.deepEqual(delegateMessage.message.options, {
+    fetchOptions: { credentials: 'include' },
+    quality: variantUrl,
+  });
+  assert.deepEqual(fetcherOptions[0], {
+    fetchOptions: { credentials: 'include' },
+    quality: variantUrl,
+  });
+});

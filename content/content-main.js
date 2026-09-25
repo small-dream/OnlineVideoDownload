@@ -13,38 +13,65 @@
   const MSG = messageTypes;
   const OBJECT_URL_REVOKE_DELAY = constants.OBJECT_URL_REVOKE_DELAY || 60000;
 
+  const pageScripts = [
+    'lib/message-types.js',
+    'injected/page-core.js',
+    'injected/page-http-utils.js',
+    'injected/page-youtube-parser.js',
+    'injected/page-bilibili-parser.js',
+    'injected/page-interceptor.js',
+    'injected/page-context-script.js',
+  ];
+
+  function injectPageScriptViaDom() {
+    const injectOne = (path) => new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL(path);
+      script.type = 'text/javascript';
+      script.onload = () => {
+        script.remove();
+        resolve();
+      };
+      script.onerror = () => {
+        script.remove();
+        reject(new Error(`Failed to inject ${path}`));
+      };
+      (document.head || document.documentElement).appendChild(script);
+    });
+
+    return pageScripts.reduce(
+      (chain, path) => chain.then(() => injectOne(path)),
+      Promise.resolve()
+    );
+  }
+
+  /**
+   * 通过 background 用 chrome.scripting.executeScript({ world: 'MAIN' }) 注入。
+   * CSP 严格（Twitter/X 等）的站点会静默拦截 <script src>，导致全部 hook 失效，
+   * 因此优先使用 MAIN world 注入，失败再回退 DOM 注入。
+   */
+  async function injectPageScriptViaMainWorld() {
+    const response = await sendMessageAsync({
+      files: pageScripts,
+      type: MSG.INJECT_PAGE_SCRIPTS || 'INJECT_PAGE_SCRIPTS',
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'MAIN world 脚本注入失败');
+    }
+  }
+
   async function injectPageScript() {
     try {
-      const injectOne = (path) => new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = chrome.runtime.getURL(path);
-        script.type = 'text/javascript';
-        script.onload = () => {
-          script.remove();
-          resolve();
-        };
-        script.onerror = () => {
-          script.remove();
-          reject(new Error(`Failed to inject ${path}`));
-        };
-        (document.head || document.documentElement).appendChild(script);
-      });
+      await injectPageScriptViaMainWorld();
+      console.log('[OVD] page context scripts injected (MAIN world)');
+      return;
+    } catch (err) {
+      console.warn(`[OVD] MAIN world 脚本注入失败，回退 <script> 注入: ${err.message}`);
+    }
 
-      const pageScripts = [
-        'lib/message-types.js',
-        'injected/page-core.js',
-        'injected/page-http-utils.js',
-        'injected/page-youtube-parser.js',
-        'injected/page-bilibili-parser.js',
-        'injected/page-interceptor.js',
-        'injected/page-context-script.js',
-      ];
-
-      for (const path of pageScripts) {
-        await injectOne(path);
-      }
-
-      console.log('[OVD] page context scripts injected');
+    try {
+      await injectPageScriptViaDom();
+      console.log('[OVD] page context scripts injected (DOM fallback)');
     } catch (err) {
       console.error('[OVD] Failed to inject page scripts:', err);
     }
@@ -89,6 +116,41 @@
       try { URL.revokeObjectURL(objectUrl); } catch (_) { /* ignore */ }
       triggerBlobFallbackDownload(blob, filename);
     });
+  }
+
+  /**
+   * content script 无法直接写 declarativeNetRequest 规则：交由 background 代注册
+   * 临时 Referer/CORS 规则（防 403），返回清理函数供调用方在下载结束后释放。
+   */
+  async function injectDownloadHeaders(url, headers) {
+    let corsOrigin = '';
+    try {
+      corsOrigin = location.origin;
+    } catch (_err) {
+      corsOrigin = '';
+    }
+
+    const response = await sendMessageAsync({
+      corsOrigin,
+      headers,
+      type: MSG.INJECT_DOWNLOAD_HEADERS || 'INJECT_DOWNLOAD_HEADERS',
+      url,
+    });
+
+    if (!response?.ok || !response.token) {
+      return async () => {};
+    }
+
+    return async () => {
+      try {
+        await sendMessageAsync({
+          token: response.token,
+          type: MSG.RELEASE_DOWNLOAD_HEADERS || 'RELEASE_DOWNLOAD_HEADERS',
+        });
+      } catch (err) {
+        console.warn(`[OVD] 释放请求头注入规则失败: ${err.message}`);
+      }
+    };
   }
 
   /**
@@ -205,6 +267,7 @@
   const dashStrategy = dashStrategyFactory.createDashStrategy({
     getFloatButton,
     hlsPipeline,
+    injectRequestHeaders: injectDownloadHeaders,
     sendMessageAsync,
     triggerBlobDownload,
     videoUtils,
@@ -241,6 +304,7 @@
   const messageRouter = messageRouterFactory.createMessageRouter({
     bilibiliStrategy,
     blobStrategy,
+    cancelSourceDownload: (target) => downloadCoordinator.cancelSourceDownload(target),
     ensureUi: () => getFloatButton()?.mount?.(),
     getFloatButton,
     hlsDelegateHandler,
