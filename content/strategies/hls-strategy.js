@@ -55,6 +55,7 @@
 
       let audioRenditionUrl = null;
       let selectedQuality = '';
+      let selectedVariant = null;
 
       if (m3u8Text.includes('#EXT-X-STREAM-INF')) {
         const master = hlsPipeline.parseHlsMasterPlaylist?.(m3u8Text, m3u8Url)
@@ -66,6 +67,7 @@
         }
 
         selectedQuality = variant.label || '';
+        selectedVariant = variant;
         console.log(`[OVD] Master Playlist 选中画质=${selectedQuality} 带宽=${variant.bandwidth} url=${variant.url}`);
 
         const audioRendition = hlsPipeline.findMatchingAudioRendition?.(master, variant);
@@ -126,6 +128,32 @@
       const sink = audioHandling !== 'merge' && typeof hlsPipeline.createInMemorySink === 'function'
         ? hlsPipeline.createInMemorySink()
         : null;
+
+      // 体积预估：内容侧是纯内存路径（上限 MAX_IN_PAGE_MERGE_BYTES），
+      // 预估超限时直接让后台接手（后台走 OPFS 落盘），避免"先下满 1.5 GB 再中止重下"。
+      const contentMaxBytes = constants.MAX_IN_PAGE_MERGE_BYTES || 1500 * 1024 * 1024;
+      const effectiveBandwidth = selectedVariant
+        ? (selectedVariant.averageBandwidth || selectedVariant.bandwidth || 0)
+        : 0;
+      const estimatedBytes = typeof hlsPipeline.estimateHlsBytes === 'function'
+        ? hlsPipeline.estimateHlsBytes(
+          playlist,
+          effectiveBandwidth,
+          { bandwidthFactor: selectedVariant?.averageBandwidth ? 1 : 0.8 }
+        )
+        : 0;
+
+      if (estimatedBytes > contentMaxBytes) {
+        const err = new Error(
+          `预估流体积约 ${Math.round(estimatedBytes / 1024 / 1024)} MB，`
+          + `超过内容侧内存上限 ${Math.round(contentMaxBytes / 1024 / 1024)} MB，改由后台 OPFS 落盘下载`
+        );
+        err.code = 'HLS_CONTENT_SIZE_SKIP';
+        err.estimatedBytes = estimatedBytes;
+        err.maxBytes = contentMaxBytes;
+        console.log(`[OVD] 内容侧跳过下载: ${err.message}`);
+        throw err;
+      }
 
       const prefixBuffers = [];
       if (playlist.initSegmentUrl) {

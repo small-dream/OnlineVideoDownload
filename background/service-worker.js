@@ -1289,20 +1289,37 @@ async function fetchMediaStreams(videoUrl, audioUrl, headers, tabId, transferId,
       fetchStreamBufferResumable(audioUrl, 'audio', headers, onStreamProgress),
     ]);
 
-    const chunkSize = BLOB_TRANSFER_CHUNK_SIZE;
+    // 回传是本地 IPC（不是网络），256KB + 逐条 await 会让大文件被 IPC 往返拖住：
+    // 改用 1MB 分块 + 有界流水线，分片自带 seq 供内容侧按序还原。
+    const chunkSize = constants.MEDIA_STREAM_CHUNK_SIZE || 1024 * 1024;
+    const pipelineDepth = Math.max(1, constants.MEDIA_STREAM_PIPELINE_DEPTH || 4);
     const frameOptions = frameId != null ? { frameId } : undefined;
     await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_START || 'MEDIA_STREAM_START', transferId }, frameOptions);
 
     for (const [label, buffer] of [['video', videoBuffer], ['audio', audioBuffer]]) {
       const bytes = new Uint8Array(buffer);
+      let seq = 0;
+      let inFlight = [];
+
       for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        const chunk = bytes.slice(offset, offset + chunkSize);
-        await sendTabMessageAsync(tabId, {
+        // subarray 是视图，避免每个分片再复制一次
+        const chunk = bytes.subarray(offset, offset + chunkSize);
+        inFlight.push(sendTabMessageAsync(tabId, {
           type: MSG.MEDIA_STREAM_CHUNK || 'MEDIA_STREAM_CHUNK',
           transferId,
           label,
           chunkBase64: uint8ArrayToBase64(chunk),
-        }, frameOptions);
+          seq: seq++,
+        }, frameOptions));
+
+        if (inFlight.length >= pipelineDepth) {
+          await Promise.all(inFlight);
+          inFlight = [];
+        }
+      }
+
+      if (inFlight.length > 0) {
+        await Promise.all(inFlight);
       }
     }
 

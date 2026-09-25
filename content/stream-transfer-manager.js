@@ -180,19 +180,53 @@
       return transfer?.taskMeta ? { ...transfer.taskMeta } : {};
     }
 
-    function appendMediaStreamChunk(transferId, label, chunkBase64) {
+    /**
+     * 追加媒体流分片。
+     * seq 由后台按发送顺序给出：回传现在是流水线（多条消息在途），
+     * 到达顺序不保证，因此按 seq 落位而不是 push；
+     * 旧调用方不带 seq 时退化为顺序追加。
+     */
+    function appendMediaStreamChunk(transferId, label, chunkBase64, seq) {
       const transfer = mediaStreamTransfers.get(transferId);
       if (!transfer || !chunkBase64) {
         return;
       }
 
       const bytes = base64ToUint8Array(chunkBase64);
-      if (label === 'video') {
-        transfer.videoChunks.push(bytes);
-        return;
+      const key = label === 'video' ? 'videoChunks' : 'audioChunks';
+      const chunks = transfer[key];
+      const index = Number.isInteger(seq) && seq >= 0 ? seq : chunks.length;
+
+      if (index === chunks.length || chunks[index] === undefined) {
+        chunks[index] = bytes;
+      } else {
+        // 同一位置重复到达：保留先到的分片，避免覆盖成乱序数据
+        console.warn(`[OVD] 忽略重复的 ${label} 分片 #${index}`);
+      }
+    }
+
+    /**
+     * 按序压缩分片数组；出现空洞说明有分片丢失，
+     * 直接 fail-fast，绝不产出缺片/错序的损坏文件。
+     */
+    function compactOrderedChunks(chunks, label) {
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return [];
       }
 
-      transfer.audioChunks.push(bytes);
+      const ordered = [];
+      for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index];
+        if (!chunk || chunk.length === 0) {
+          const err = new Error(`${label}流分片 #${index} 缺失，已中止以避免产出损坏文件`);
+          err.code = 'MEDIA_STREAM_CHUNK_MISSING';
+          err.label = label;
+          err.index = index;
+          throw err;
+        }
+        ordered.push(chunk);
+      }
+      return ordered;
     }
 
     function updateMediaStreamProgress(transferId, label, loadedBytes, totalBytes) {
@@ -239,9 +273,16 @@
         return;
       }
 
-      const videoBuffer = _concatUint8Arrays(transfer.videoChunks).buffer;
-      const audioBuffer = _concatUint8Arrays(transfer.audioChunks).buffer;
-      transfer.resolve?.({ audioBuffer, videoBuffer });
+      try {
+        const videoChunks = compactOrderedChunks(transfer.videoChunks, '视频');
+        const audioChunks = compactOrderedChunks(transfer.audioChunks, '音频');
+        const videoBuffer = _concatUint8Arrays(videoChunks).buffer;
+        const audioBuffer = _concatUint8Arrays(audioChunks).buffer;
+        transfer.resolve?.({ audioBuffer, videoBuffer });
+      } catch (err) {
+        console.error(`[OVD] 媒体流分片校验失败: ${err.message}`);
+        transfer.reject?.(err);
+      }
     }
 
     function failMediaStreamTransfer(transferId, errorMessage) {

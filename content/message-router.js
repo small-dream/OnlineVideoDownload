@@ -127,7 +127,12 @@
         }
 
         case MSG.YOUTUBE_MEDIA_STREAM_CHUNK || 'YOUTUBE_MEDIA_STREAM_CHUNK':
-          streamTransferManager?.appendMediaStreamChunk(payload.transferId, payload.label, payload.chunkBase64);
+          streamTransferManager?.appendMediaStreamChunk(
+            payload.transferId,
+            payload.label,
+            payload.chunkBase64,
+            payload.seq
+          );
           return;
 
         case MSG.YOUTUBE_MEDIA_STREAM_FINISH || 'YOUTUBE_MEDIA_STREAM_FINISH':
@@ -314,7 +319,7 @@
             break;
 
           case MSG.MEDIA_STREAM_CHUNK || 'MEDIA_STREAM_CHUNK':
-            streamTransferManager.appendMediaStreamChunk(msg.transferId, msg.label, msg.chunkBase64);
+            streamTransferManager.appendMediaStreamChunk(msg.transferId, msg.label, msg.chunkBase64, msg.seq);
             respond();
             break;
 

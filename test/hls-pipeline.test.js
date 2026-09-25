@@ -976,6 +976,31 @@ test('createSegmentDecryptor 对空 keyInfo 返回 null', () => {
   assert.equal(typeof mod.createSegmentDecryptor({ iv: null, key: {} }), 'function');
 });
 
+// ---------------------------------------------------------------
+// P0：体积预估（用于跳过注定超限的内容侧下载）
+// ---------------------------------------------------------------
+
+test('estimateHlsBytes 按时长 × 带宽估算，并对峰值带宽打折', () => {
+  const mod = loadModule();
+  const playlist = { totalDuration: 3600 };
+
+  // 1 小时 1080p（BANDWIDTH 峰值 5 Mbps）→ 按 0.8 折扣 ≈ 1.8 GB
+  assert.equal(mod.estimateHlsBytes(playlist, 5000000), Math.round((3600 * 5000000 * 0.8) / 8));
+  // 有 AVERAGE-BANDWIDTH 时传 factor=1
+  assert.equal(
+    mod.estimateHlsBytes(playlist, 800000, { bandwidthFactor: 1 }),
+    Math.round((3600 * 800000) / 8)
+  );
+});
+
+test('estimateHlsBytes 在缺时长/带宽时返回 0（不拦截）', () => {
+  const mod = loadModule();
+  assert.equal(mod.estimateHlsBytes(null, 5000000), 0);
+  assert.equal(mod.estimateHlsBytes({ totalDuration: 0 }, 5000000), 0);
+  assert.equal(mod.estimateHlsBytes({ totalDuration: 3600 }, 0), 0);
+  assert.equal(mod.estimateHlsBytes(undefined, undefined), 0);
+});
+
 test('downloadHlsSegments 使用 sink 时按分片顺序写入并放弃整份 buffers', async () => {
   const mod = loadModule();
   const sink = mod.createInMemorySink();

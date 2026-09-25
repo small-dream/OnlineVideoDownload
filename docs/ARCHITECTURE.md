@@ -100,6 +100,7 @@ Public surface:
 - `ivFromSequence(sequence)`
 - `createAbortError(message)`
 - `createInMemorySink()` / `createSegmentDecryptor(keyInfo)`
+- `estimateHlsBytes(playlist, bandwidth, { bandwidthFactor })`
 - `parseHlsEncryption`
 - `parseAttributeList`
 - `parseHlsIV`
@@ -124,6 +125,7 @@ Notes:
 - 加密相关错误均为 fail-fast：`parseHlsEncryption` 在密钥获取失败（`HLS_KEY_FETCH_FAILED`）或加密方式非 AES-128/NONE（`HLS_UNSUPPORTED_ENCRYPTION`）时抛错；`decryptHlsSegments` 解密失败抛 `HLS_SEGMENT_DECRYPT_FAILED`，绝不回退使用密文。
 - `downloadHlsSegments` 是 background/content 共用的分片下载循环：失败分片按 `HLS_SEGMENT_RETRY_DELAYS` 指数退避重试（最多 3 次），最终失败数超过 `HLS_MAX_FAILED_RATIO`（分片总数 ≤ 10 时零容忍）时抛 `HLS_SEGMENT_DOWNLOAD_FAILED` 中止任务，不产出含空洞的文件；未超阈值时通过 `onProgress(done, total, { failedCount, retriedCount })` 上报失败/重试统计。
 - 体积守卫：累计下载字节超过 `options.maxTotalBytes`（默认 `constants.MAX_IN_PAGE_MERGE_BYTES`，1.5 GB）时抛 `HLS_OUTPUT_TOO_LARGE`，避免浏览器内合并 OOM。
+- 内容侧体积预估：`estimateHlsBytes` 用 `sum(EXTINF) × 有效带宽 / 8` 估算输出体积（无 `AVERAGE-BANDWIDTH` 时对峰值 `BANDWIDTH` 乘 0.8；缺时长/带宽返回 0 即不拦截）。`content/strategies/hls-strategy.js` 在开始下载前用它判断，超过 `MAX_IN_PAGE_MERGE_BYTES` 直接抛 `HLS_CONTENT_SIZE_SKIP`，由 `hls-download-strategy` 视为委托失败并回退后台 OPFS 路径——避免"先下满 1.5 GB 再中止重下"。
 - 取消：`options.signal` 为 `AbortSignal`，任一批次开始前检测到 `aborted` 即抛 `DOWNLOAD_ABORTED`（`createAbortError()`）。
 - **顺序写入 sink（内存治理）**：`options.sink` 为 `{ write(chunk, { index, segment }) }` 时，`downloadHlsSegments` 不再返回整份 `buffers` 数组，而是只保留"已下载但还不能按序落盘"的重排窗口（≤ `concurrency` 个分片）。`options.transform(chunk, index, segment)` 在写入前逐分片执行（解密等），因此不需要再额外持有一份解密后的全量数组。返回 `{ buffers: null, writtenBytes, totalBytes, sink }`。
   - 内存对比：旧路径峰值 ≈ buffers(N) + merged(N) + Blob(N) ≈ 3N；sink 路径 ≈ 分片引用(N) + 窗口(≤并发数)，且 `toBlob()` 后引用立即释放。
@@ -451,6 +453,8 @@ Responsibilities:
 - Coordinate page-direct download completion promises.
 - Normalize binary payloads and download filenames.
 - Forward optional `traceId` metadata into page-context YouTube fetch/download requests.
+- 媒体流分片按 `seq` 落位而非 `push`：后台回传已改为**有界流水线**（`MEDIA_STREAM_PIPELINE_DEPTH`），到达顺序不再保证。
+- `finishMediaStreamTransfer` 会校验分片连续性（`compactOrderedChunks`），出现空洞抛 `MEDIA_STREAM_CHUNK_MISSING`，绝不产出缺片/错序文件。
 
 Owned state:
 
@@ -771,6 +775,12 @@ Notes:
 - The content router delegates that request to `bilibili-strategy.fetchQualities()` so popup UI does not need to duplicate Bilibili API logic.
 - HLS 画质同理：popup 用 `{ m3u8Url, headers }` 请求 `HLS_FETCH_QUALITIES`，content 复用 `hlsDelegateHandler.fetchQualities()`（内部 `parseHlsMasterPlaylist`）返回 `{ isMaster, qualities: [{ url, label, detail, bandwidth, height }] }`；选中项以 `downloadOptions.variantUrl`（精确变体 URL）随下载请求回传。
 
+### Background -> Content (媒体流回传)
+
+- `MEDIA_STREAM_CHUNK` 现在携带 `seq`（同一 label 内自增），块大小取 `MEDIA_STREAM_CHUNK_SIZE`（默认 1 MB，此前复用 256 KB 的 blob 分块常量），最多 `MEDIA_STREAM_PIPELINE_DEPTH`（默认 4）条消息在途，`bytes.subarray` 直接作为 base64 输入避免逐块复制。
+- 内容侧按 `seq` 落位，因此流水线不影响还原顺序；`seq` 缺失（旧调用方/页面注入路径）退化为顺序追加。
+- 收益模型：100 MB 回传、单次消息往返按 1 ms 计，消息数 400 → 100、阻塞时间 401 ms → 112 ms（≈3.6×）；实际数值取决于 IPC 往返成本。
+
 ### Background <-> Offscreen
 
 Examples:
@@ -863,6 +873,7 @@ When adding shared low-level helpers:
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.17.2 | 2026-09-25 | P0 优化（网络/浪费路径）：①`lib/hls-pipeline.js` 新增 `estimateHlsBytes(playlist, bandwidth, { bandwidthFactor })`，content 侧 HLS 在下载前按 `sum(EXTINF) × 有效带宽 / 8` 预估体积，超过 `MAX_IN_PAGE_MERGE_BYTES` 时抛 `HLS_CONTENT_SIZE_SKIP` 让后台 OPFS 路径接手，消除"先下满 1.5 GB 再中止重下"；②Bilibili/YouTube 的媒体流回传由「256 KB + 逐条 await」改为「1 MB + 有界流水线（`MEDIA_STREAM_CHUNK_SIZE` / `MEDIA_STREAM_PIPELINE_DEPTH`）」，消息数降 4 倍、阻塞时间在 1 ms 往返模型下约 3.6 倍提升；分片带 `seq`，`content/stream-transfer-manager.js` 按 seq 落位并在 `finish` 时校验连续性，缺片抛 `MEDIA_STREAM_CHUNK_MISSING` 而不是产出错序文件。 |
 | 1.17.1 | 2026-09-25 | Third-wave follow-up: large-file memory治理与分离文件降级。`downloadHlsSegments` 新增 `options.sink` / `options.transform`：有 sink 时不再返回整份 buffers，只保留 ≤ 并发数的有序重排窗口，解密在写入前逐分片执行（`createSegmentDecryptor` 与 `decryptHlsSegments` 共用实现，峰值内存从 ≈3N 降到 ≈N）。新增 `lib/opfs-sink.js`：`createInMemorySink` / `createOpfsSink` / `createSpillSink`（超过 `OPFS_SPILL_THRESHOLD_BYTES` 自动溢出到扩展 origin 的 OPFS，输出上限改用 `OPFS_MAX_OUTPUT_BYTES`）+ `cleanupStale()`；manifest 增加 `unlimitedStorage`。后台 HLS 路径使用自适应 sink，完成后经 offscreen 的 `OFFSCREEN_OPFS_DOWNLOAD_OPEN`（只传文件名、不传字节）换取对象 URL 交给 `chrome.downloads`，`background/opfs-temp-registry.js` 记录 `downloadId → 文件名`，SW 在 `onChanged` 的 complete/interrupted 分支删除临时文件；内容侧因 `HLS_OUTPUT_TOO_LARGE` 中止后仍会自动回退到这条后台路径。分离文件降级：HLS 独立音轨无法合并（视频非 fMP4 或 muxer 抛错）时单独保存 `_audio` 文件而不是丢弃；DASH 超过 `DASH_MAX_MERGE_BYTES`、Bilibili 超过内存上限时改为保存 `-video` / `-audio` 两个文件而不是直接失败。 |
 | 1.17.0 | 2026-09-25 | Third-wave coverage parity with Video DownloadHelper. HLS: `parseHlsMasterPlaylist` + `selectHlsVariant` expose every variant (with `width/height/bandwidth/codecs/audioGroupId`) to a new popup clarity dropdown backed by `HLS_FETCH_QUALITIES` (selection travels as `downloadOptions.variantUrl`); the media playlist parser now returns rich segments (`seq`/`byteRange`/`keyIndex`/`discontinuity`) and handles `EXT-X-BYTERANGE`, `EXT-X-KEY` rotation, `EXT-X-MEDIA-SEQUENCE`-derived IVs, `EXT-X-MAP` byte ranges, `EXT-X-DISCONTINUITY` and `EXT-X-ENDLIST` (live playlists show a 「仅下载当前窗口」 warning instead of silently producing a truncated file); `EXT-X-MEDIA` audio renditions are muxed into the video via `bilibili-muxer` when both sides are fMP4. Streams larger than `MAX_IN_PAGE_MERGE_BYTES` abort with `HLS_OUTPUT_TOO_LARGE` (also enforced for Bilibili muxing via `BILIBILI_OUTPUT_TOO_LARGE`). DASH: `lib/mpd-parser.js` gains `$Number%05d$`/`$Time%08d$` template formatting, `mediaRange`/`indexRange`/`SegmentBase@indexRange` byte ranges, correct multi-Period grouping (`periods`, `isMultiPeriod`, `collectRepresentationsAcrossPeriods`) and `SegmentTimeline r="-1"`, plus a built-in XML fallback so the parser runs (and is tested) without `DOMParser`; the content DASH strategy injects Referer/CORS through `INJECT_DOWNLOAD_HEADERS`/`RELEASE_DOWNLOAD_HEADERS` and passes byte ranges to the fetcher. Detection: `video/mp2t`, `video/quicktime`, `video/x-matroska` and `application/octet-stream` (confirmed by extension or `Content-Disposition`) are recognised, and generic pages watch `MutationObserver` + media events instead of scanning twice. Injection: page scripts are loaded through `chrome.scripting.executeScript({ world: 'MAIN' })` (`INJECT_PAGE_SCRIPTS`) with the `<script src>` path kept as fallback. Settings: `domainBlacklist` / `minVideoDurationSec` / `minVideoSizeMb` filter noisy entries at read time via `lib/video-filter.js`, and `askSaveLocation` drives `saveAs`. Tasks: `ABORT_SOURCE_DOWNLOAD` cancels content-side tasks through `AbortController`/`DOWNLOAD_ABORTED`, the popup task list has a 取消 button, and `background/download-queue.js` applies `concurrentDownloadLimit` to every background download entry point. |
 | 1.16.0 | 2026-09-25 | Content scripts now inject into all frames (`all_frames: true`) to detect iframe-embedded videos (YouTube embed, etc.). Registry entries record `frameId` (from `sender.frameId`/`details.frameId`); delegation messages (`FETCH_BLOB`, `HLS_DOWNLOAD_DELEGATE`, `SOURCE_DOWNLOAD`, `MEDIA_STREAM_*`, `REVOKE_OBJECT_URL`) are routed to the detecting frame via `chrome.tabs.sendMessage` options, with `browser-compat` auto-extracting `frameId` from message meta. Subframe navigations clear only that frame's entries via `VideoRegistry.clearFrame`. Second-wave UX pass: download completion/failure system notifications gated by `downloadNotification` (click opens the download folder via `download-notification.js`); `filenameFormat` naming rule enforced in `lib/download-path.js` (`title` / `title-quality` / `title-date`); batch download UI restored (visible per-item checkboxes, header select-all with indeterminate state, 「下载所选 (N)」 button, concurrency from `concurrentDownloadLimit`, DRM items not selectable); toolbar badge now shows the per-tab detected-video count (>99 → `99+`) via `action-badge.js` while running-task count moves to the popup tasks-button badge; downloading items show 「下载中 N%」; in-page floating feedback bar restored (`content/float-button.js`) for long tasks; errors render as friendly Chinese text via `popup-error-messages.js` (15 error-code mappings + keyword fallbacks); 「清列表」 also clears the background `VideoRegistry` via `CLEAR_TAB_VIDEOS` with popup/main-frame/subframe scope resolved by `clear-video-scope.js`. |

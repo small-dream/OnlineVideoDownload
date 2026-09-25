@@ -539,3 +539,90 @@ test('HLS 合并失败时降级为单独保存音轨文件', async () => {
     delete globalThis.__OVD_HLS_PIPELINE__;
   }
 });
+
+// ---------------------------------------------------------------
+// P0：体积预估超限时跳过内容侧下载（交给后台 OPFS 落盘），避免白下 1.5GB
+// ---------------------------------------------------------------
+
+function longMediaPlaylist(segmentSeconds, segmentCount) {
+  const lines = ['#EXTM3U'];
+  for (let index = 0; index < segmentCount; index++) {
+    lines.push(`#EXTINF:${segmentSeconds}.0,`, `seg${index}.ts`);
+  }
+  return lines.join('\n');
+}
+
+test('预估体积超限时内容侧立即跳过，不下载任何分片', async () => {
+  const pipeline = loadRealPipeline();
+  const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\nmedia.m3u8\n';
+  // 60 × 60s = 1 小时；1h × 5Mbps × 0.8 / 8 ≈ 1.8GB > 1.5GB 上限
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(master)],
+    ['media.m3u8', playlistResponse(longMediaPlaylist(60, 60))],
+  ]);
+  let blobDownloads = 0;
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: () => {
+        blobDownloads += 1;
+        return { downloadId: 1, ok: true };
+      },
+    });
+
+    await assert.rejects(
+      () => handler.handle('https://cdn.example.com/master.m3u8', 'video', {}, {}),
+      (err) => {
+        assert.equal(err.code, 'HLS_CONTENT_SIZE_SKIP');
+        assert.match(err.message, /后台 OPFS/);
+        assert.ok(err.estimatedBytes > 1500 * 1024 * 1024);
+        return true;
+      }
+    );
+
+    assert.equal(blobDownloads, 0, '不应触发任何下载');
+    assert.deepEqual(stub.fetched, [
+      'https://cdn.example.com/master.m3u8',
+      'https://cdn.example.com/media.m3u8',
+    ], '只应读取两级播放列表，不下载分片');
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
+
+test('有 AVERAGE-BANDWIDTH 时按平均码率估算，不会误判为超限', async () => {
+  const pipeline = loadRealPipeline();
+  const master = [
+    '#EXTM3U',
+    '#EXT-X-STREAM-INF:BANDWIDTH=5000000,AVERAGE-BANDWIDTH=800000,RESOLUTION=1920x1080',
+    'media.m3u8',
+  ].join('\n');
+  // 1h × 0.8Mbps / 8 = 360MB < 1.5GB → 正常走内容侧
+  const stub = installFetchStub([
+    ['master.m3u8', playlistResponse(master)],
+    ['media.m3u8', playlistResponse(longMediaPlaylist(60, 60))],
+  ]);
+  const blobDownloads = [];
+
+  try {
+    const handler = loadHlsStrategy().createHlsDelegateHandler({
+      hlsPipeline: pipeline,
+      triggerBlobDownload: (blob, filename) => {
+        blobDownloads.push({ filename, size: blob.size });
+        return { downloadId: 5, ok: true };
+      },
+    });
+
+    const result = await handler.handle('https://cdn.example.com/master.m3u8', 'video', {}, {});
+
+    assert.equal(result.segmentCount, 60);
+    assert.equal(result.quality, '1080p');
+    assert.equal(blobDownloads.length, 1);
+    assert.ok(stub.fetched.some((url) => url.endsWith('seg59.ts')));
+  } finally {
+    stub.restore();
+    delete globalThis.__OVD_HLS_PIPELINE__;
+  }
+});
