@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.1
+> **版本**：1.17.2
 > **最后更新**：2026-09-25
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -93,6 +93,7 @@ UI 要求：
 - 无 `EXT-X-ENDLIST` 的直播流明确提示「仅能下载当前播放窗口的 N 个分片」，不静默产出残片
 - 分片按顺序写入 sink（内存中只驻留"并发数个"待写分片），解密也在写入前逐分片完成，峰值内存不再随文件大小线性增长
 - 后台路径的大文件流式落盘：累计超过 128 MB 自动切换到 OPFS（扩展自身 origin），输出上限从内存改为磁盘空间（默认 8 GB），下载完成后清理临时文件；内容侧因体积超限中止时自动回退到这条路径
+- 下载前按播放列表预估体积（时长 × 平均码率）：预估超过内容侧内存上限时**直接跳过内容侧下载**交给后台落盘，不再出现"先下满 1.5 GB 再重下"
 - 合并前累计体积超过 1.5 GB 即中止（`HLS_OUTPUT_TOO_LARGE`），避免浏览器内合并耗尽内存
 - 合并分片后触发单文件下载
 - 运行时优先委托 content（页面上下文）抓取，携带页面 Cookie 与来源信息；content 无响应或失败时自动回退到 service worker 抓取
@@ -135,6 +136,7 @@ UI 要求：
 - 使用页面上下文可用的 Cookie 请求播放地址
 - 必须通过 WBI 签名构造受保护接口请求
 - DASH 流在浏览器内抓取并合并为单个 MP4
+- 后台抓取完成后按 1 MB 分块、有界流水线回传给页面侧（分片带序号），大文件的回传不再被逐条消息往返拖住
 - 视音频合计超过浏览器内合并上限（默认 1.5 GB）时不直接失败，改为保存 `<名称>-video.mp4` 与 `<名称>-audio.mp4` 两个文件并提示需要本地工具合并
 - FLV / MP4 直链可退化为 background 直链下载
 - 合并后的文件优先通过浏览器下载 API 保存，若保存失败则降级为页面内 blob 触发下载
@@ -240,6 +242,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.17.2 | 2026-09-25 | P0 性能优化：①HLS 在内容侧下载前按播放列表预估体积（`sum(EXTINF) × 平均码率 / 8`，无 AVERAGE-BANDWIDTH 时对峰值带宽打 0.8 折），预估超限直接跳过内容侧、由后台 OPFS 落盘接手，省掉最多 1.5 GB 的重复下载；②Bilibili/YouTube 的后台→页面媒体流回传改为 1 MB 分块 + 4 条在途流水线（原为 256 KB 逐条等待，1 ms 往返模型下耗时约 1/3.6），分片带序号并按序还原，缺片直接报错而不是产出错序文件。 |
 | 1.17.1 | 2026-09-25 | 第三波补充（大文件治理 + 分离文件降级）：分片下载改为顺序写入 sink，内存中只保留「并发数个」待写分片，逐分片解密在同一通道完成（峰值内存从约 3 倍文件大小降到约 1 倍）；新增 OPFS 落盘能力（`lib/opfs-sink.js`，超过 128 MB 自动切换，manifest 增加 `unlimitedStorage`），后台 HLS 大文件落盘后经 offscreen 按文件名换取对象 URL 下载，临时文件在下载结束/中断后清理，异常退出遗留文件在启动时清理；内容侧因体积超限中止时自动回退到该后台路径。分离文件降级：HLS 独立音轨无法合并时单独保存 `_audio` 文件而不是丢弃；DASH 与 Bilibili 超过合并上限时改为保存 `-video` / `-audio` 两个文件而不是直接失败。 |
 | 1.17.0 | 2026-09-25 | 第三波「覆盖面对标 VDH」：HLS 支持 Master Playlist 清晰度选择（条目内下拉框、`HLS_FETCH_QUALITIES` 懒加载、默认最高码率）、`EXT-X-BYTERANGE`、`EXT-X-KEY` 轮换与按媒体序号派生 IV、`EXT-X-MEDIA` 独立音轨合并、`EXT-X-DISCONTINUITY` 计数，并在无 `EXT-X-ENDLIST` 时明确提示直播只能保存当前窗口；HLS/Bilibili 合并补 1.5 GB 体积守卫（`HLS_OUTPUT_TOO_LARGE` / `BILIBILI_OUTPUT_TOO_LARGE`）。DASH 补 `$Number%05d$` 宽度格式、`mediaRange`/`indexRange`、多 Period 分组与 `r="-1"`，页面侧下载经 background 注入 Referer/CORS 规则，background 对已解析的分离流落盘为两个文件并明确提示仅 `.mpd` 地址的场景。通用嗅探新增 `video/mp2t`、`video/quicktime`、`video/x-matroska` 与「`application/octet-stream` + 扩展名/Content-Disposition 二次确认」，并用 `MutationObserver` 持续监听动态播放器。页面注入改用 `chrome.scripting.executeScript({ world: 'MAIN' })`（DOM 注入回退）。新增过滤设置（域名黑名单、最小时长、最小体积）与「每次询问保存位置」开关。任务视图新增「取消」按钮，内容侧任务经 `ABORT_SOURCE_DOWNLOAD` 中止，且 `concurrentDownloadLimit` 通过新的下载队列覆盖全部后台下载入口。 |
 | 1.16.0 | 2026-09-25 | 接通 `notifications` 权限：下载完成/失败按设置（`downloadNotification`）弹出系统通知，含文件名与大小，点击通知打开下载所在文件夹；`filenameFormat` 命名规则生效（标题 / 标题+画质 / 标题+日期，画质后缀取分辨率或平台清晰度）；图标徽章改为按标签页显示检测到的视频数（>99 显示 99+，tab 关闭/清理/注册表恢复时同步刷新），运行中任务数改由 Popup 任务视图展示；恢复页面内长任务浮动反馈条（右下角小条，文本消息 4 秒自动消失、进度百分比、同一时间一条，Popup 关闭后仍可见）；`CLEAR_TAB_VIDEOS` 明确 popup 来源（无 sender.tab）走整 tab 清理、子框架仅清该 frame 的语义，「清列表」同时清空 background 的 VideoRegistry 且不再被旧消息重新填满；批量下载 UI 恢复：条目复选框可见、列表头部全选（含半选态）与「下载所选 (N)」按钮、并发数读取 `concurrentDownloadLimit`、DRM 条目不可勾选；下载中条目按钮显示「下载中 N%」百分比；错误提示改为中文友好文案（`popup-error-messages.js`，15 个错误码映射 + 关键词兜底，如 B 站未登录提示）。 |
