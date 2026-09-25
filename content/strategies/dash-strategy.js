@@ -194,7 +194,7 @@
 
       const mpdUrl = meta?.url;
       if (!mpdUrl) {
-        throw new Error('DASH manifest URL 为空');
+        throw new Error(t('err_dashNoUrl', 'DASH manifest URL 为空'));
       }
 
       const headers = meta?.requestHeaders || meta?.requiredHeaders || {};
@@ -235,7 +235,7 @@
       const audioRep = audioPick.representations[0] || null;
 
       if (!videoRep) {
-        throw new Error('MPD 中未找到视频自适应集');
+        throw new Error(t('err_dashNoVideo', 'MPD 中未找到视频自适应集'));
       }
 
       if (videoPick.hasMultipleInitializations || audioPick.hasMultipleInitializations) {
@@ -320,7 +320,7 @@
 
       const muxer = globalThis.BilibiliMuxer || {};
       if (!muxer.mergeFmp4Streams) {
-        throw new Error('合并工具未加载');
+        throw new Error(t('err_muxerMissing', '合并工具未加载'));
       }
 
       const blob = await muxer.mergeFmp4Streams(videoData, audioData, (percent) => {

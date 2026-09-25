@@ -156,6 +156,105 @@
   "edit_title": {
     "message": "Edit title"
   },
+  "err_aborted": {
+    "message": "Download cancelled."
+  },
+  "err_bilibili": {
+    "message": "Bilibili download failed. Make sure you are logged in to Bilibili and retry."
+  },
+  "err_dashNoRepresentation": {
+    "message": "No usable video representation found"
+  },
+  "err_dashNoUrl": {
+    "message": "DASH manifest URL is empty"
+  },
+  "err_dashNoVideo": {
+    "message": "No video adaptation set found in the MPD"
+  },
+  "err_dash_tooLarge": {
+    "message": "The DASH stream exceeds the in-browser merge limit; video and audio will be saved as separate files."
+  },
+  "err_diskFull": {
+    "message": "Writing the temporary file failed (out of disk space or storage quota); the download was aborted."
+  },
+  "err_drm": {
+    "message": "This video is DRM protected and cannot be downloaded."
+  },
+  "err_handoffFailed": {
+    "message": "Submitting the download to the browser failed"
+  },
+  "err_hlsDelegateUnavailable": {
+    "message": "HLS delegated download is unavailable"
+  },
+  "err_hls_decryptFailed": {
+    "message": "Segment decryption failed; the task was aborted."
+  },
+  "err_hls_encryption": {
+    "message": "This video uses an unsupported encryption scheme and cannot be downloaded."
+  },
+  "err_hls_keyFailed": {
+    "message": "Failed to fetch the decryption key. Make sure you are logged in to the site and retry."
+  },
+  "err_hls_segmentFailed": {
+    "message": "Some segments could not be downloaded even after retries; the task was aborted. Try again later."
+  },
+  "err_hls_sizeSkip": {
+    "message": "This stream exceeds the in-browser merge limit; downloading to disk in the background instead."
+  },
+  "err_hls_tooLarge": {
+    "message": "The stream exceeds the in-browser merge limit; the download was aborted. Try a lower quality."
+  },
+  "err_httpForbidden": {
+    "message": "The server rejected the download (403). Make sure you are logged in or refresh the page and retry."
+  },
+  "err_loginRequired": {
+    "message": "This video requires a logged-in account. Sign in to the site first."
+  },
+  "err_muxerMissing": {
+    "message": "Muxer is not loaded"
+  },
+  "err_noQuality": {
+    "message": "No selectable quality found in the master playlist"
+  },
+  "err_noSegments": {
+    "message": "No downloadable segments found in the playlist. Refresh the page and retry."
+  },
+  "err_noSegmentsRaw": {
+    "message": "No segments found in the m3u8 playlist"
+  },
+  "err_timeout": {
+    "message": "The download request timed out. Check your network and retry."
+  },
+  "err_yt_captureFailed": {
+    "message": "Capture download failed. Keep the page playing in the foreground and retry."
+  },
+  "err_yt_captureUnsupported": {
+    "message": "This browser or page does not support capture mode. Try parse mode instead."
+  },
+  "err_yt_noStreams": {
+    "message": "No downloadable stream found. Refresh the page or try capture mode."
+  },
+  "err_yt_parseFailed": {
+    "message": "YouTube parse download failed. Try capture mode instead."
+  },
+  "err_yt_playbackBlocked": {
+    "message": "The page blocked playback. Click play manually and retry."
+  },
+  "err_yt_saveFailed": {
+    "message": "Saving the file failed. Check your browser download settings and retry."
+  },
+  "err_yt_signature": {
+    "message": "This video uses an encrypted signature, which parse mode cannot handle. Try capture mode instead."
+  },
+  "err_yt_tooLarge": {
+    "message": "The video is too large for parse mode. Try capture mode instead."
+  },
+  "err_yt_unknown": {
+    "message": "YouTube download failed. Try switching the download mode and retry."
+  },
+  "err_yt_videoNotFound": {
+    "message": "No video element found on the page. Start playback and retry."
+  },
   "error_noBackground": {
     "message": "Cannot reach the extension background."
   },

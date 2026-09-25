@@ -39,7 +39,9 @@ test('buildFriendlyErrorMessage: maps all known HLS codes', () => {
   const { buildFriendlyErrorMessage, ERROR_CODE_TEXT } = mod();
   const hlsCodes = Object.keys(ERROR_CODE_TEXT).filter((code) => code.startsWith('HLS_'));
   assert.deepEqual(hlsCodes.sort(), [
+    'HLS_CONTENT_SIZE_SKIP',
     'HLS_KEY_FETCH_FAILED',
+    'HLS_OUTPUT_TOO_LARGE',
     'HLS_SEGMENT_DECRYPT_FAILED',
     'HLS_SEGMENT_DOWNLOAD_FAILED',
     'HLS_UNSUPPORTED_ENCRYPTION',
@@ -107,4 +109,35 @@ test('__OVD_POPUP__ is frozen and does not double-register', () => {
   assert.ok(Object.isFrozen(first));
   require(path.resolve(__dirname, '../popup/popup-error-messages.js'));
   assert.equal(globalThis.__OVD_POPUP__, first);
+});
+
+// --- 4.4 phase C：错误目录补齐新错误码与英文关键词兜底 ---
+
+test('新增错误码（体积超限 / OPFS 写入 / 取消）都有友好文案', () => {
+  const { buildFriendlyErrorMessage } = mod();
+  for (const code of ['HLS_OUTPUT_TOO_LARGE', 'HLS_CONTENT_SIZE_SKIP', 'DASH_OUTPUT_TOO_LARGE', 'OPFS_WRITE_FAILED', 'DOWNLOAD_ABORTED']) {
+    const result = buildFriendlyErrorMessage({ code, message: 'raw' });
+    assert.equal(result.friendly, true, 'expected friendly text for ' + code);
+    assert.ok(result.text.length > 0);
+  }
+});
+
+test('关键词兜底同时覆盖中文与英文原始错误', () => {
+  const { buildFriendlyErrorMessage } = mod();
+
+  const cases = [
+    ['HTTP 403: https://cdn.example.com/x.m3u8', /403/],
+    ['Failed to fetch: 403 Forbidden', /403/],
+    ['Bilibili download failed: risk control', /Bilibili/],
+    ['request timeout', /超时/],
+    ['No segments found in m3u8 playlist', /分片/],
+    ['DRM protected content', /DRM/],
+    ['m3u8 中没有找到分片', /分片/],
+  ];
+
+  for (const [message, pattern] of cases) {
+    const result = buildFriendlyErrorMessage({ message });
+    assert.equal(result.friendly, true, 'expected keyword hit for: ' + message);
+    assert.match(result.text, pattern, 'unexpected text for: ' + message);
+  }
 });
