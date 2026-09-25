@@ -555,10 +555,10 @@ function longMediaPlaylist(segmentSeconds, segmentCount) {
 test('预估体积超限时内容侧立即跳过，不下载任何分片', async () => {
   const pipeline = loadRealPipeline();
   const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\nmedia.m3u8\n';
-  // 60 × 60s = 1 小时；1h × 5Mbps × 0.8 / 8 ≈ 1.8GB > 1.5GB 上限
+  // 90 × 60s = 1.5 小时；1.5h × 5Mbps × 0.8 / 8 ≈ 2.7GB > 2GB 上限
   const stub = installFetchStub([
     ['master.m3u8', playlistResponse(master)],
-    ['media.m3u8', playlistResponse(longMediaPlaylist(60, 60))],
+    ['media.m3u8', playlistResponse(longMediaPlaylist(60, 90))],
   ]);
   let blobDownloads = 0;
 
@@ -576,7 +576,7 @@ test('预估体积超限时内容侧立即跳过，不下载任何分片', async
       (err) => {
         assert.equal(err.code, 'HLS_CONTENT_SIZE_SKIP');
         assert.match(err.message, /后台 OPFS/);
-        assert.ok(err.estimatedBytes > 1500 * 1024 * 1024);
+        assert.ok(err.estimatedBytes > 2 * 1024 * 1024 * 1024);
         return true;
       }
     );

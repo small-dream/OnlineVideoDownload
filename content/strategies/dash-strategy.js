@@ -11,7 +11,7 @@
 
   const constants = globalThis.__OVD_CONSTANTS__ || {};
   const SEGMENT_CONCURRENCY = constants.HLS_SEGMENT_CONCURRENCY || 5;
-  const MAX_MERGE_SIZE = constants.DASH_MAX_MERGE_BYTES || 1500 * 1024 * 1024;
+  const MAX_MERGE_SIZE = constants.DASH_MAX_MERGE_BYTES || 2 * 1024 * 1024 * 1024;
 
   function createDashStrategy(options = {}) {
     const {

@@ -55,13 +55,13 @@
 | 3.4 | MPD 解析修复 | 支持 `$Number%05d$` 宽度格式符（`lib/mpd-parser.js:135-151` 当前只做字面替换，产出含 `$` 的坏 URL）、SegmentURL `mediaRange`/`indexRange`、多 Period 正确分组、SegmentTimeline `r="-1"` | ✅ 另加 `$Time%08d$`、`$$` 转义、`SegmentBase@indexRange`、内置无 DOMParser 回退解析器（测试不再 skip） |
 | 3.5 | 通用嗅探增强 | MIME 增加 `video/mp2t`、`video/quicktime`、`application/octet-stream`（结合扩展名/Content-Disposition 二次确认）；通用站点加 MutationObserver 持续监听动态插入的 `<video>/<audio>`（当前仅 init/load 扫描两次） | ✅ 另加 `video/x-matroska`；`injected/page-context-script.js` 新增防抖 MutationObserver + `loadstart`/`loadedmetadata` 监听 |
 | 3.6 | 页面注入改用 `chrome.scripting.executeScript({world:'MAIN'})` | 当前 DOM `<script>` 注入在 Twitter/X 等 CSP 严格站点静默失败，导致全部 hook 失效（`content/content-main.js:16-51`） | ✅ 新增 `INJECT_PAGE_SCRIPTS`（按 `sender.frameId` 定向、`injectImmediately`），DOM `<script>` 注入保留为回退 |
-| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 1.5GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ 三步：①`downloadHlsSegments({ maxTotalBytes })` 统一守卫；②顺序写入 sink + 逐分片 transform，峰值内存 ≈3N → ≈N+并发窗口；③新增 `lib/opfs-sink.js`（内存→OPFS 自适应溢出，`unlimitedStorage`），后台 HLS 大文件真正落盘（上限改 `OPFS_MAX_OUTPUT_BYTES` 8GB），临时文件由 SW 在下载结束/中断时清理、启动时清理残留；内容侧超限自动回退到后台落盘路径 |
+| 3.7 | 大文件内存治理 | HLS 与 Bilibili 合并路径补与 DASH 一致的 2GB 体积守卫（当前 `content/strategies/bilibili-strategy.js:185` 只打日志）；评估 OPFS/File System Access API 分片落盘替代纯内存合并；过大时降级为"下载分离文件" | ✅ 三步：①`downloadHlsSegments({ maxTotalBytes })` 统一守卫；②顺序写入 sink + 逐分片 transform，峰值内存 ≈3N → ≈N+并发窗口；③新增 `lib/opfs-sink.js`（内存→OPFS 自适应溢出，`unlimitedStorage`），后台 HLS 大文件真正落盘（上限改 `OPFS_MAX_OUTPUT_BYTES` 8GB），临时文件由 SW 在下载结束/中断时清理、启动时清理残留；内容侧超限自动回退到后台落盘路径 |
 | 3.8 | 过滤与黑名单 | 增加大小/时长阈值与域名黑名单，过滤广告片段、音效等噪声条目 | ✅ 新增 `lib/video-filter.js` + 三个设置项，读取列表时过滤，结构化来源不受阈值影响 |
 | 3.9 | 任务管理补全 | 内容侧任务 ABORT 消息通道（当前只能取消有 downloadId 的任务）、落实全局并发队列（`concurrentDownloadLimit` 当前仅 popup 批量入口生效）、`saveAs` 可选保存位置 | ✅ `ABORT_SOURCE_DOWNLOAD` + `AbortController`（`DOWNLOAD_ABORTED`）、popup 任务「取消」按钮、`background/download-queue.js` 全局并发、`askSaveLocation` → `saveAs`；过大文件改为保存分离文件（3.7 三步之外的第 4 个降级点：DASH/Bilibili/HLS 音轨） |
 
 ### 第三波遗留（未做，建议并入第四波）
 
-- 内容侧（页面上下文）路径仍是纯内存：OPFS 只有扩展 origin 可见。已在下载前用播放列表估算体积，预估超限直接跳过内容侧（`HLS_CONTENT_SIZE_SKIP`），因此"先下满 1.5 GB 再重下"的情况已消除；估算不准（例如服务器码率远低于标称）时仍可能落在回退路径上。
+- 内容侧（页面上下文）路径仍是纯内存：OPFS 只有扩展 origin 可见。已在下载前用播放列表估算体积，预估超限直接跳过内容侧（`HLS_CONTENT_SIZE_SKIP`），因此"先下满 2 GB 再重下"的情况已消除；估算不准（例如服务器码率远低于标称）时仍可能落在回退路径上。
 - DASH / Bilibili 合并仍需整体持有两路数据（fMP4 muxer 接口限制），超过上限时已降级为分离文件，但没有流式 mux。
 - File System Access API（用户直接选保存位置并流式写入）未做：需要可见页面 + 用户手势，属 UX 变更。
 - `offscreen/offscreen.js` 的小文件中转（base64 分片）仍会再复制一份，仅在内存路径上。
@@ -72,7 +72,7 @@
 | # | 事项 | 说明 |
 |---|------|------|
 | 4.1 | 修复 MPD 测试零执行 | `test/mpd-parser.test.js:7` 的 6 个用例因 Node 无 DOMParser 全部 skip；引入 `@xmldom/xmldom` 或 happy-dom 让其真正运行，并补 `$Number%05d$`、`r="-1"`、mediaRange 回归用例 |
-| 4.2 | 补 bilibili-muxer 测试 | 手写二进制解析器是全仓库风险最高、覆盖为零的模块；用最小构造的 fMP4 fixture 验证 `parseFragment`/config 提取/mux 输出；同时修复 trun data-offset、多 traf/trun 的脆弱假设（`lib/bilibili-muxer.js:382`）与样本写入失败静默丢帧问题 | 部分完成：已加 `test/bilibili-muxer.test.js`（自建 moof/mdat fixture，断言零拷贝不变量与样本解析正确性）；真实 moov/avcC 的完整 mux 输出与 trun data-offset/多 traf 回归仍缺 | 
+| 4.2 | 补 bilibili-muxer 测试 | 手写二进制解析器是全仓库风险最高、覆盖为零的模块；用最小构造的 fMP4 fixture 验证 `parseFragment`/config 提取/mux 输出；同时修复 trun data-offset、多 traf/trun 的脆弱假设（`lib/bilibili-muxer.js:382`）与样本写入失败静默丢帧问题 | ✅ 主要项完成：`test/bilibili-muxer.test.js` 覆盖零拷贝不变量、样本解析正确性，以及**真实 moov（avcC/esds）fixture 的端到端合并**（输出重新解析验证双 trak + mdat）。仍缺：trun data-offset 回归、多 traf/trun、样本写入失败静默丢帧 |
 | 4.3 | 消除重复实现 | HLS 下载循环在 background/content 各一份（`hls-fetcher.js` vs `hls-strategy.js`）收敛为单一实现；`youtube-adaptive-download-strategy.js:70-130` 改用 `lib/http-utils.js`（两份逻辑已出现漂移） |
 | 4.4 | 国际化 | 引入 `_locales` + `chrome.i18n`，至少补英文（README 已有四语、UI 锁中文，发布商店受限） |
 | 4.5 | 死代码清理 | 未引用的 `background/download-strategies/dash-download-strategy.js`、`buildQualityHtml`、重复 labels 常量；同步更新 PRD 与 README 中名不符实的描述 |
