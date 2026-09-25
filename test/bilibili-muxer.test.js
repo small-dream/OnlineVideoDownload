@@ -297,3 +297,157 @@ test('真实 fixture 多分片合并仍满足零拷贝（解析期内存与体�
   assert.ok(samples.every((sample) => sample.data.buffer === video || sample.data.buffer === audio));
   assert.ok(growth < 8 * 1024 * 1024, `解析期不应随媒体体积增长，实际 ${growth} 字节`);
 });
+
+// ===============================================================
+// 4.2 收尾：trun data-offset / 多 traf·trun / 写入失败 fail-fast
+// ===============================================================
+
+function makeTrunWithDataOffset(sampleSizes, dataOffset) {
+  const payload = new Uint8Array(12 + sampleSizes.length * 4);
+  const view = new DataView(payload.buffer);
+  payload[2] = 0x02; // sample-size-present
+  payload[3] = 0x01; // data-offset-present
+  view.setUint32(4, sampleSizes.length);
+  view.setUint32(8, dataOffset);
+  sampleSizes.forEach((size, index) => view.setUint32(12 + index * 4, size));
+  return makeBox('trun', payload);
+}
+
+function makeMoofWithRuns(runsPerTraf, makeRun) {
+  const trafs = runsPerTraf.map((runs) => {
+    const payload = concat([makeTfhd(), ...runs.map((run) => makeRun(run))]);
+    return makeBox('traf', payload);
+  });
+  return makeBox('moof', concat(trafs));
+}
+
+test('parseFragment 遵循 trun data-offset（跳过 mdat 前导填充）', () => {
+  const { __internals } = loadMuxer();
+  const sampleSize = 8;
+  const padding = 24;
+  // data-offset 基准是 moof 盒子起点；mdat payload 起点 = moof 起点 + moof.size + 8
+  const declared = makeMoofWithRuns([[[sampleSize]]], (sizes) => makeTrunWithDataOffset(sizes, 0)).length + 8 + padding;
+  const moofWithOffset = makeMoofWithRuns([[[sampleSize]]], (sizes) => makeTrunWithDataOffset(sizes, declared));
+  const mdatPayload = new Uint8Array(padding + sampleSize).fill(0xEE);
+  mdatPayload.set(new Uint8Array(sampleSize).fill(0x7A), padding);
+  const buffer = concat([moofWithOffset, makeBox('mdat', mdatPayload)]).buffer;
+
+  const [fragment] = __internals.collectFragments(buffer);
+  const samples = __internals.parseFragment(buffer, fragment);
+
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].data.buffer, buffer);
+  assert.deepEqual(Array.from(samples[0].data), new Array(sampleSize).fill(0x7A), '应跳过填充取真实样本');
+});
+
+test('parseFragment 对越界的 trun data-offset 直接报错', () => {
+  const { __internals } = loadMuxer();
+  const moof = makeMoofWithRuns([[[8]]], (sizes) => makeTrunWithDataOffset(sizes, 999999));
+  const buffer = concat([moof, makeBox('mdat', new Uint8Array(16))]).buffer;
+
+  const [fragment] = __internals.collectFragments(buffer);
+  assert.throws(
+    () => __internals.parseFragment(buffer, fragment),
+    (err) => {
+      assert.equal(err.code, 'FMP4_TRUN_OFFSET_OUT_OF_RANGE');
+      return true;
+    }
+  );
+});
+
+test('parseFragment 解析一个 moof 内的多个 traf（此前只取第一个会丢样本）', () => {
+  const { __internals } = loadMuxer();
+  const sampleSize = 4;
+  const moof = makeMoofWithRuns([[[sampleSize]], [[sampleSize]]], (sizes) => makeTrun(sizes));
+  const mdatPayload = concat([
+    new Uint8Array(sampleSize).fill(1),
+    new Uint8Array(sampleSize).fill(2),
+  ]);
+  const buffer = concat([moof, makeBox('mdat', mdatPayload)]).buffer;
+
+  const [fragment] = __internals.collectFragments(buffer);
+  const samples = __internals.parseFragment(buffer, fragment);
+
+  assert.equal(samples.length, 2);
+  assert.deepEqual(Array.from(samples[0].data), [1, 1, 1, 1]);
+  assert.deepEqual(Array.from(samples[1].data), [2, 2, 2, 2]);
+});
+
+test('parseFragment 解析同一 traf 内的多个 trun，且未声明偏移时数据连续', () => {
+  const { __internals } = loadMuxer();
+  const moof = makeMoofWithRuns([[[4], [4]]], (sizes) => makeTrun(sizes));
+  const mdatPayload = concat([
+    new Uint8Array(4).fill(3),
+    new Uint8Array(4).fill(4),
+  ]);
+  const buffer = concat([moof, makeBox('mdat', mdatPayload)]).buffer;
+
+  const [fragment] = __internals.collectFragments(buffer);
+  const samples = __internals.parseFragment(buffer, fragment);
+
+  assert.equal(samples.length, 2);
+  assert.deepEqual(Array.from(samples[0].data), [3, 3, 3, 3]);
+  assert.deepEqual(Array.from(samples[1].data), [4, 4, 4, 4], '第二个 trun 应紧接第一个的数据');
+});
+
+test('样本写入失败时中止合并，不再静默丢帧', async () => {
+  const muxer = loadMuxer();
+  const video = buildRealFmp4({ moov: makeVideoMoov(), fragmentCount: 3, sampleSize: 64 });
+  const audio = buildRealFmp4({ moov: makeAudioMoov(), fragmentCount: 3, sampleSize: 32 });
+  const original = globalThis.Mp4Muxer;
+  let added = 0;
+
+  globalThis.Mp4Muxer = {
+    ArrayBufferTarget: class {
+      constructor() {
+        this.buffer = new ArrayBuffer(16);
+      }
+    },
+    Muxer: class {
+      constructor(options) {
+        this.target = options.target;
+      }
+
+      addVideoChunkRaw() {
+        added += 1;
+        if (added === 2) {
+          throw new Error('模拟写入失败');
+        }
+      }
+
+      addAudioChunkRaw() {}
+
+      finalize() {
+        this.target.buffer = new ArrayBuffer(16);
+      }
+    },
+  };
+
+  try {
+    await assert.rejects(
+      () => muxer.mergeFmp4Streams(video, audio),
+      (err) => {
+        assert.equal(err.code, 'FMP4_SAMPLE_WRITE_FAILED');
+        assert.equal(err.track, 'video');
+        assert.equal(err.sampleIndex, 1);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.Mp4Muxer = original;
+  }
+});
+
+test('解析不出任何样本时中止合并，不产出空轨文件', async () => {
+  const muxer = loadMuxer();
+  const videoOnlyMoov = concat([makeBox('ftyp', fourCC('isom')), makeVideoMoov()]).buffer;
+  const audio = buildRealFmp4({ moov: makeAudioMoov(), fragmentCount: 2, sampleSize: 32 });
+
+  await assert.rejects(
+    () => muxer.mergeFmp4Streams(videoOnlyMoov, audio),
+    (err) => {
+      assert.equal(err.code, 'FMP4_NO_SAMPLES');
+      return true;
+    }
+  );
+});
