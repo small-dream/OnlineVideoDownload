@@ -1,96 +1,524 @@
 {
-  "action_settings": { "message": "Settings" },
-  "action_tasks": { "message": "Tasks" },
-  "action_history": { "message": "History" },
-  "action_clearList": { "message": "Clear list" },
-  "list_selectAll": { "message": "Select all" },
-  "list_batchDownload": { "message": "Download selected ($1)", "placeholders": { "1": { "content": "$1" } } },
-  "list_detected": { "message": "$1 video sources detected", "placeholders": { "1": { "content": "$1" } } },
-  "list_none": { "message": "No videos detected" },
-  "list_hint": { "message": "Open the extension on a page that contains a video" },
-  "settings_title": { "message": "Settings" },
-  "settings_subtitle": { "message": "Detecting videos..." },
-  "settings_concurrent": { "message": "Concurrent downloads" },
-  "settings_notification": { "message": "Notify when download finishes" },
-  "settings_youtubeMode": { "message": "Default YouTube mode" },
-  "settings_youtubeCapture": { "message": "Capture" },
-  "settings_youtubeParse": { "message": "Parse & download" },
-  "settings_filename": { "message": "File naming" },
-  "settings_filenameTitle": { "message": "Title only" },
-  "settings_filenameQuality": { "message": "Title + quality" },
-  "settings_filenameDate": { "message": "Title + date" },
-  "settings_subdir": { "message": "Download folder" },
-  "settings_subdirPlaceholder": { "message": "Leave empty for the default folder" },
-  "settings_minDuration": { "message": "Min duration (s, 0 = off)" },
-  "settings_minSize": { "message": "Min size (MB, 0 = off)" },
-  "settings_domainBlacklist": { "message": "Domain blocklist" },
-  "settings_domainBlacklistPlaceholder": { "message": "Comma or newline separated, e.g. ads.example.com" },
-  "settings_askSaveLocation": { "message": "Ask where to save" },
-  "settings_historyRetention": { "message": "Keep history" },
-  "settings_days": { "message": "$1 days", "placeholders": { "1": { "content": "$1" } } },
-  "settings_days7": { "message": "7 days" },
-  "settings_days30": { "message": "30 days" },
-  "settings_days90": { "message": "90 days" },
-  "settings_forever": { "message": "Forever" },
-  "settings_debugLogging": { "message": "Debug logging" },
-  "settings_saved": { "message": "Settings saved." },
-  "settings_saveFailed": { "message": "Failed to save settings: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_title": { "message": "Download history" },
-  "history_loading": { "message": "Loading..." },
-  "history_empty": { "message": "No download history yet" },
-  "history_clear": { "message": "Clear download history" },
-  "history_count": { "message": "$1 records", "placeholders": { "1": { "content": "$1" } } },
-  "history_clearFailed": { "message": "Failed to clear: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_deleteFailed": { "message": "Failed to delete: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_openFailed": { "message": "Cannot open the download folder: $1", "placeholders": { "1": { "content": "$1" } } },
-  "history_deleting": { "message": "Deleting" },
-  "history_delete": { "message": "Delete" },
-  "tasks_title": { "message": "Download tasks" },
-  "tasks_empty": { "message": "No download tasks" },
-  "tasks_running": { "message": "$1 task(s) running", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_total": { "message": "$1 task(s)", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_retry": { "message": "Retry" },
-  "tasks_retryFailed": { "message": "Retry failed: $1", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_cancel": { "message": "Cancel" },
-  "tasks_cancelled": { "message": "Task cancelled." },
-  "tasks_cancelFailed": { "message": "Failed to cancel: $1", "placeholders": { "1": { "content": "$1" } } },
-  "tasks_cancelUnavailable": { "message": "This task cannot be cancelled right now; it may already be writing the file." },
-  "tasks_openLocation": { "message": "Open folder" },
-  "taskStatus_running": { "message": "Downloading" },
-  "taskStatus_retrying": { "message": "Retrying" },
-  "taskStatus_complete": { "message": "Completed" },
-  "taskStatus_failed": { "message": "Failed" },
-  "taskStatus_interrupted": { "message": "Interrupted" },
-  "download_button": { "message": "Download" },
-  "download_buttonDownloading": { "message": "Downloading" },
-  "download_buttonCompleted": { "message": "Completed" },
-  "download_buttonProtected": { "message": "Protected" },
-  "download_percent": { "message": "Downloading $1%", "placeholders": { "1": { "content": "$1" } } },
-  "download_started": { "message": "Download started." },
-  "download_startedBatch": { "message": "Starting $1 downloads.", "placeholders": { "1": { "content": "$1" } } },
-  "download_alreadyRunning": { "message": "$1 download is already running.", "placeholders": { "1": { "content": "$1" } } },
-  "download_failed": { "message": "$1 download failed: $2", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } },
-  "download_done": { "message": "$1 download finished.", "placeholders": { "1": { "content": "$1" } } },
-  "quality_loading": { "message": "Loading..." },
-  "quality_auto": { "message": "Auto (highest quality)" },
-  "quality_resolution": { "message": "Quality" },
-  "quality_needsSignature": { "message": " (needs signature)" },
-  "quality_withAudio": { "message": " (with audio)" },
-  "quality_needsMerge": { "message": " (needs merge)" },
-  "edit_title": { "message": "Edit title" },
-  "error_prefix": { "message": "Error: $1", "placeholders": { "1": { "content": "$1" } } },
-  "error_unknown": { "message": "Unknown error" },
-  "error_noBackground": { "message": "Cannot reach the extension background." },
-  "title_unknownVideo": { "message": "Unknown video" },
-  "note_youtube": { "message": "YouTube download mode can be changed in settings." },
-  "note_youtubeSignature": { "message": "Some high resolutions still need signature parsing; the extension will keep trying to complete a downloadable URL." },
-  "note_bilibili": { "message": "Bilibili video and audio are parsed and merged in the page." },
-  "note_blob": { "message": "Blob sources are extracted first, then saved." },
-  "note_hls": { "message": "HLS quality can be picked in the dropdown; live streams only save the current window." },
-  "note_audio": { "message": "Audio sources use the background direct-download path." },
-  "note_drm": { "message": "This source is DRM protected and cannot be downloaded." },
-  "notify_completeTitle": { "message": "Download complete" },
-  "notify_completeBody": { "message": "$1 ($2)", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } },
-  "notify_failedTitle": { "message": "Download failed" },
-  "notify_failedBody": { "message": "$1: $2", "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } } }
+  "action_clearList": {
+    "message": "Clear list"
+  },
+  "action_history": {
+    "message": "History"
+  },
+  "action_settings": {
+    "message": "Settings"
+  },
+  "action_tasks": {
+    "message": "Tasks"
+  },
+  "bili_failed": {
+    "message": "Bilibili download failed: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "bili_fetching": {
+    "message": "Fetching Bilibili video/audio..."
+  },
+  "bili_fetchingUrl": {
+    "message": "Resolving Bilibili stream URL..."
+  },
+  "bili_merging": {
+    "message": "Merging Bilibili video and audio..."
+  },
+  "bili_mergingPercent": {
+    "message": "Merging... $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "bili_tooLarge": {
+    "message": "Bilibili stream is $1 MB, above the $2 MB in-browser merge limit; saving video and audio as separate files (merge with a local tool)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "blob_started": {
+    "message": "Blob video download started"
+  },
+  "dash_fetchManifest": {
+    "message": "Fetching DASH manifest..."
+  },
+  "dash_fetchingAudio": {
+    "message": "Downloading DASH audio segments..."
+  },
+  "dash_fetchingVideo": {
+    "message": "Downloading DASH video segments..."
+  },
+  "dash_merging": {
+    "message": "Merging DASH video and audio..."
+  },
+  "dash_multiPeriod": {
+    "message": "This manifest has multiple periods; segments were concatenated in order. Download separate files if playback is not continuous."
+  },
+  "dash_segmentFailed": {
+    "message": "$2 DASH $1 segments failed (below the abort threshold) and were skipped",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "dash_tooLarge": {
+    "message": "DASH stream is $1 MB, above the in-browser merge limit; saving video and audio as separate files",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_alreadyRunning": {
+    "message": "$1 download is already running.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_button": {
+    "message": "Download"
+  },
+  "download_buttonCompleted": {
+    "message": "Completed"
+  },
+  "download_buttonDownloading": {
+    "message": "Downloading"
+  },
+  "download_buttonProtected": {
+    "message": "Protected"
+  },
+  "download_done": {
+    "message": "$1 download finished.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_doneShort": {
+    "message": "Download complete: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_failed": {
+    "message": "$1 download failed: $2",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "download_percent": {
+    "message": "Downloading $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_started": {
+    "message": "Download started."
+  },
+  "download_startedBatch": {
+    "message": "Starting $1 downloads.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "download_started_short": {
+    "message": "Download started"
+  },
+  "edit_title": {
+    "message": "Edit title"
+  },
+  "error_noBackground": {
+    "message": "Cannot reach the extension background."
+  },
+  "error_prefix": {
+    "message": "Error: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "error_unknown": {
+    "message": "Unknown error"
+  },
+  "history_clear": {
+    "message": "Clear download history"
+  },
+  "history_clearFailed": {
+    "message": "Failed to clear: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_count": {
+    "message": "$1 records",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_delete": {
+    "message": "Delete"
+  },
+  "history_deleteFailed": {
+    "message": "Failed to delete: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_deleting": {
+    "message": "Deleting"
+  },
+  "history_empty": {
+    "message": "No download history yet"
+  },
+  "history_loading": {
+    "message": "Loading..."
+  },
+  "history_openFailed": {
+    "message": "Cannot open the download folder: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "history_title": {
+    "message": "Download history"
+  },
+  "hls_audioMergeFailed": {
+    "message": "Separate audio merge failed ($1); saving the video track only",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "hls_audioSeparate": {
+    "message": "The separate audio track cannot be merged in the browser and was saved as an _audio file"
+  },
+  "hls_live": {
+    "message": "Live stream detected: only the current window ($1 segments) can be saved",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_batchDownload": {
+    "message": "Download selected ($1)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_detected": {
+    "message": "$1 video sources detected",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "list_hint": {
+    "message": "Open the extension on a page that contains a video"
+  },
+  "list_none": {
+    "message": "No videos detected"
+  },
+  "list_selectAll": {
+    "message": "Select all"
+  },
+  "note_audio": {
+    "message": "Audio sources use the background direct-download path."
+  },
+  "note_bilibili": {
+    "message": "Bilibili video and audio are parsed and merged in the page."
+  },
+  "note_blob": {
+    "message": "Blob sources are extracted first, then saved."
+  },
+  "note_drm": {
+    "message": "This source is DRM protected and cannot be downloaded."
+  },
+  "note_hls": {
+    "message": "HLS quality can be picked in the dropdown; live streams only save the current window."
+  },
+  "note_youtube": {
+    "message": "YouTube download mode can be changed in settings."
+  },
+  "note_youtubeSignature": {
+    "message": "Some high resolutions still need signature parsing; the extension will keep trying to complete a downloadable URL."
+  },
+  "notify_completeBody": {
+    "message": "$1 ($2)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "notify_completeTitle": {
+    "message": "Download complete"
+  },
+  "notify_failedBody": {
+    "message": "$1: $2",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "notify_failedTitle": {
+    "message": "Download failed"
+  },
+  "quality_auto": {
+    "message": "Auto (highest quality)"
+  },
+  "quality_loading": {
+    "message": "Loading..."
+  },
+  "quality_needsMerge": {
+    "message": " (needs merge)"
+  },
+  "quality_needsSignature": {
+    "message": " (needs signature)"
+  },
+  "quality_resolution": {
+    "message": "Quality"
+  },
+  "quality_withAudio": {
+    "message": " (with audio)"
+  },
+  "settings_askSaveLocation": {
+    "message": "Ask where to save"
+  },
+  "settings_concurrent": {
+    "message": "Concurrent downloads"
+  },
+  "settings_days": {
+    "message": "$1 days",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "settings_days30": {
+    "message": "30 days"
+  },
+  "settings_days7": {
+    "message": "7 days"
+  },
+  "settings_days90": {
+    "message": "90 days"
+  },
+  "settings_debugLogging": {
+    "message": "Debug logging"
+  },
+  "settings_domainBlacklist": {
+    "message": "Domain blocklist"
+  },
+  "settings_domainBlacklistPlaceholder": {
+    "message": "Comma or newline separated, e.g. ads.example.com"
+  },
+  "settings_filename": {
+    "message": "File naming"
+  },
+  "settings_filenameDate": {
+    "message": "Title + date"
+  },
+  "settings_filenameQuality": {
+    "message": "Title + quality"
+  },
+  "settings_filenameTitle": {
+    "message": "Title only"
+  },
+  "settings_forever": {
+    "message": "Forever"
+  },
+  "settings_historyRetention": {
+    "message": "Keep history"
+  },
+  "settings_minDuration": {
+    "message": "Min duration (s, 0 = off)"
+  },
+  "settings_minSize": {
+    "message": "Min size (MB, 0 = off)"
+  },
+  "settings_notification": {
+    "message": "Notify when download finishes"
+  },
+  "settings_saveFailed": {
+    "message": "Failed to save settings: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "settings_saved": {
+    "message": "Settings saved."
+  },
+  "settings_subdir": {
+    "message": "Download folder"
+  },
+  "settings_subdirPlaceholder": {
+    "message": "Leave empty for the default folder"
+  },
+  "settings_subtitle": {
+    "message": "Detecting videos..."
+  },
+  "settings_title": {
+    "message": "Settings"
+  },
+  "settings_youtubeCapture": {
+    "message": "Capture"
+  },
+  "settings_youtubeMode": {
+    "message": "Default YouTube mode"
+  },
+  "settings_youtubeParse": {
+    "message": "Parse & download"
+  },
+  "taskStatus_complete": {
+    "message": "Completed"
+  },
+  "taskStatus_failed": {
+    "message": "Failed"
+  },
+  "taskStatus_interrupted": {
+    "message": "Interrupted"
+  },
+  "taskStatus_retrying": {
+    "message": "Retrying"
+  },
+  "taskStatus_running": {
+    "message": "Downloading"
+  },
+  "tasks_cancel": {
+    "message": "Cancel"
+  },
+  "tasks_cancelFailed": {
+    "message": "Failed to cancel: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_cancelUnavailable": {
+    "message": "This task cannot be cancelled right now; it may already be writing the file."
+  },
+  "tasks_cancelled": {
+    "message": "Task cancelled."
+  },
+  "tasks_empty": {
+    "message": "No download tasks"
+  },
+  "tasks_openLocation": {
+    "message": "Open folder"
+  },
+  "tasks_retry": {
+    "message": "Retry"
+  },
+  "tasks_retryFailed": {
+    "message": "Retry failed: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_running": {
+    "message": "$1 task(s) running",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tasks_title": {
+    "message": "Download tasks"
+  },
+  "tasks_total": {
+    "message": "$1 task(s)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "title_unknownVideo": {
+    "message": "Unknown video"
+  },
+  "yt_capturePreparing": {
+    "message": "Preparing YouTube in-page capture..."
+  },
+  "yt_failed": {
+    "message": "YouTube download failed: $1",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "yt_merging": {
+    "message": "Merging YouTube video and audio..."
+  },
+  "yt_mergingPercent": {
+    "message": "Merging YouTube video and audio... $1%",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "yt_parsePreparing": {
+    "message": "Preparing YouTube parse download..."
+  },
+  "yt_videoFallback": {
+    "message": "YouTube video"
+  }
 }

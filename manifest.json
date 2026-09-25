@@ -5,7 +5,6 @@
   "version": "1.0.0",
   "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
   "default_locale": "zh_CN",
-
   "permissions": [
     "webRequest",
     "declarativeNetRequest",
@@ -18,25 +17,25 @@
     "notifications",
     "unlimitedStorage"
   ],
-
   "host_permissions": [
     "<all_urls>"
   ],
-
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
-
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "<all_urls>"
+      ],
       "js": [
         "lib/browser-compat.js",
         "lib/byte-utils.js",
         "lib/http-utils.js",
         "lib/constants.js",
         "lib/message-types.js",
+        "lib/i18n.js",
         "lib/page-message-guard.js",
         "lib/video-utils.js",
         "lib/ui-dom-utils.js",
@@ -73,14 +72,18 @@
       "all_frames": true
     }
   ],
-
   "web_accessible_resources": [
     {
-      "resources": ["injected/*.js", "lib/message-types.js", "icons/*"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "injected/*.js",
+        "lib/message-types.js",
+        "icons/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
-
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {

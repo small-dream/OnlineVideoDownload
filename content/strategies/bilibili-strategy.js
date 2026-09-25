@@ -8,6 +8,22 @@
   const messageTypes = globalThis.__OVD_MESSAGE_TYPES__?.MESSAGE_TYPES || {};
   const MSG = messageTypes;
   const qualityUtils = globalThis.__OVD_BILIBILI_QUALITY_UTILS__ || {};
+  // 国际化：优先 chrome.i18n（见 lib/i18n.js）；未加载时本地退回中文原文，
+  // 并同样处理 $1..$9 占位符，避免出现裸露的占位符。
+  const i18n = globalThis.__OVD_I18N__ || {};
+  const t = typeof i18n.t === 'function'
+    ? i18n.t
+    : (_key, fallback, subs) => {
+      if (!fallback || !subs) {
+        return fallback;
+      }
+      const list = Array.isArray(subs) ? subs : [subs];
+      return String(fallback).replace(/\$(\d)/g, (match, index) => {
+        const value = list[Number(index) - 1];
+        return value == null ? match : String(value);
+      });
+    };
+
   const constants = globalThis.__OVD_CONSTANTS__ || {};
   const DEFAULT_MAX_MERGE_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -171,9 +187,9 @@
      * @param {Object} headers - 请求头
      */
     async function mergeBilibiliDashAndDownload(videoUrl, audioUrl, title, headers, progressReporter, context = {}, meta = {}) {
-      getFloatButton()?.showMessage('正在获取 Bilibili 视音频数据...', false, 0);
+      getFloatButton()?.showMessage(t('bili_fetching', '正在获取 Bilibili 视音频数据...'), false, 0);
       getFloatButton()?.showProgress(0);
-      progressReporter?.status('正在获取 Bilibili 视音频数据...');
+      progressReporter?.status(t('bili_fetching', '正在获取 Bilibili 视音频数据...'));
       progressReporter?.progress(0, { phase: 'fetching' });
 
       const { videoBuffer, audioBuffer } = await fetchMediaStreamsAndWait(
@@ -201,8 +217,7 @@
         // 分离文件降级：体积超限不再直接失败，改为分别保存视频与音频两个文件
         const totalMb = (estimatedTotal / 1024 / 1024).toFixed(0);
         const maxMb = Math.round(maxMergeBytes / 1024 / 1024);
-        const message = `Bilibili 视频体积 ${totalMb} MB 超过浏览器内合并上限 ${maxMb} MB，`
-          + '改为分别保存视频与音频文件（可用本地工具合并）';
+        const message = t('bili_tooLarge', 'Bilibili 视频体积 $1 MB 超过浏览器内合并上限 $2 MB，改为分别保存视频与音频文件（可用本地工具合并）', [totalMb, String(maxMb)]);
         console.warn(`[OVD] ${message}`);
         progressReporter?.status?.(message);
         getFloatButton()?.showMessage(message, false, 0);
@@ -240,11 +255,11 @@
         };
       }
 
-      getFloatButton()?.showMessage('正在合并 Bilibili 视音频...', false, 0);
-      progressReporter?.status('正在合并 Bilibili 视音频...');
+      getFloatButton()?.showMessage(t('bili_merging', '正在合并 Bilibili 视音频...'), false, 0);
+      progressReporter?.status(t('bili_merging', '正在合并 Bilibili 视音频...'));
 
       const blob = await BilibiliMuxer.mergeFmp4Streams(videoBuffer, audioBuffer, (percent) => {
-        getFloatButton()?.showMessage(`合并中... ${percent}%`, false, 0);
+        getFloatButton()?.showMessage(t('bili_mergingPercent', '合并中... $1%', [String(percent)]), false, 0);
         getFloatButton()?.showProgress(percent);
         progressReporter?.progress(percent, { phase: 'merging' });
 
@@ -266,7 +281,7 @@
 
       const saveResult = await saveBlobViaBrowserDownload(blob, filename, context, meta);
       getFloatButton()?.showProgress(100);
-      getFloatButton()?.showMessage(`下载完成: ${filename}`);
+      getFloatButton()?.showMessage(t('download_doneShort', '下载完成: $1', [filename]));
       progressReporter?.progress(100, { phase: 'complete' });
       console.log(`[OVD] Bilibili 视音频合并完成 filename=${filename} size=${(blob.size / 1024 / 1024).toFixed(2)} MB`);
       return {
@@ -283,8 +298,8 @@
      * @param {HTMLElement} buttonElement - 触发下载的按钮元素
      */
     async function handleBilibiliDownload(meta, buttonElement, progressReporter, context = {}) {
-      getFloatButton()?.showMessage('正在获取 Bilibili 视频地址...', false, 0);
-      progressReporter?.status('正在获取 Bilibili 视频地址...');
+      getFloatButton()?.showMessage(t('bili_fetchingUrl', '正在获取 Bilibili 视频地址...'), false, 0);
+      progressReporter?.status(t('bili_fetchingUrl', '正在获取 Bilibili 视频地址...'));
 
       try {
         const qualityId = meta?.downloadOptions?.qualityId || 'auto';
@@ -340,8 +355,8 @@
             throw new Error(result?.error || '下载失败');
           }
 
-          getFloatButton()?.showMessage('下载已开始');
-          progressReporter?.status('下载已开始');
+          getFloatButton()?.showMessage(t('download_started_short', '下载已开始'));
+          progressReporter?.status(t('download_started_short', '下载已开始'));
           if (buttonElement) {
             const downloadId = result.downloadId ?? result.results?.[0]?.downloadId;
             if (downloadId != null) {
@@ -353,8 +368,8 @@
 
         throw new Error('无法解析 B站 视频格式');
       } catch (err) {
-        getFloatButton()?.showMessage(`Bilibili 下载失败: ${err.message}`, true);
-        progressReporter?.status(`Bilibili 下载失败: ${err.message}`, { level: 'error' });
+        getFloatButton()?.showMessage(t('bili_failed', 'Bilibili 下载失败: $1', [err.message]), true);
+        progressReporter?.status(t('bili_failed', 'Bilibili 下载失败: $1', [err.message]), { level: 'error' });
         console.error('[OVD] Bilibili download error:', err);
         throw err;
       } finally {
