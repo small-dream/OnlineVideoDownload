@@ -20,6 +20,9 @@
 ## ✨ Points forts
 
 - 🎬 **Détection automatique** — Identifie automatiquement toutes les ressources vidéo d'une page, sans copier-coller d'URL
+- 🏷️ **Compteur de badge** — L'icône de la barre d'outils affiche d'un coup d'œil le nombre de vidéos détectées sur l'onglet courant
+- ☑️ **Téléchargement par lot** — Sélection multiple / tout sélectionner pour télécharger plusieurs vidéos en parallèle en un clic
+- 🔔 **Notifications de fin** — Notifications système en cas de réussite/échec du téléchargement ; cliquez sur une notification pour ouvrir son dossier
 - ⬇️ **Téléchargement en un clic** — Enregistrez les vidéos d'un seul clic, ultra simple
 - 🔀 **Fusion dans le navigateur** — Les flux audio/vidéo YouTube 1080p+ et Bilibili DASH sont fusionnés dans le navigateur — **pas besoin d'installer ffmpeg ou d'autres outils locaux**
 - 🌐 **Compatibilité étendue** — Support spécialisé pour YouTube et Bilibili, plus les vidéos HLS / DASH / MP4 / Blob de n'importe quel site
@@ -187,7 +190,7 @@ Pour la documentation détaillée des interfaces, voir [docs/ARCHITECTURE.md](do
 <details>
 <summary><strong>Aucune vidéo détectée dans le popup ?</strong></summary>
 
-- Vérifiez que la page contient effectivement du contenu vidéo (certaines pages chargent les vidéos via des iframes, que la version actuelle n'analyse pas)
+- Vérifiez que la page contient effectivement du contenu vidéo (les vidéos intégrées en iframe sont prises en charge depuis la v1.16.0 ; sur les pages avec une CSP stricte, l'injection peut rester bloquée)
 - Essayez de rafraîchir la page et de relancer la détection
 - Appuyez sur F12 → Console et vérifiez s'il y a des erreurs avec le préfixe `[OVD]`
 

@@ -2,6 +2,8 @@
 
 > 基于 2026-09 全量代码评审（架构/后台管线、视频源探测、UI 交互、媒体处理与测试四路审查）产出的修复路线图。
 > 目标：确保网页视频下载功能完善、交互友好、兼容性达标，达到 Video DownloadHelper（VDH）同级水平。
+>
+> **进度**：第一波 ✅（commit `3b8e554`）· 第二波 ✅（commit `cef9a20`）· 第三波进行中 · 第四波未开始。
 
 ## 总体判断
 
@@ -30,16 +32,18 @@
 
 ## 第二波：体验达标（界面存在但失效的功能 + 核心反馈链路）
 
-| # | 问题 | 位置 | 修复方案 |
-|---|------|------|----------|
-| 2.1 | 下载完成通知是死功能（设置有开关、权限已申请、零调用） | `manifest.json:16`、`lib/settings-store.js` | 在 SW 下载完成分支读 `downloadNotification` 设置调 `chrome.notifications.create`（标题、大小、点击打开文件夹）；不做则移除权限与设置项 |
-| 2.2 | 文件命名规则设置不生效 | `popup/popup.js`、`lib/download-path.js` | 在 `Downloader._buildFilenameBase`/`download-path.js` 按 `title`/`title-quality`/`title-date` 模板拼接；或暂时从设置 UI 移除 |
-| 2.3 | 批量下载代码完整但 UI 被阉割（复选框被 CSS 隐藏、无调用方），PRD §4.7 宣称支持 | `popup/popup.js:1749`、`popup/popup.css:74-78` | 恢复复选框可见性 + 全选 +「下载所选」按钮接通 `startBatchDownload`；或删除代码并同步 PRD。当前状态最糟，必须二选一 |
-| 2.4 | 图标徽章语义错位：显示运行中任务数而非检测到的视频数（VDH 核心发现性交互） | `background/service-worker.js:656-670` | 检测数变化时按 tab `setBadgeText` 显示检测数；任务数用 popup 内已有的 `taskEntryBadge` |
-| 2.5 | 条目内无百分比进度，popup 关闭后长任务完全无反馈（`getFloatButton` 恒返回 null，55 处调用空转） | `popup/popup.js:1621`、`content/content-main.js:155` | 条目按钮文案显示百分比（"下载中 45%"）；恢复页面内浮动进度/错误反馈（浮动条或 toast） |
-| 2.6 | 死 UI：类型徽章计算了未渲染；`.note-text {display:none}` 隐藏全部说明（含 DRM 提示）；"检测到 N 个视频"写入隐藏元素 | `popup/popup.js:1087-1103`、`popup/popup.css:392-395` | 渲染 `buildFormatPillHtml` 类型徽章；按需显示 note-text；计数挪到主视图可见位置 |
-| 2.7 | 错误提示不友好：原始 `err.message` 透传，错误码体系未对接文案 | `content/youtube-download-errors.js`、`popup/popup.js:1736` | 建立错误码 → 中文友好文案映射表，对 Bilibili/HLS 失败给出可操作指引（登录、刷新、切换模式） |
-| 2.8 | 「清列表」只清 popup 本地数组，下一条消息就重新填满 | `popup/popup.js:242-246` | 同时通知 background 清理该 tab 的 registry |
+> ✅ 已全部完成（commit `cef9a20`，2026-09-25）。
+
+| # | 问题 | 位置 | 修复方案 | 状态 |
+|---|------|------|----------|------|
+| 2.1 | 下载完成通知是死功能（设置有开关、权限已申请、零调用） | `manifest.json:16`、`lib/settings-store.js` | 在 SW 下载完成分支读 `downloadNotification` 设置调 `chrome.notifications.create`（标题、大小、点击打开文件夹）；不做则移除权限与设置项 | ✅ `cef9a20` |
+| 2.2 | 文件命名规则设置不生效 | `popup/popup.js`、`lib/download-path.js` | 在 `Downloader._buildFilenameBase`/`download-path.js` 按 `title`/`title-quality`/`title-date` 模板拼接；或暂时从设置 UI 移除 | ✅ `cef9a20` |
+| 2.3 | 批量下载代码完整但 UI 被阉割（复选框被 CSS 隐藏、无调用方），PRD §4.7 宣称支持 | `popup/popup.js:1749`、`popup/popup.css:74-78` | 恢复复选框可见性 + 全选 +「下载所选」按钮接通 `startBatchDownload`；或删除代码并同步 PRD。当前状态最糟，必须二选一 | ✅ `cef9a20` |
+| 2.4 | 图标徽章语义错位：显示运行中任务数而非检测到的视频数（VDH 核心发现性交互） | `background/service-worker.js:656-670` | 检测数变化时按 tab `setBadgeText` 显示检测数；任务数用 popup 内已有的 `taskEntryBadge` | ✅ `cef9a20` |
+| 2.5 | 条目内无百分比进度，popup 关闭后长任务完全无反馈（`getFloatButton` 恒返回 null，55 处调用空转） | `popup/popup.js:1621`、`content/content-main.js:155` | 条目按钮文案显示百分比（"下载中 45%"）；恢复页面内浮动进度/错误反馈（浮动条或 toast） | ✅ `cef9a20` |
+| 2.6 | 死 UI：类型徽章计算了未渲染；`.note-text {display:none}` 隐藏全部说明（含 DRM 提示）；"检测到 N 个视频"写入隐藏元素 | `popup/popup.js:1087-1103`、`popup/popup.css:392-395` | 渲染 `buildFormatPillHtml` 类型徽章；按需显示 note-text；计数挪到主视图可见位置 | ✅ `cef9a20` |
+| 2.7 | 错误提示不友好：原始 `err.message` 透传，错误码体系未对接文案 | `content/youtube-download-errors.js`、`popup/popup.js:1736` | 建立错误码 → 中文友好文案映射表，对 Bilibili/HLS 失败给出可操作指引（登录、刷新、切换模式） | ✅ `cef9a20` |
+| 2.8 | 「清列表」只清 popup 本地数组，下一条消息就重新填满 | `popup/popup.js:242-246` | 同时通知 background 清理该 tab 的 registry | ✅ `cef9a20` |
 
 ## 第三波：覆盖面对标 VDH
 
@@ -63,7 +67,7 @@
 | 4.2 | 补 bilibili-muxer 测试 | 手写二进制解析器是全仓库风险最高、覆盖为零的模块；用最小构造的 fMP4 fixture 验证 `parseFragment`/config 提取/mux 输出；同时修复 trun data-offset、多 traf/trun 的脆弱假设（`lib/bilibili-muxer.js:382`）与样本写入失败静默丢帧问题 |
 | 4.3 | 消除重复实现 | HLS 下载循环在 background/content 各一份（`hls-fetcher.js` vs `hls-strategy.js`）收敛为单一实现；`youtube-adaptive-download-strategy.js:70-130` 改用 `lib/http-utils.js`（两份逻辑已出现漂移） |
 | 4.4 | 国际化 | 引入 `_locales` + `chrome.i18n`，至少补英文（README 已有四语、UI 锁中文，发布商店受限） |
-| 4.5 | 死代码清理 | 未引用的 `background/download-strategies/dash-download-strategy.js`、popup 批量残留（若第三波不恢复）、`buildQualityHtml`、重复 labels 常量、55 处 `floatButton?.showMessage` 空调用；同步更新 PRD 与 README 中名不符实的描述 |
+| 4.5 | 死代码清理 | 未引用的 `background/download-strategies/dash-download-strategy.js`、`buildQualityHtml`、重复 labels 常量；同步更新 PRD 与 README 中名不符实的描述 |
 | 4.6 | 安全与权限收紧 | postMessage 增加 nonce/握手 token 校验（当前任意网页可伪造 OVD 消息触发带 Cookie 的下载）；收紧 `web_accessible_resources` 对 `<all_urls>` 暴露整个 `lib/*` 与 `injected/*` 的范围；manifest 增加 `minimum_chrome_version`（offscreen 需 109+） |
 | 4.7 | 文件名健壮性 | `sanitizeFilename` 处理 Windows 保留名（CON/PRN/NUL…）与尾部点/空格；重复文件名冲突策略 |
 | 4.8 | 浏览器矩阵决策 | 明确仅支持 Chromium（README/manifest 声明并移除误导性的 Firefox 检测），或引入 webextension-polyfill + 替代 offscreen 方案真正支持 Firefox |
@@ -79,7 +83,7 @@
 
 | 维度 | VDH | 本项目现状 | 对应修复波次 |
 |---|---|---|---|
-| 图标徽章 | 检测到的视频数 | 运行中任务数 | 第二波 2.4 |
+| 图标徽章 | 检测到的视频数 | 已对齐（第二波 2.4 ✅） | 第二波 2.4 |
 | MSE/blob 嗅探 | 核心能力 | 检测到但被丢弃 | 第一波 1.3 |
 | iframe 视频 | 支持 | 不支持 | 第一波 1.4 |
 | 大文件 | companion app 流式落盘 | 纯内存合并，部分路径无上限 | 第三波 3.7 |
