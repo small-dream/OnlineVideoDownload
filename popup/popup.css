@@ -420,6 +420,13 @@ body {
   opacity: 0.55;
 }
 
+.control-hint {
+  color: #8a8f99;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .dl-btn {
   justify-self: end;
   display: inline-flex;

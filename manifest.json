@@ -78,6 +78,7 @@
       "resources": [
         "injected/*.js",
         "lib/message-types.js",
+        "lib/youtube-innertube-clients.js",
         "icons/*"
       ],
       "matches": [

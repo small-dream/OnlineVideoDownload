@@ -1432,6 +1432,9 @@ function buildYouTubeControlsHtml(video, index) {
           ${qualityOptions.map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === resolutionValue ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('')}
         </select>
       </label>
+      ${resolutionDisabled
+        ? `<span class="control-hint">${t('youtube_switchToParse', '切到「解析下载」可选清晰度并合并音视频')}</span>`
+        : ''}
     </div>
   `;
 }
