@@ -837,6 +837,8 @@ function buildDetectionFilterContext(tabUrl = '', videos = []) {
     isBilibiliVideoPage: isBilibiliVideoPageUrl(tabUrl),
     isYouTubePage: isYouTubePageUrl(tabUrl),
     isYouTubeWatchPage: isYouTubeWatchPageUrl(tabUrl),
+    // 同一个视频同时有 YouTube HLS 条目时只展示 HLS 那条（避免列表出现两行）
+    youtubeHlsVideoIds: videoFilter.listYouTubeHlsVideoIds?.(videos) || null,
   };
 }
 

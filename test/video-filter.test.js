@@ -157,3 +157,64 @@ test('collapseDuplicateBlobEntries：同 frame 同名 blob 只保留最新一条
   ]);
   assert.deepEqual(mod.collapseDuplicateBlobEntries([]), []);
 });
+
+// ---------------------------------------------------------------
+// YouTube HLS 条目与 youtube-adaptive 条目去重（避免同一视频两行）
+// ---------------------------------------------------------------
+
+const YT_HLS_URL = 'https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1/id/gdpvo4w0mZc/itag/0/playlist/index.m3u8';
+
+test('isYouTubeHlsEntry / youtubeHlsVideoId 识别 YouTube HLS 清单', () => {
+  const mod = loadModule();
+
+  assert.equal(mod.isYouTubeHlsEntry({ type: 'hls', url: YT_HLS_URL }), true);
+  assert.equal(mod.isYouTubeHlsEntry({ type: 'hls', url: 'https://cdn.example.com/x.m3u8' }), false);
+  assert.equal(mod.isYouTubeHlsEntry({ type: 'youtube-adaptive', url: YT_HLS_URL }), false);
+  assert.equal(mod.youtubeHlsVideoId({ url: YT_HLS_URL }), 'gdpvo4w0mZc');
+  assert.equal(mod.youtubeHlsVideoId({ videoId: 'explicit', url: YT_HLS_URL }), 'explicit');
+});
+
+test('listYouTubeHlsVideoIds 只收集 YouTube HLS 条目的 videoId', () => {
+  const mod = loadModule();
+  const ids = mod.listYouTubeHlsVideoIds([
+    { type: 'hls', url: YT_HLS_URL },
+    { type: 'hls', url: 'https://cdn.example.com/x.m3u8' },
+    { type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=gdpvo4w0mZc' },
+  ]);
+
+  assert.equal(ids.has('gdpvo4w0mZc'), true);
+  assert.equal(ids.size, 1);
+});
+
+test('shouldHideRedundantDetection：同一视频有 HLS 条目时隐藏 youtube-adaptive 那一行', () => {
+  const mod = loadModule();
+  const context = {
+    hasYouTubeAdaptive: true,
+    isYouTubePage: true,
+    isYouTubeWatchPage: true,
+    youtubeHlsVideoIds: mod.listYouTubeHlsVideoIds([{ type: 'hls', url: YT_HLS_URL }]),
+  };
+
+  assert.equal(
+    mod.shouldHideRedundantDetection({ type: 'youtube-adaptive', videoId: 'gdpvo4w0mZc' }, context),
+    true
+  );
+  // 别的视频不受影响
+  assert.equal(
+    mod.shouldHideRedundantDetection({ type: 'youtube-adaptive', videoId: 'otherVideo' }, context),
+    false
+  );
+  // 没有 HLS 条目时照常展示
+  assert.equal(
+    mod.shouldHideRedundantDetection(
+      { type: 'youtube-adaptive', videoId: 'gdpvo4w0mZc' },
+      { isYouTubePage: true, isYouTubeWatchPage: true }
+    ),
+    false
+  );
+  // HLS 条目自身保留
+  assert.equal(
+    mod.shouldHideRedundantDetection({ type: 'hls', url: YT_HLS_URL, videoId: 'gdpvo4w0mZc' }, context),
+    false
+  );
+});
