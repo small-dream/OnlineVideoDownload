@@ -312,11 +312,14 @@ export class DownloadStateStore {
   }
 
   updateSourceTask(message = {}, tabId = null) {
+    // 进度类消息不带 message 字段：不能用空串覆盖此前写入的状态文案，
+    // 否则抓取/合并阶段的每次进度上报都会把「正在获取视音频数据…」擦成阶段名。
+    const statusMessage = message.message ? { message: message.message } : {};
     return this.upsertTask({
+      ...statusMessage,
       downloadId: message.downloadId ?? null,
       error: message.error || '',
       filename: message.filename || '',
-      message: message.message || '',
       percent: message.percent,
       phase: message.phase || '',
       size: message.size ?? null,

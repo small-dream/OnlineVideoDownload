@@ -28,6 +28,8 @@
 
     // 页面方向的消息一律当不可信数据处理（MAIN world 无法对页面保密）
     const pageMessageGuard = globalThis.__OVD_PAGE_MESSAGE_GUARD__ || {};
+    // 阶段进度 → 统一进度（抓取 0..90、合并 90..99），与 background/策略侧共用同一映射
+    const progressScale = globalThis.__OVD_PROGRESS_SCALE__ || {};
 
     let started = false;
     // HLS 委托下载（SW 发起）的取消控制器：taskKey/taskId → AbortController
@@ -88,13 +90,24 @@
 
     function emitYouTubeStreamProgress(transferId, progressPayload = {}) {
       const taskMeta = getMediaStreamTaskMeta(transferId);
+      // 页面侧抓流进度同样映射到统一坐标系：抓取阶段 0..90，
+      // 后续合并 90..99（见策略侧），浮条与 popup 条目/任务列表因此读到同一个数字。
+      const percent = Number.isFinite(Number(progressPayload.percent))
+        ? (progressScale.mapPhasePercent?.('fetching', progressPayload.percent) ?? progressPayload.percent)
+        : null;
+
       emitRuntimeMessage({
         ...taskMeta,
+        ...progressPayload,
+        ...(percent == null ? {} : { percent }),
         phase: 'fetching',
         sourceId: taskMeta.sourceId || 'youtube',
         type: MSG.SOURCE_DOWNLOAD_PROGRESS || 'SOURCE_DOWNLOAD_PROGRESS',
-        ...progressPayload,
       });
+
+      if (percent != null) {
+        getFloatButton()?.showProgress(percent);
+      }
     }
 
     function routePageMessage(event) {
@@ -337,6 +350,11 @@
           }
 
           case MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS':
+            // 抓取阶段进度由 background 广播（已映射到统一进度坐标系），
+            // 这里驱动页面浮条，使其与 popup 条目 / 任务列表显示同一个百分比。
+            if (Number.isFinite(Number(msg.percent))) {
+              getFloatButton()?.showProgress(msg.percent);
+            }
             respond();
             break;
 

@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.17
+> Version: 1.17.18
 > Last Updated: 2026-09-25
 
 ## Goals
@@ -29,6 +29,7 @@ Content Script
   lib/settings-store.js
   lib/youtube-download-mode-store.js
   lib/youtube-stream-utils.js
+  lib/progress-scale.js
   lib/ui-dom-utils.js
   lib/wbi-signer.js
   lib/hls-pipeline.js
@@ -133,6 +134,27 @@ Notes:
   - `createSegmentDecryptor(keyInfo)` 把密钥轮换 / 媒体序号派生 IV 封装成 `(buffer, index) => Promise<buffer>`，`decryptHlsSegments` 与 `transform` 共用同一实现，避免两条解密路径漂移。
   - 调用方策略：`content/strategies/hls-strategy.js`、`background/hls-fetcher.js` 在"不需要 fMP4 合并"时使用 sink（需要音轨合并时仍需整体持有视频数据，属 muxer 接口限制）；`content/strategies/dash-strategy.js` 视频/音频各用一个 sink，再用 `toArrayBuffer()` 交给 muxer（少一次全量拼接拷贝）。
   - 该接口即后续 OPFS / 文件落盘 sink 的挂载点：只需实现 `write` 的落盘版本，下载循环与策略无需改动。
+
+### `lib/progress-scale.js`
+
+Responsibilities:
+
+- Provide one unified 0..100 progress coordinate for a download task across all UI surfaces.
+- Map per-phase raw percentages (each phase reports its own 0..100) onto that coordinate.
+- Expose helpers through `globalThis.__OVD_PROGRESS_SCALE__`.
+
+Public surface:
+
+- `PHASE_RANGES`
+- `mapPhasePercent(phase, percent)`
+- `normalizePercent(percent)`
+
+Notes:
+
+- 背景：Bilibili 与 YouTube 解析下载分「视音频流抓取 → 浏览器内合并」两个阶段，两阶段的回调都是 0..100；直接上报会让同一任务的进度先涨到 100% 再跌回 0%，而 Popup 条目、Popup 任务列表、页面右下角浮条（`content/float-button.js`）各自由不同消息驱动，于是同一时刻显示三个不同的数字。
+- 阶段权重：`fetching` → 0..90、`merging` → 90..99；合并完成后再由 `phase: 'complete'` 补到 100%。未登记的阶段（`recording`、`fetching-video` 等单阶段策略）原样返回，既有策略行为不变。
+- 抓取阶段的百分比由 background 计算并映射（`background/service-worker.js#fetchMediaStreams` 的 `onStreamProgress`），随后一次性写进任务表（`DownloadStateStore`）并广播给发起该任务的 frame 与 Popup；合并阶段由内容侧策略用同一函数映射后上报 `SOURCE_DOWNLOAD_PROGRESS`。两侧共用本模块，保证同一时刻三处读到同一个数字。
+- 抓取阶段的广播不再只发给 Popup：`BILIBILI_STREAM_PROGRESS` 消息携带 `frameId`，`safeTabMessage` 据此只发往发起下载的 frame（页面上其它 iframe 不会各自弹出浮条），`safeRuntimeMessage` 同时送达 Popup。
 
 ### `lib/ovd-logger.js`
 
@@ -453,6 +475,7 @@ Responsibilities:
 - Coordinate page-direct download completion promises.
 - Normalize binary payloads and download filenames.
 - Forward optional `traceId` metadata into page-context YouTube fetch/download requests.
+- `fetchMediaStreamsAndWait(videoUrls, audioUrls, headers, transferPrefix, timeoutMessage, taskMeta)` 的第 6 个参数为任务身份（`sourceId`/`strategyId`/`taskKey`/`title`/`traceId`/`videoUrl`，经 `normalizeTaskMeta` 过滤，不含 `videoInfo`），随 `FETCH_MEDIA_STREAMS` 交给 background，使抓取阶段进度能落到同一任务上。
 - 媒体流分片按 `seq` 落位而非 `push`：后台回传已改为**有界流水线**（`MEDIA_STREAM_PIPELINE_DEPTH`），到达顺序不再保证。
 - `finishMediaStreamTransfer` 会校验分片连续性（`compactOrderedChunks`），出现空洞抛 `MEDIA_STREAM_CHUNK_MISSING`，绝不产出缺片/错序文件。
 
@@ -499,6 +522,7 @@ Responsibilities:
 - Handle runtime messages from background and popup.
 - Answer popup-side `BILIBILI_FETCH_QUALITIES` requests through the Bilibili strategy.
 - Forward page-side stream progress into background so popup can show one unified progress surface.
+- 页面侧抓流进度与 background 的抓取阶段广播都按 `lib/progress-scale.js` 映射到统一进度，并同步刷新页面浮条，因此浮条、Popup 条目与任务列表三处显示同一个百分比。
 - Route transfer events into the stream transfer manager.
 - Route source download requests into the download coordinator.
 - Route HLS delegate requests into the HLS delegate handler.
@@ -716,7 +740,6 @@ Examples:
 
 - `VIDEO_DETECTED`
 - `DOWNLOAD_VIDEO`
-- `BILIBILI_STREAM_PROGRESS`
 - `DOWNLOAD_BLOB_DATA`
 - `FETCH_MEDIA_STREAMS`
 - `SET_TAB_MUTED`
@@ -732,7 +755,8 @@ Examples:
 Notes:
 
 - Source-download lifecycle payloads now include both `traceId` and `taskKey` so popup UI can keep the correct item in a pending/completed state across async content-side workflows.
-- Bilibili in-page muxing now forwards `BILIBILI_STREAM_PROGRESS` through background so the popup can show the fetching/merging percentage.
+- `FETCH_MEDIA_STREAMS` 增加可选 `taskMeta`（内容侧任务身份：`sourceId`/`strategyId`/`taskKey`/`title`/`traceId`/`videoUrl`），background 据此把抓取阶段进度写进同一个任务，而不是只做广播。缺 `taskMeta` 的旧消息仍可工作（只广播、不更新任务表）。
+- `BILIBILI_STREAM_PROGRESS` 改由 background 发起（抓取阶段进度），见下方 Background -> Content / Popup；内容侧不再自行转发合并进度（合并阶段走 `SOURCE_DOWNLOAD_PROGRESS`，background 已能更新任务并广播）。background 保留对内容侧同名消息的透传分支以兼容旧版内容脚本。
 - Download completion now passes `downloadId` (browser download ID) through the history record so the store can deduplicate entries and the options page can open the download folder.
 - `INJECT_PAGE_SCRIPTS` 字段为 `files`（`injected/*` 与 `lib/message-types.js` 的有序列表）；background 用 `sender.frameId` 定向到发起注入的 frame，CSP 严格站点不再依赖 `<script src>`（DOM 注入保留为回退）。
 - `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
@@ -761,6 +785,7 @@ Notes:
 - 内容侧 HLS 因体积超限（`HLS_OUTPUT_TOO_LARGE`）中止时，`hls-download-strategy` 视为委托失败并自动回退到 `HlsFetcher`；后台路径用 OPFS 落盘，因此大文件不会因为内容侧的内存上限而整体失败。
 - `ABORT_SOURCE_DOWNLOAD` 由 popup 任务视图发往 content，字段 `taskKey` / `traceId` / `videoUrl`（任一匹配即可）。content 侧两种任务都会响应：`download-coordinator` 的内容任务（Bilibili/DASH/YouTube 录制）会 `abort()` 其 `AbortController` 并广播 `SOURCE_DOWNLOAD_RESULT{ ok:false, error:'已取消' }`；HLS 委托下载由 `message-router` 按 `taskMeta.taskKey`/`taskId` 保存的控制器中止，返回 `{ hlsCancelled: true }`。
 - 委托下载期间 background 通过 `injectHeaders(url, headers, { corsOrigin })` 注册临时 DNR 规则，让页面上下文的带 Cookie 请求能通过 CDN 的 CORS 校验；content 无响应或返回失败时，同一任务自动回退到 `HlsFetcher`。
+- `BILIBILI_STREAM_PROGRESS`（`phase: 'fetching'`）由 background 在抓取 Bilibili 视音频流时广播：`percent` 已按 `lib/progress-scale.js` 映射到统一进度（抓取阶段 0..90）；消息携带发起下载的 `frameId`，`tabs.sendMessage` 因此只发往该 frame 用于驱动页面浮条，同时经 `safeRuntimeMessage` 送达 Popup 条目进度；同一 `percent` 也已写进任务表，所以「下载任务」列表与条目、浮条三处一致。
 
 ### Popup -> Content
 
@@ -889,6 +914,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.17.18 | 2026-09-25 | 修复「Bilibili 下载进度三处不一致」。此前同一任务的 Popup 条目、Popup「下载任务」列表、页面右下角浮条各自由不同消息驱动，且各自使用自己阶段的原始百分比：抓取阶段只有条目拿到进度（任务列表与浮条停在 0%），合并阶段三处又从 0% 重新开始。新增 `lib/progress-scale.js`（`mapPhasePercent`：`fetching` 0..90、`merging` 90..99、`complete` 100）作为唯一进度坐标系，background 与 content 共用：①`fetchMediaStreams` 的抓取进度先映射再同时写进 `DownloadStateStore`（任务列表 + 条目）与广播，`FETCH_MEDIA_STREAMS` 新增 `taskMeta` 让后台定位同一任务，并加单调保护（两路流总长度先后到达时分母变大导致回退）；②`BILIBILI_STREAM_PROGRESS` 携带 `frameId`，只发往发起下载的 frame，`message-router` 据此驱动页面浮条（同页其它 iframe 不再各自弹条）；③Bilibili / YouTube 解析下载的合并回调改用同一映射（浮条与上报 popup 的数字逐次相同），内容侧重复转发的合并进度已移除。新增用例 8 条，全量 663 项通过。 |
 | 1.17.17 | 2026-09-25 | popup 提示不再堆叠：一次下载会依次上报「正在获取 Bilibili 视频地址…」「正在获取 Bilibili 视音频数据…」等状态，旧实现每条 `SOURCE_DOWNLOAD_STATUS` 都 `appendChild` 一条 toast，于是屏幕上同时出现多条几乎一样的提示（截图即 3 条）。`popup/popup.js#showMessage` 新增 `options.key`：同一任务（`taskKey`/`traceId`）的状态、完成、失败复用同一个 toast 就地更新文案并重置自动消散计时；另外对「连续重复文案」直接刷新计时而不新增节点（兜住多 frame 重复上报）。popup 侧的开始/已在执行/失败提示同样按 `source:<taskKey>` 归类。实测一次下载过程中 toast 容器始终只有 1 条，文案按状态就地更新。 |
 | 1.17.16 | 2026-09-25 | 完成通知按「视频」去重：重复点击/重试会各自产生 downloadId（同一 taskKey），此前每个 downloadId 弹一条「下载完成」，用户看到的就是多条几乎一样的横幅。`DownloadNotificationManager.notifyComplete` 新增 `options.dedupeKey`（由 SW 传 `taskKey`）按逻辑视频去重；SW 侧 `notifyDownloadComplete` 另外检查任务快照里是否已有同 `taskKey` 且 `completeNotified` 的任务（随 storage.session 存活，SW 被回收后依然有效）。通知 id 仍为 `ovd-download-<downloadId>`，点击定位文件的能力不变。实测同一条视频连点两次：2 个文件、仅 1 条通知。新增用例 1 条，全量 655 项通过。 |
 | 1.17.15 | 2026-09-25 | 修复「检测列表出现多条同名视频、下载时通知重复」。B 站视频页的播放器用 MSE，`blob:` URL 在播放器每次重建/切流时都会变，于是同一视频在列表里堆出 1 条 `bilibili-meta` + N 条标题相同的 `Blob` 条目（实测 3 条），用户误点即会连带产生重复文件与重复完成通知。新增 `lib/video-filter.js#shouldHideRedundantDetection`（B 站视频页存在 `bilibili-meta`/`bilibili-dash` 时隐藏同页的 `blob` 与页面内部 `audio` 噪声；YouTube 既有规则——非观看页整页隐藏、观看页隐藏同源 blob 与音效——原样保留）与 `lib/video-filter.js#collapseDuplicateBlobEntries`（同一 frame + 同标题的多个 blob 只保留最新一条），`getVisibleVideosForTab` 读取时先折叠再过滤，规则本身为纯函数并纳入单测。实测同一页面：原始注册表仍为 `bilibili-meta + blob`，popup 列表由 3 条收敛为 1 条，点击下载 1 次 → 1 个文件 + 1 条完成通知。新增用例 4 条，全量 654 项通过。 |

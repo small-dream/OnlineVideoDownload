@@ -25,6 +25,8 @@
     };
 
   const constants = globalThis.__OVD_CONSTANTS__ || {};
+  // 阶段进度 → 统一进度（抓取 0..90、合并 90..99），与 background 抓取阶段共用同一映射
+  const progressScale = globalThis.__OVD_PROGRESS_SCALE__ || {};
   const DEFAULT_MAX_MERGE_BYTES = 2 * 1024 * 1024 * 1024;
 
   function createBilibiliStrategy(options = {}) {
@@ -197,7 +199,15 @@
         audioUrls,
         headers,
         'bili',
-        '等待 Bilibili 视音频数据回传超时'
+        '等待 Bilibili 视音频数据回传超时',
+        {
+          sourceId: context.sourceId || 'bilibili',
+          strategyId: context.strategyId || 'page-api',
+          taskKey: context.taskKey || '',
+          title: context.title || meta?.title || title || '',
+          traceId: context.traceId || '',
+          videoUrl: context.videoUrl || meta?.url || '',
+        }
       );
 
       console.log(`[OVD] Bilibili 视频流大小=${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB 音频流大小=${(audioBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
@@ -259,18 +269,12 @@
       progressReporter?.status(t('bili_merging', '正在合并 Bilibili 视音频...'));
 
       const blob = await BilibiliMuxer.mergeFmp4Streams(videoBuffer, audioBuffer, (percent) => {
-        getFloatButton()?.showMessage(t('bili_mergingPercent', '合并中... $1%', [String(percent)]), false, 0);
-        getFloatButton()?.showProgress(percent);
-        progressReporter?.progress(percent, { phase: 'merging' });
-
-        // 转发合并进度给 background，再由 background 广播给 popup
-        sendMessageAsync({
-          type: MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS',
-          percent,
-          phase: 'merging',
-        }).catch((err) => {
-          console.warn(`[OVD] 转发 Bilibili 合并进度失败: ${err.message}`);
-        });
+        // 映射到统一进度：抓取阶段已推进到 90%，合并阶段接着走到 99%，
+        // 完成后由 phase: 'complete' 补到 100%；浮条与 popup 条目/任务列表读同一个数字。
+        const unifiedPercent = progressScale.mapPhasePercent?.('merging', percent) ?? percent;
+        getFloatButton()?.showMessage(t('bili_mergingPercent', '合并中... $1%', [String(unifiedPercent)]), false, 0);
+        getFloatButton()?.showProgress(unifiedPercent);
+        progressReporter?.progress(unifiedPercent, { phase: 'merging' });
       });
 
       const filename = videoUtils.buildMediaFilename({

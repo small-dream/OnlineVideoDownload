@@ -34,6 +34,7 @@
         "lib/byte-utils.js",
         "lib/http-utils.js",
         "lib/constants.js",
+        "lib/progress-scale.js",
         "lib/message-types.js",
         "lib/i18n.js",
         "lib/page-message-guard.js",

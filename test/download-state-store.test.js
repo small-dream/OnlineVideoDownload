@@ -537,3 +537,45 @@ test('updateTaskByDownloadId ignores metadata-less orphan updates', async () => 
   assert.equal(updated, null);
   assert.deepEqual(store.getTasks({ tabId: 42 }), []);
 });
+
+// 抓取/合并阶段每秒都可能上报进度，进度消息不带 message 字段时
+// 不能把先前写入的状态文案擦掉（否则任务卡片只剩阶段名）。
+test('updateSourceTask 的进度上报不会清空已有状态文案', async () => {
+  const store = await createStore();
+  const taskKey = 'bili:BV1:2';
+
+  store.updateSourceTask({
+    message: '正在获取 Bilibili 视音频数据...',
+    sourceId: 'bilibili',
+    status: 'running',
+    taskKey,
+    title: 'Demo',
+    type: 'SOURCE_DOWNLOAD_STATUS',
+  }, 42);
+
+  store.updateSourceTask({
+    percent: 45,
+    phase: 'fetching',
+    sourceId: 'bilibili',
+    status: 'running',
+    taskKey,
+    title: 'Demo',
+    type: 'SOURCE_DOWNLOAD_PROGRESS',
+  }, 42);
+
+  const [task] = store.getTasks({ tabId: 42 });
+  assert.equal(task.percent, 45);
+  assert.equal(task.phase, 'fetching');
+  assert.equal(task.message, '正在获取 Bilibili 视音频数据...');
+
+  // 显式传入新文案时仍应就地更新
+  store.updateSourceTask({
+    message: '正在合并 Bilibili 视音频...',
+    sourceId: 'bilibili',
+    status: 'running',
+    taskKey,
+    title: 'Demo',
+    type: 'SOURCE_DOWNLOAD_STATUS',
+  }, 42);
+  assert.equal(store.getTasks({ tabId: 42 })[0].message, '正在合并 Bilibili 视音频...');
+});
