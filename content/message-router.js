@@ -21,6 +21,7 @@
       getFloatButton = () => null,
       hlsDelegateHandler = null,
       hlsStrategy = null,
+      postMessageToPage = () => {},
       cancelSourceDownload = () => ({ cancelled: false, ok: false, error: '取消通道不可用' }),
       startSourceDownload = () => ({ ok: false, error: 'not initialized' }),
       streamTransferManager = null,
@@ -253,6 +254,13 @@
         switch (msg.type) {
           case MSG.UPDATE_BUTTON || 'UPDATE_BUTTON':
             ensureUi();
+            respond();
+            break;
+
+          case MSG.RESCAN_TAB_VIDEOS || 'RESCAN_TAB_VIDEOS':
+            // 媒体元素与解析器都在页面上下文：转发给它重扫 + 重新解析，
+            // 结果仍以 VIDEO_DETECTED 回流，所以这里立即响应即可。
+            postMessageToPage({ type: MSG.RESCAN_PAGE_VIDEOS || 'RESCAN_PAGE_VIDEOS' });
             respond();
             break;
 

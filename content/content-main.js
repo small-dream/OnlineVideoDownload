@@ -314,9 +314,37 @@
     ensureUi: () => getFloatButton()?.mount?.(),
     getFloatButton,
     hlsDelegateHandler,
+    postMessageToPage,
     startSourceDownload: (meta) => downloadCoordinator.startSourceDownload(meta),
     streamTransferManager,
   });
 
   messageRouter.start();
+
+  /**
+   * 子框架被移除/导航时清掉它上报的视频条目。
+   * 注册表此前只在 tab 关闭或整页导航时清理，播放器 iframe 反复重建
+   * （切线路、换源、弹幕播放器重载）会在列表里留下一行行失效的重复条目。
+   * 只处理子框架（background 按 sender.frameId > 0 做 frame 级清理），
+   * 并跳过 bfcache 往返（persisted 时页面并未真正离开）。
+   */
+  function installSubframeCleanup() {
+    if (window.top === window) {
+      return;
+    }
+
+    let cleared = false;
+    const clearOwnFrame = (event) => {
+      if (cleared || event?.persisted) {
+        return;
+      }
+      cleared = true;
+      emitRuntimeMessage({ type: MSG.CLEAR_TAB_VIDEOS || 'CLEAR_TAB_VIDEOS' });
+    };
+
+    window.addEventListener('pagehide', clearOwnFrame, { once: true });
+    window.addEventListener('unload', clearOwnFrame, { once: true });
+  }
+
+  installSubframeCleanup();
 })();

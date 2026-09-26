@@ -139,11 +139,12 @@ test('shouldHideRedundantDetection：保留 YouTube 既有规则', () => {
   assert.equal(mod.shouldHideRedundantDetection({ type: 'youtube-adaptive', url: 'https://www.youtube.com/watch?v=1' }, watch), false);
 });
 
-test('collapseDuplicateBlobEntries：同 frame 同名 blob 只保留最新一条', () => {
+test('collapseDuplicateBlobEntries：同名 blob 跨 frame 也只保留最新一条', () => {
   const mod = loadModule();
   const videos = [
     { frameId: 0, timestamp: 10, title: '同名视频', type: 'blob', url: 'blob:https://www.bilibili.com/old' },
     { frameId: 0, timestamp: 20, title: '同名视频', type: 'blob', url: 'blob:https://www.bilibili.com/new' },
+    // 同一个播放器被嵌在多份 iframe 里时，每个 frame 各上报一条同标题 blob
     { frameId: 6, timestamp: 15, title: '同名视频', type: 'blob', url: 'blob:https://s1.hdslb.com/frame6' },
     { frameId: 0, timestamp: 5, title: '另一个视频', type: 'blob', url: 'blob:https://www.bilibili.com/other' },
     { frameId: 0, timestamp: 30, title: '同名视频', type: 'bilibili-meta', url: 'https://www.bilibili.com/video/BV1' },
@@ -151,11 +152,46 @@ test('collapseDuplicateBlobEntries：同 frame 同名 blob 只保留最新一条
 
   assert.deepEqual(mod.collapseDuplicateBlobEntries(videos).map((video) => video.url), [
     'blob:https://www.bilibili.com/new',
-    'blob:https://s1.hdslb.com/frame6',
     'blob:https://www.bilibili.com/other',
     'https://www.bilibili.com/video/BV1',
   ]);
   assert.deepEqual(mod.collapseDuplicateBlobEntries([]), []);
+});
+
+test('collapseDuplicateBlobEntries：多 iframe 同标题播放器只留一条（现场：弹幕播放器）', () => {
+  const mod = loadModule();
+  const videos = [
+    { frameId: 3, timestamp: 100, title: '弹幕播放器', type: 'blob', url: 'blob:https://kanav.ad/a' },
+    { frameId: 5, timestamp: 200, title: '弹幕播放器', type: 'blob', url: 'blob:https://kanav.ad/b' },
+    { frameId: 7, timestamp: 300, title: '弹幕播放器', type: 'blob', url: 'blob:https://kanav.ad/c' },
+    { frameId: 9, timestamp: 400, title: '弹幕播放器', type: 'blob', url: 'blob:https://kanav.ad/d' },
+  ];
+
+  assert.deepEqual(mod.collapseDuplicateBlobEntries(videos).map((video) => video.url), [
+    'blob:https://kanav.ad/d',
+  ]);
+});
+
+test('collapseDuplicateBlobEntries：无标题 blob 仍按 frame 去重（不同 frame 各自保留）', () => {
+  const mod = loadModule();
+  const videos = [
+    { frameId: 3, timestamp: 100, title: '', type: 'blob', url: 'blob:https://site/a' },
+    { frameId: 3, timestamp: 200, title: '', type: 'blob', url: 'blob:https://site/b' },
+    { frameId: 5, timestamp: 150, title: '  ', type: 'blob', url: 'blob:https://site/c' },
+  ];
+
+  assert.deepEqual(mod.collapseDuplicateBlobEntries(videos).map((video) => video.url), [
+    'blob:https://site/b',
+    'blob:https://site/c',
+  ]);
+});
+
+test('blobDedupeKey：有标题按标题（忽略大小写与空白），无标题按 frame', () => {
+  const mod = loadModule();
+  assert.equal(mod.blobDedupeKey({ frameId: 1, title: '  弹幕播放器 ' }), 'title:弹幕播放器');
+  assert.equal(mod.blobDedupeKey({ frameId: 2, title: 'DANMAKU Player' }), 'title:danmaku player');
+  assert.equal(mod.blobDedupeKey({ frameId: 9, title: '' }), 'frame:9');
+  assert.equal(mod.blobDedupeKey({}), 'frame:main');
 });
 
 // ---------------------------------------------------------------

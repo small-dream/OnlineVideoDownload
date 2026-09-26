@@ -149,6 +149,25 @@ body {
   display: block;
 }
 
+.thumb-placeholder {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.thumb-placeholder svg {
+  width: 34px;
+  height: 34px;
+}
+
+.video-thumb > .thumb-placeholder.is-static,
+.video-thumb-preview.preview-failed .thumb-placeholder {
+  display: flex;
+}
+
 .thumb-video {
   position: absolute;
   inset: 0;
@@ -520,6 +539,42 @@ body {
   margin-top: 4px;
   color: #8b8e95;
   font-size: 12px;
+}
+
+.scanning-state .scan-spinner {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 12px;
+  border: 3px solid #d5d7dc;
+  border-top-color: #0d8fd3;
+  border-radius: 50%;
+  animation: ovd-scan-spin 0.9s linear infinite;
+}
+
+@keyframes ovd-scan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.empty-state .retry-btn {
+  margin-top: 14px;
+  padding: 6px 18px;
+  color: #0d6fae;
+  font-size: 13px;
+  background: #ffffff;
+  border: 1px solid #b9d8ea;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.empty-state .retry-btn:hover {
+  background: #f0f8fd;
+}
+
+.empty-state .retry-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .action-bar {

@@ -752,6 +752,18 @@ async function handleMessage(msg, sender) {
       return { ok: true };
     }
 
+    case MSG.RESCAN_TAB_VIDEOS || 'RESCAN_TAB_VIDEOS': {
+      // Popup「重新检测」：转发给该 tab 的所有 frame，内容脚本再通知页面上下文
+      // 重扫 <video>/<audio> 并重跑 YouTube/Bilibili 解析。新结果仍走
+      // VIDEO_DETECTED 回流，因此这里无需等待，直接返回即可。
+      const rescanTabId = msg.tabId ?? tabId;
+      if (!rescanTabId) {
+        return { ok: false, error: '缺少 tabId，无法重新检测' };
+      }
+      await safeTabMessage(rescanTabId, { type: MSG.RESCAN_TAB_VIDEOS || 'RESCAN_TAB_VIDEOS' });
+      return { ok: true };
+    }
+
     case MSG.GET_DOWNLOAD_HISTORY || 'GET_DOWNLOAD_HISTORY':
       return { records: await getDownloadHistoryRecords() };
 
@@ -935,7 +947,15 @@ async function notifyVisibleVideoCount(tabId) {
   }
 
   const { videos } = await getVisibleVideosForTab(tabId);
-  safeTabMessage(tabId, { type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON', count: videos.length });
+  const updateMessage = {
+    type: MSG.UPDATE_BUTTON || 'UPDATE_BUTTON',
+    count: videos.length,
+    tabId,
+  };
+  safeTabMessage(tabId, updateMessage);
+  // 同步广播到扩展页面（Popup）：否则 Popup 只保留打开那一刻的检测结果，
+  // 之后新检测到的视频必须关掉再打开才能看到，用户会一直盯着空列表。
+  safeRuntimeMessage(updateMessage);
   tabBadge.refresh(tabId, videos.length);
   return videos.length;
 }
