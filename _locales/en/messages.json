@@ -360,8 +360,32 @@
   "list_hint": {
     "message": "Open the extension on a page that contains a video"
   },
+  "list_hintLoading": {
+    "message": "The page is still loading. Videos will appear automatically, or tap Rescan."
+  },
+  "list_hintRetry": {
+    "message": "The video may still be loading. Play it on the page, then tap Rescan; if it still isn't found, refresh the page and try again."
+  },
+  "list_hintUnsupported": {
+    "message": "This page type doesn't support video detection. Use the extension on a page that contains a video."
+  },
   "list_none": {
     "message": "No videos detected"
+  },
+  "list_rescan": {
+    "message": "Rescan"
+  },
+  "list_rescanFailed": {
+    "message": "Rescan failed. Please try again later."
+  },
+  "list_rescanning": {
+    "message": "Rescanning…"
+  },
+  "list_scanning": {
+    "message": "Scanning this page for videos…"
+  },
+  "list_scanningHint": {
+    "message": "The video may still be loading; it will appear automatically once detected"
   },
   "list_selectAll": {
     "message": "Select all"

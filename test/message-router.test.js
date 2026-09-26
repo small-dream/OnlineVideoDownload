@@ -86,6 +86,18 @@ test('ABORT_SOURCE_DOWNLOAD 转发取消请求到内容侧任务', async () => {
   }]);
 });
 
+test('RESCAN_TAB_VIDEOS 转发重扫请求到页面上下文', async () => {
+  const forwarded = [];
+  const harness = setupBackgroundRouter({
+    postMessageToPage: (payload) => forwarded.push(payload),
+  });
+
+  const response = await harness.send({ type: 'RESCAN_TAB_VIDEOS' });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(forwarded, [{ type: 'RESCAN_PAGE_VIDEOS' }]);
+});
+
 test('ABORT_SOURCE_DOWNLOAD 中止 HLS 委托下载的 AbortController', async () => {
   let seenSignal = null;
   const harness = setupBackgroundRouter({

@@ -30,6 +30,25 @@
       youtubeParser.startWatching();
     }
 
+    // Popup「重新检测」→ content → 这里：重扫媒体元素并重跑平台解析。
+    // 页面里的 <video> 常晚于 Popup 打开才出现（懒加载 / SPA），
+    // 给用户一个手动重试入口，而不是只能刷新页面。
+    const pageCore = window.__OVD_PAGE_CORE__;
+    const pageMsg = window.__OVD_MESSAGE_TYPES__?.MESSAGE_TYPES || {};
+    pageCore?.registerMessageHandler?.(
+      pageMsg.RESCAN_PAGE_VIDEOS || 'RESCAN_PAGE_VIDEOS',
+      () => {
+        interceptor.scanVideoElements();
+        interceptor.scanAudioElements();
+        if (isYouTube) {
+          scheduleYouTubeExtraction('rescan');
+        }
+        if (isBilibili) {
+          bilibiliParser.scheduleExtraction('rescan');
+        }
+      }
+    );
+
     function scheduleYouTubeExtraction(reason) {
       if (!isYouTube) {
         return;

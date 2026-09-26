@@ -360,8 +360,32 @@
   "list_hint": {
     "message": "请在包含视频的页面打开扩展"
   },
+  "list_hintLoading": {
+    "message": "页面还在加载中：视频出现后会自动显示，也可以点「重新检测」"
+  },
+  "list_hintRetry": {
+    "message": "视频可能还在加载：播放页面里的视频后点「重新检测」，仍无结果可刷新页面重试"
+  },
+  "list_hintUnsupported": {
+    "message": "当前页面类型不支持视频检测，请在包含视频的网页上使用"
+  },
   "list_none": {
     "message": "未检测到视频"
+  },
+  "list_rescan": {
+    "message": "重新检测"
+  },
+  "list_rescanFailed": {
+    "message": "重新检测失败，请稍后重试。"
+  },
+  "list_rescanning": {
+    "message": "正在重新检测…"
+  },
+  "list_scanning": {
+    "message": "正在检测页面视频…"
+  },
+  "list_scanningHint": {
+    "message": "视频加载需要一点时间，检测到后会自动出现"
   },
   "list_selectAll": {
     "message": "全选"

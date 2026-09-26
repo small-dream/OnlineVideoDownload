@@ -18,13 +18,19 @@
         <button class="batch-btn" id="batchDownloadBtn" type="button" disabled>下载所选 (0)</button>
       </div>
       <div id="videoList" class="video-list">
-        <div class="empty-state" id="emptyState">
+        <div class="empty-state scanning-state" id="scanState">
+          <span class="scan-spinner" aria-hidden="true"></span>
+          <p id="scanStateText" data-i18n="list_scanning">正在检测页面视频…</p>
+          <p class="hint" data-i18n="list_scanningHint">视频加载需要一点时间，检测到后会自动出现</p>
+        </div>
+        <div class="empty-state" id="emptyState" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="11" cy="11" r="8"/>
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          <p data-i18n="list_none">未检测到视频</p>
-          <p class="hint" data-i18n="list_hint">请在包含视频的页面打开扩展</p>
+          <p id="emptyStateText" data-i18n="list_none">未检测到视频</p>
+          <p class="hint" id="emptyStateHint" data-i18n="list_hint">请在包含视频的页面打开扩展</p>
+          <button class="retry-btn" id="rescanBtn" type="button" data-i18n="list_rescan">重新检测</button>
         </div>
       </div>
     </main>

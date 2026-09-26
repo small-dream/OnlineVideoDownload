@@ -32,6 +32,10 @@ const {
 
 const videoListEl = document.getElementById('videoList');
 const emptyStateEl = document.getElementById('emptyState');
+const scanStateEl = document.getElementById('scanState');
+const scanStateTextEl = document.getElementById('scanStateText');
+const emptyStateHintEl = document.getElementById('emptyStateHint');
+const rescanBtnEl = document.getElementById('rescanBtn');
 const subtitleEl = document.getElementById('subtitle');
 const mainViewEl = document.getElementById('mainView');
 const settingsViewEl = document.getElementById('settingsView');
@@ -84,6 +88,96 @@ const activeSourceTaskByTraceId = new Map();
 const activeSourceTaskByTaskKey = new Map();
 const activeBackgroundHlsTaskByUrl = new Map();
 
+// 检测窗口：打开 Popup 后先显示「正在检测」，期间自动轮询后台结果，
+// 避免内容脚本/页面还没上报视频时直接给用户一个「未检测到视频」的假结论。
+const SCAN_POLL_INTERVAL_MS = 1200;
+// 单次检测窗口的总时长上限
+const SCAN_MAX_MS = 15000;
+// 页面 load 完成后额外宽限的时间（懒加载播放器常在 load 之后才插入 <video>）
+const SCAN_LOAD_GRACE_MS = 8000;
+
+let currentTabUrl = '';
+let currentTabStatus = null;
+let scanStartedAt = 0;
+let scanDeadline = 0;
+let scanSettled = false;
+let scanPollTimer = null;
+let scanPollInFlight = false;
+
+/** 只有 http(s)/file/ftp 页面才可能被内容脚本检测（chrome:// 等受保护页面注入不了） */
+function isDetectableTabUrl(url = '') {
+  return /^(https?|file|ftp):/i.test(String(url || ''));
+}
+
+function stopScanPolling() {
+  if (scanPollTimer != null) {
+    clearInterval(scanPollTimer);
+    scanPollTimer = null;
+  }
+}
+
+/** 进入「正在检测」状态：显示动画并按固定间隔轮询后台检测结果 */
+function beginScan({ rescan = false, poll = true } = {}) {
+  scanSettled = false;
+  scanStartedAt = Date.now();
+  scanDeadline = scanStartedAt + SCAN_MAX_MS;
+
+  if (scanStateTextEl) {
+    scanStateTextEl.textContent = rescan
+      ? t('list_rescanning', '正在重新检测…')
+      : t('list_scanning', '正在检测页面视频…');
+  }
+  setHidden(scanStateEl, false);
+  setHidden(emptyStateEl, true);
+  setHidden(listHeaderEl, true);
+
+  stopScanPolling();
+  if (!poll) {
+    return;
+  }
+  scanPollTimer = setInterval(() => {
+    if (scanPollInFlight) {
+      return;
+    }
+    scanPollInFlight = true;
+    void loadVideos({ silent: true }).finally(() => {
+      scanPollInFlight = false;
+    });
+  }, SCAN_POLL_INTERVAL_MS);
+}
+
+/** 检测窗口结束或确认无结果：落到空状态，并把原因/可操作的提示写清楚 */
+function settleEmptyState() {
+  scanSettled = true;
+  stopScanPolling();
+  renderVideos([]);
+}
+
+/** 空状态提示随上下文变化：不支持的页面 vs 视频可能还没加载出来 */
+function updateEmptyStateCopy() {
+  if (!emptyStateHintEl) {
+    return;
+  }
+  if (!isDetectableTabUrl(currentTabUrl)) {
+    emptyStateHintEl.textContent = t(
+      'list_hintUnsupported',
+      '当前页面类型不支持视频检测，请在包含视频的网页上使用'
+    );
+    return;
+  }
+  if (currentTabStatus === 'loading') {
+    emptyStateHintEl.textContent = t(
+      'list_hintLoading',
+      '页面还在加载中：视频出现后会自动显示，也可以点「重新检测」'
+    );
+    return;
+  }
+  emptyStateHintEl.textContent = t(
+    'list_hintRetry',
+    '视频可能还在加载：播放页面里的视频后点「重新检测」，仍无结果可刷新页面重试'
+  );
+}
+
 function setDownloadButtonState(button, state) {
   if (!button) {
     return;
@@ -127,6 +221,25 @@ function canUseInlinePreview(video, thumbnailUrl) {
   return ['direct', 'hls'].includes(video.type);
 }
 
+/**
+ * 无缩略图时的占位图标。blob / dash 等类型既没有封面也无法在 Popup 里内联预览，
+ * 之前只留一块空黑框，用户会以为"缩略图没加载出来"。
+ */
+function buildThumbPlaceholderHtml(extraClass = '') {
+  const className = extraClass ? `thumb-placeholder ${extraClass}` : 'thumb-placeholder';
+  return `
+      <div class="${className}" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="5" width="19" height="14" rx="2.5"/>
+          <path d="M2.5 9.5h19"/>
+          <path d="M7 5l1.8 4.5"/>
+          <path d="M12 5l1.8 4.5"/>
+          <path d="M17 5l1.8 4.5"/>
+        </svg>
+      </div>
+  `;
+}
+
 function buildThumbHtml(video, thumbnailUrl, durationText) {
   if (canUseInlinePreview(video, thumbnailUrl)) {
     const previewUrl = escapeHtml(normalizeAssetUrl(video.url));
@@ -139,6 +252,7 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
         <video class="thumb-video" muted playsinline loop preload="metadata" data-preview-type="${escapeHtml(video.type || '')}">
           <source src="${previewUrl}" type="${previewType}">
         </video>
+        ${buildThumbPlaceholderHtml()}
         <div class="thumb-shade"></div>
         <span class="duration-badge">
           <span class="mini-logo" aria-hidden="true">
@@ -155,8 +269,10 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
   }
 
   const thumbnailStyle = thumbnailUrl ? ` style="background-image: url('${escapeHtml(thumbnailUrl)}')"` : '';
+  const placeholderHtml = thumbnailUrl ? '' : buildThumbPlaceholderHtml('is-static');
   return `
     <div class="video-thumb"${thumbnailStyle}>
+      ${placeholderHtml}
       <div class="thumb-shade"></div>
       <span class="duration-badge">
         <span class="mini-logo" aria-hidden="true">
@@ -257,6 +373,9 @@ clearHistoryBtnEl?.addEventListener('click', () => clearHistory());
 clearListBtnEl?.addEventListener('click', async () => {
   currentVideos = [];
   selectedIndices.clear();
+  // 用户主动清空：停掉检测轮询，避免下一轮轮询把界面又切回「正在检测」
+  scanSettled = true;
+  stopScanPolling();
   renderVideos([]);
 
   if (currentTabId == null) {
@@ -270,6 +389,27 @@ clearListBtnEl?.addEventListener('click', async () => {
   } catch (err) {
     console.warn(`[OVD] failed to clear tab videos in background: ${err.message}`);
   }
+});
+
+rescanBtnEl?.addEventListener('click', async () => {
+  if (currentTabId == null) {
+    return;
+  }
+
+  beginScan({ rescan: true });
+  try {
+    const response = await sendRuntimeMessageAsync({
+      tabId: currentTabId,
+      type: MSG.RESCAN_TAB_VIDEOS || 'RESCAN_TAB_VIDEOS',
+    });
+    if (response?.ok === false) {
+      throw new Error(response.error || 'rescan failed');
+    }
+  } catch (err) {
+    console.warn(`[OVD] rescan failed: ${err.message}`);
+    showMessage(t('list_rescanFailed', '重新检测失败，请稍后重试。'), 'error');
+  }
+  void loadVideos({ silent: true });
 });
 
 selectAllCheckboxEl?.addEventListener('change', () => {
@@ -305,6 +445,35 @@ globalThis.__OVD_I18N__?.applyI18n?.();
 
 init();
 
+// 标签页加载状态 / URL 变化时刷新：SPA 路由与懒加载播放器都可能带出新视频
+chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
+  if (tabId !== currentTabId) {
+    return;
+  }
+
+  if (changeInfo.url) {
+    currentTabUrl = changeInfo.url;
+    if (!isDetectableTabUrl(currentTabUrl)) {
+      settleEmptyState();
+      return;
+    }
+    // 同标签页内跳转（含 SPA 导航）：重新走一次检测窗口
+    beginScan();
+  }
+
+  if (changeInfo.status) {
+    currentTabStatus = changeInfo.status;
+  }
+  if (changeInfo.status === 'complete' && !scanSettled) {
+    // 页面刚加载完，给懒加载播放器留出宽限时间（不超过检测窗口总上限）
+    scanDeadline = Math.min(Date.now() + SCAN_LOAD_GRACE_MS, scanStartedAt + SCAN_MAX_MS);
+  }
+
+  if (changeInfo.url || changeInfo.status === 'complete') {
+    void loadVideos({ silent: true });
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender?.tab?.id != null && currentTabId != null && sender.tab.id !== currentTabId) {
     return;
@@ -316,7 +485,10 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 
   if (msg.type === (MSG.UPDATE_BUTTON || 'UPDATE_BUTTON')) {
-    void loadVideos();
+    // 只响应当前标签页的检测更新；background 现在会主动广播，无需等用户重开 Popup
+    if (msg.tabId == null || currentTabId == null || msg.tabId === currentTabId) {
+      void loadVideos({ silent: true });
+    }
     return;
   }
 
@@ -352,14 +524,26 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 });
 
 async function init() {
+  beginScan();
+
   await Promise.all([loadYouTubePreferences(), loadBilibiliPreferences(), loadPopupSettings()]);
 
   const tabs = await new Promise((resolve) => chrome.tabs.query({ active: true, currentWindow: true }, resolve));
   if (!tabs[0]) {
+    settleEmptyState();
     return;
   }
 
   currentTabId = tabs[0].id;
+  currentTabUrl = tabs[0].url || '';
+  currentTabStatus = tabs[0].status || null;
+
+  if (!isDetectableTabUrl(currentTabUrl)) {
+    // chrome://、扩展页等注入不了内容脚本，不必等满检测窗口才给结论
+    settleEmptyState();
+    return;
+  }
+
   await loadVideos();
 }
 
@@ -888,7 +1072,7 @@ function refreshTrackedSourceTaskButtons() {
   }
 }
 
-async function loadVideos() {
+async function loadVideos({ silent = false } = {}) {
   if (!currentTabId) {
     return;
   }
@@ -902,12 +1086,30 @@ async function loadVideos() {
       throw new Error(response.error || 'Failed to load videos');
     }
     currentVideos = (response?.videos || []).map((video) => cloneVideoWithDefaults(video));
-    renderVideos(currentVideos);
+
+    if (currentVideos.length > 0) {
+      scanSettled = true;
+      stopScanPolling();
+      renderVideos(currentVideos);
+    } else if (scanSettled) {
+      renderVideos([]);
+    } else if (Date.now() >= scanDeadline) {
+      // 检测窗口结束仍无结果：给出空状态与手动重试入口
+      settleEmptyState();
+    } else {
+      // 仍在检测窗口内：保持「正在检测」动画，等待下一轮自动刷新
+      setHidden(scanStateEl, false);
+      setHidden(emptyStateEl, true);
+    }
+
     await loadDownloadStates();
     refreshTrackedSourceTaskButtons();
   } catch (err) {
     console.warn(`[OVD] failed to load popup videos: ${err.message}`);
-    showMessage('无法连接到扩展后台。', 'error');
+    if (!silent) {
+      showMessage('无法连接到扩展后台。', 'error');
+    }
+    settleEmptyState();
   }
 }
 
@@ -1239,6 +1441,7 @@ function renderVideos(videos) {
   videoListEl.querySelectorAll('.video-item').forEach((el) => el.remove());
 
   setHidden(listHeaderEl, videos.length === 0);
+  setHidden(scanStateEl, true);
   if (listCountEl) {
     listCountEl.textContent = videos.length > 0
       ? t('list_detected', '检测到 $1 个视频资源', [String(videos.length)])
@@ -1248,6 +1451,7 @@ function renderVideos(videos) {
   if (videos.length === 0) {
     subtitleEl.textContent = t('list_none', '未检测到视频');
     selectedIndices.clear();
+    updateEmptyStateCopy();
     setHidden(emptyStateEl, false);
     updateBatchSelection();
     return;

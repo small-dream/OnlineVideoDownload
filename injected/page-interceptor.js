@@ -83,11 +83,24 @@
 
     sendToExtension({
       requestHeaders: {},
-      title: document.title,
+      title: frameDisplayTitle(),
       type,
       url,
       ...extra,
     });
+  }
+
+  /**
+   * 子框架的 document.title 通常是播放器自己的名字（现场：「弹幕播放器」），
+   * 对用户和文件名都没有意义。留空交给 background 用标签页标题（视频名）补全；
+   * 顶层 frame 维持原行为。
+   */
+  function frameDisplayTitle() {
+    try {
+      return window.top === window ? document.title : '';
+    } catch (_err) {
+      return document.title;
+    }
   }
 
   function fetchMediaElementSize(url, type, duration, source) {
@@ -328,7 +341,7 @@
                 sendToExtension({
                   mimeType,
                   source: 'mediasource',
-                  title: document.title,
+                  title: frameDisplayTitle(),
                   type: 'blob',
                   url: mediaElement.src,
                 });
