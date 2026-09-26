@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.37
+> **版本**：1.17.39
 > **最后更新**：2026-09-26
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -51,15 +51,22 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 - `<video>` / `<source>` / `<audio>` 扫描，并用 `MutationObserver` + 媒体事件持续监听动态插入/懒加载的播放器（不再只在 init/load 各扫一次）
 - MIME 嗅探覆盖 `video/mp2t`、`video/quicktime`、`video/x-matroska`；`application/octet-stream` 必须由扩展名或 `Content-Disposition` 文件名二次确认才登记
 - MediaSource / blob URL 捕获
+- blob 条目去重：blob: URL 随 MSE 播放器重建/切流不断变化，同一播放器被嵌在多份 iframe（多线路预加载、弹幕播放器）时会出现多行同标题重复项；现在按标题跨 frame 只保留最新一条，无标题时才退回按 frame 去重
+- 子框架上报的通用/ blob 检测不再使用 iframe 自己的 `document.title`（现场表现为整列标题都是「弹幕播放器」），留空由 background 用标签页标题（视频名）补全；顶层页面维持原行为
+- 子框架被移除或导航时清掉它上报的检测条目，避免播放器 iframe 反复重建（切线路、换源）在列表里留下失效重复项
 - SPA 路由变化感知
 - 页面脚本优先通过 `chrome.scripting.executeScript({ world: 'MAIN' })` 注入（CSP 严格站点不再静默失败），失败时回退 DOM `<script src>` 注入
 
 UI 要求：
 
 - Popup 显示当前页面已检测视频列表
+- 打开 Popup 后先展示「正在检测页面视频…」并自动轮询结果，检测窗口内不会直接给出「未检测到视频」的假结论
+- background 每次检测到视频都会广播，Popup 打开期间列表自动刷新；标签页加载完成、同标签页内跳转（含 SPA 路由）也会触发刷新，无需关掉再打开
+- 空列表给出与上下文匹配的提示（页面仍在加载 / 视频可能还没加载 / 页面类型不支持），并提供「重新检测」按钮：点击后请求页面上下文重扫 `<video>`/`<audio>` 并重跑 YouTube/Bilibili 解析，无需刷新整个页面
 - 支持从 Popup 发起下载
 - 支持显示视频标题、格式标签、时长、大小、缩略图与进度
 - Popup 视频条目采用卡片式布局，左侧展示视频缩略图
+- 无封面且无法内联预览的条目（blob / dash 等）显示媒体占位图标，不再留一块空黑框；内联预览加载失败时同样回落到占位图标
 - Popup 中的 YouTube 条目支持在设置中切换下载模式（录制模式 / 解析下载），解析下载模式下可在条目中选择分辨率
 - Popup 从内容侧发起下载时，条目按钮应保持”进行中”状态直到收到完成或失败结果，避免用户误以为任务未启动并重复点击
 - 支持批量选择多个视频，从 Popup 一键并发下载
@@ -243,6 +250,8 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.17.39 | 2026-09-26 | 修复「检测列表出现多行同名 Blob 条目、标题是播放器名字、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 改为按标题跨 frame 去重（此前按 `frameId + 标题`，同一播放器被嵌在多份 iframe 时每个 frame 各留一行），无标题时才退回按 frame 去重；②`injected/page-interceptor.js` 里子框架上报的通用 / blob 检测不再带 iframe 自己的 `document.title`（「弹幕播放器」这类播放器名），留空由 background 用标签页标题补全，下载文件名随之变成视频名；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），避免播放器 iframe 反复重建后注册表残留失效条目；④`popup/popup.js` + `popup.css` 为无封面且无法内联预览的条目（blob / dash / 内联预览失败）增加媒体占位图标。新增用例 3 条，全量 696 项通过。 |
+| 1.17.38 | 2026-09-26 | 修复「打开 Popup 只看到空列表、一直等也不更新」。检测列表不再只在打开时读取一次：background 每次检测到视频都经 `safeRuntimeMessage` 广播 `UPDATE_BUTTON`（带 `tabId`），Popup 据此自动刷新；Popup 打开后先显示「正在检测页面视频…」并每 1.2s 轮询结果（总窗口 15s，页面 load 完成后再宽限 8s），窗口内不再提前显示「未检测到视频」；空状态按上下文给出提示并新增「重新检测」按钮，经新增的 `RESCAN_TAB_VIDEOS`（Popup → SW → Content → 页面上下文 `RESCAN_PAGE_VIDEOS`）重扫媒体元素并重跑 YouTube/Bilibili 解析。 |
 | 1.17.37 | 2026-09-26 | 本版为「YouTube 下载链路收口 + 大文件稳定性」发布版：①界面双语化（`_locales/zh_CN` 与 `en`，Popup、内容脚本状态与错误文案按语言显示，缺 key 回退中文原文）；②YouTube 清晰度与下载模式收口——识别 `hls_variant` master 清单、按合并后的记录构造过滤上下文、悬空的 `hls:` 偏好自动回退普通清晰度、音频流优先原声轨（避免把自动配音合进视频）、设置中的「解析下载 / 录制」与下载偏好打通；③大文件不再内存合并：新增流式合并落盘（`lib/fmp4-file-merge.js`），GB 级文件不再因内存上限中止；④下载产物命名与保存正确性——CDN 把有效媒体误标 `text/plain` 时不再产出 `xxx.mp4.txt`，改为扩展按 `video/mp4` 自行保存，OPFS 对象 URL 带显式 MIME，且只有明确探测为媒体才交给浏览器下载管理器。 |
 | 1.17.18 | 2026-09-25 | 修复「Bilibili 下载进度三处不一致」：识别列表条目、下载任务列表与页面右下角浮条此前各自由不同消息、不同阶段的原始百分比驱动（抓取阶段只有条目在动，合并阶段又从 0% 重来）。新增统一的进度坐标系（抓取 0..90、合并 90..99、完成 100），抓取阶段的进度同时写入任务表并广播给条目与浮条，合并阶段用同一映射上报；三处因此始终显示同一个数字，回退与「先到 100% 再归零」消失。 |
 | 1.17.7 | 2026-09-25 | 第四波：安全与文件名健壮性。页面来源的检测结果按不可信数据校验（媒体类型白名单 + 仅 http(s)/带 origin 的 blob + 长度上限，内容脚本与 Service Worker 双层拦截），web_accessible_resources 由整个 lib/* 收紧到 lib/message-types.js，manifest 增加 minimum_chrome_version: 109；文件名清洗规避 Windows 保留设备名、去掉结尾点与空格、剔除控制字符并按码点截断（不再切断 emoji）。 |

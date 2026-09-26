@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.37
+> Version: 1.17.39
 > Last Updated: 2026-09-26
 
 ## Goals
@@ -304,18 +304,21 @@ Responsibilities:
 - 按用户设置过滤检测结果，压掉广告片段、音效等噪声条目。
 - 域名黑名单（子域名匹配，blob 条目回退到所属页面域名）、最小时长、最小体积。
 - 阈值过滤只作用于通用嗅探条目，结构化来源（YouTube/Bilibili）永远显示。
+- blob 条目去重：按标题跨 frame 只保留最新一条（`blobDedupeKey`），无标题时退回按 frame 去重。
 - Expose helpers through `globalThis.__OVD_VIDEO_FILTER__`.
 
 Public surface:
 
 - `shouldFilterVideo(video, settings, context) -> { filtered, reason }`
 - `filterVideos(videos, settings, context)`
+- `collapseDuplicateBlobEntries(videos)` / `blobDedupeKey(video)`
 - `parseDomainList(value)` / `normalizeDomain(input)` / `isBlacklistedHost(host, domains)` / `hostOf(url)`
 
 Notes:
 
 - 过滤在 `background/service-worker.js#getVisibleVideosForTab` 读取时应用，因此改设置后无需重新检测即可生效，徽章计数与 popup 列表始终一致。
 - 时长/体积未知（0 或缺失）时不过滤，避免误杀。
+- blob 去重同样在 `getVisibleVideosForTab` 读取时应用；标题相同即视为同一播放器的副本（多 iframe / MSE 反复重建），因此不同 frame 的同名 blob 也只会剩一条。
 
 ### `lib/opfs-sink.js`
 
@@ -384,11 +387,13 @@ Responsibilities:
 - `page-youtube-parser`: own YouTube player-response extraction, dedupe state, watch-page validation, and Android fallback logic.
 - `page-bilibili-parser`: own Bilibili page metadata extraction and validation across `__INITIAL_STATE__`, `__playinfo__`, and player APIs. Extracts thumbnail from `videoData.pic`, `videoData.cover`, `initialState.pic`, and DOM `<meta>` / `<img>` elements.
 - `page-interceptor`: own XHR/fetch interception, `MediaSource` / blob detection, DRM detection, history hooks, and generic audio/video element scans.
+- `page-interceptor` 上报通用 / blob 检测时用 `frameDisplayTitle()`：顶层 frame 取 `document.title`，子框架留空（iframe 标题通常是播放器名，如「弹幕播放器」，交由 background 用标签页标题补全）。
 
 Notes:
 
 - Page modules communicate through `window.__OVD_PAGE_*__` namespaces instead of ES module imports.
 - `page-context-script.js` remains the only script injected directly by the content runtime after `lib/message-types.js`.
+- `page-context-script.js` registers a `RESCAN_PAGE_VIDEOS` handler on `__OVD_PAGE_CORE__`；收到后重跑 `scanVideoElements()` / `scanAudioElements()` 并在 YouTube / Bilibili 重新调度解析，供 Popup 的「重新检测」使用（无需刷新页面）。
 
 ## Content Runtime
 
@@ -403,6 +408,7 @@ Responsibilities:
 - Create shared runtime helpers such as `emitRuntimeMessage`, `postMessageToPage`, and blob download handoff.
 - Compose the content-side services and strategies.
 - Start the message router.
+- 子框架（`window.top !== window`）在 `pagehide`/`unload` 时上报 `CLEAR_TAB_VIDEOS`：background 按 `sender.frameId > 0` 只清该 frame 的条目，避免播放器 iframe 反复重建后注册表残留失效条目（`persisted` 的 bfcache 往返跳过）。
 
 `content-main.js` should stay a thin assembler. New source behavior should go into dedicated modules, not back into this file.
 
@@ -526,6 +532,7 @@ Responsibilities:
 - Route transfer events into the stream transfer manager.
 - Route source download requests into the download coordinator.
 - Route HLS delegate requests into the HLS delegate handler.
+- 处理 `RESCAN_TAB_VIDEOS`：经 `postMessageToPage` 转发为页面上下文的 `RESCAN_PAGE_VIDEOS`，让 Popup 的「重新检测」复用页面侧的媒体扫描与平台解析。
 
 ## Popup Runtime
 
@@ -534,6 +541,9 @@ File: [popup/popup.js](D:/github/OnlineVideoDownload/popup/popup.js)
 Responsibilities:
 
 - Load persisted YouTube and Bilibili download preferences before rendering the current tab's video list.
+- 打开后先进入「正在检测页面视频…」状态：在检测窗口内（每 1.2s 轮询 `GET_VIDEOS_FOR_TAB`，上限 15s；标签页上报 `complete` 后再宽限 8s）不显示空列表结论，窗口结束才切到空状态。
+- 响应 background 的 `UPDATE_BUTTON` 广播（按 `tabId` 过滤）与 `chrome.tabs.onUpdated`（URL 变化 / `complete`）自动刷新，Popup 打开期间新检测到的视频会直接出现，无需关掉重开。
+- 空状态提供「重新检测」按钮：发送 `RESCAN_TAB_VIDEOS`（Popup → SW → content → 页面上下文 `RESCAN_PAGE_VIDEOS`），并按上下文切换提示文案（页面仍在加载 / 视频可能还没加载 / 页面类型不支持检测）。
 - Render source-specific controls per item instead of treating all videos as a generic download row.
 - Video items use a card layout with thumbnail images on the left and metadata/controls on the right.
 - YouTube download mode (录制/解析) is configured in the settings view; only the resolution selector appears inline for parse mode.
@@ -728,6 +738,7 @@ Notes:
 
 - `lib/message-types.js` now centralizes shared message names and page-context source identifiers across background, content, popup, and injected page runtime.
 - `YOUTUBE_DIRECT_DOWNLOAD` and `YOUTUBE_MEDIA_STREAMS_REQUEST` from content to page now include optional `traceId`.
+- `RESCAN_PAGE_VIDEOS`（content → page）由 `content/message-router.js` 在收到 background 的 `RESCAN_TAB_VIDEOS` 时发出，页面上下文据此重扫 `<video>`/`<audio>` 并重跑 YouTube / Bilibili 解析；无 payload 字段。
 - YouTube stream payloads now include `itag` for combined/video/audio candidates.
 - The injected page runtime may issue an additional Android-style YouTube player request when adaptive video/audio entries exist but usable direct URLs are missing, or when the initial payload only exposes low-quality direct URLs while higher qualities remain inaccessible.
 - The page-context YouTube parser suppresses repeated identical source-hit/debug summaries and records explicit fallback trigger / response / no-improvement logs once per video.
@@ -766,6 +777,7 @@ Notes:
 Examples:
 
 - `UPDATE_BUTTON`
+- `RESCAN_TAB_VIDEOS`
 - `DOWNLOAD_PROGRESS`
 - `HLS_PROGRESS`
 - `FETCH_BLOB`
@@ -780,6 +792,9 @@ Examples:
 - `SOURCE_DOWNLOAD_RESULT`
 
 Notes:
+
+- `UPDATE_BUTTON` 现在同时经 `safeTabMessage`（内容脚本浮条）与 `safeRuntimeMessage`（扩展页面）广播，并携带 `tabId`，因此 Popup 打开期间能实时刷新检测列表。
+- `RESCAN_TAB_VIDEOS` 由 Popup 发往 background，background 再经 `safeTabMessage` 广播给该 tab 的所有 frame；内容脚本把它转成页面上下文的 `RESCAN_PAGE_VIDEOS`（见 Message Router），页面重扫媒体元素并重跑平台解析，结果仍以 `VIDEO_DETECTED` 回流。
 
 - `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options`（`fetchOptions` 默认 `{ credentials: 'include' }`，用户选定的画质以 `quality`（变体 URL 或标签）透传）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount, quality, isLive, audioMerged }`，任务据此写入真实 `downloadId`。
 - 内容侧 HLS 因体积超限（`HLS_OUTPUT_TOO_LARGE`）中止时，`hls-download-strategy` 视为委托失败并自动回退到 `HlsFetcher`；后台路径用 OPFS 落盘，因此大文件不会因为内容侧的内存上限而整体失败。
@@ -914,6 +929,8 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.17.39 | 2026-09-26 | 修复「检测列表多行同名 Blob、标题是播放器名、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 由 `frameId + 标题` 改为按标题跨 frame 去重（新增 `blobDedupeKey`：有标题按标题、无标题退回 frame），多 iframe 场景下同一个播放器只留最新一条；②`injected/page-interceptor.js` 新增 `frameDisplayTitle()`，子框架的通用 / blob 检测不再带 iframe 自己的 `document.title`，留空由 `service-worker.js#enrichTitles` 用标签页标题补全（标题与下载文件名都变成视频名）；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），background 按 `sender.frameId > 0` 只清该 frame 的条目；④`popup/popup.js` 抽出 `buildThumbPlaceholderHtml()`，blob / dash 等无封面且无法内联预览的条目、以及内联预览失败的条目改用媒体占位图标，`popup.css` 增加 `.thumb-placeholder` 样式。新增用例 3 条，全量 696 项通过。 |
+| 1.17.38 | 2026-09-26 | 修复「打开 Popup 只见空列表且一直不更新」。①检测结果实时化：`notifyVisibleVideoCount` 在原有 `safeTabMessage` 之外新增 `safeRuntimeMessage`，把带 `tabId` 的 `UPDATE_BUTTON` 广播给 Popup，`popup/popup.js` 按当前 tab 过滤后自动 `loadVideos`。②新增扫描态：打开 Popup 先显示「正在检测页面视频…」（`scanState` + 旋转指示），在检测窗口内每 1.2s 轮询 `GET_VIDEOS_FOR_TAB`（上限 15s，`chrome.tabs.onUpdated` 上报 `complete` 后宽限 8s），窗口结束才回落到空状态；`chrome.tabs.onUpdated` 的 URL 变化（含 SPA）会重开检测窗口。③新增手动重试链路：空状态「重新检测」按钮发送 `RESCAN_TAB_VIDEOS`（Popup → SW `safeTabMessage` 广播全 frame → `content/message-router.js` 经 `postMessageToPage` 转 `RESCAN_PAGE_VIDEOS` → `injected/page-context-script.js` 重扫 `<video>`/`<audio>` 并重跑 YouTube/Bilibili 解析）。④空状态文案按上下文区分（页面仍在加载 / 视频可能未加载 / 页面类型不支持）。`lib/message-types.js` 新增 `RESCAN_TAB_VIDEOS` / `RESCAN_PAGE_VIDEOS`。新增用例 1 条，全量 693 项通过。 |
 | 1.17.37 | 2026-09-26 | `popup/popup.js` 增加现场排查日志：`getYouTubeQualityOptions` 生成的清晰度选项按签名去重后打印 `[OVD] YouTube 清晰度选项 videoId=… hlsManifest=… streams=[Nv/Na/Nc] options=[…]`（含 HLS 清单有无、视/音/直出流条数与最终 option 标签），用于定位现场「自动 / HLS 选项消失、只剩默认最高画质」。纯日志，无行为变更。 |
 | 1.17.36 | 2026-09-26 | 继续收口「文件名仍是 `…_2160p.mp4.txt`」。两处新修复：①`offscreen/offscreen.js` 的 OPFS 对象 URL 之前直接 `URL.createObjectURL(file)` —— OPFS 取出的 `File` **类型为空**，浏览器无法判断媒体类型，可能按错误类型给文件名追加扩展名；现在按调用方给出的 MIME 包一层 `new Blob([file], {type})`（并记录 mime 日志）。②`decideCombinedDownloadRoute` 收紧：只有探测**明确确认**是 `video/*`/`audio/*` 才交给浏览器下载管理器，其余（`text/*`、空、`application/octet-stream`、探测被 CORS/网络挡住 status=0）一律由扩展自己取回并用 `video/mp4` 保存——不再赌"服务器这次可能标对了"。另有 `text/*`/`xml` 仍走高优先级的 self-save 分支；三处最终保存点（blob / OPFS / 内容侧 blob 交接）都补了带 filename+MIME 的日志，便于现场一眼定位是哪条路径在命名。全量 692 项通过。 |
 | 1.17.35 | 2026-09-26 | 修「文件名仍是 `…_2160p.mp4.txt`（内容其实是好视频）」。1.17.34 的 `downloads.onDeterminingFilename` 纠偏在现场没有生效，因此不再依赖它，改为**从源头用正确的 MIME 保存**：①`youtube-adaptive-download-strategy` 的 combined 分支新增 `decideCombinedDownloadRoute()`（纯函数+单测）——`4xx/5xx` → 改走合并路径；响应是 `text/*` / `xml`（CDN 误标有效媒体，现场就是这种）→ **`self-save`**：由扩展自己取回数据再保存（小于 512MB 走 Blob、更大的走 OPFS 流式落盘），MIME 固定 `video/mp4`，浏览器自然不会再追加 `.txt`；其余情况照旧交给下载管理器（省内存、可续传）。②`injected/page-http-utils.js#triggerPageBlobDownload` 增加 `withFilenameMimeType()`：页面上下文拿到的 Blob 若类型是 `text/*`/`xml`/`octet-stream`/空，按文件名扩展名纠正为对应媒体 MIME 再建对象 URL（页面内直链下载同样不会再出现 `.txt`）。③`onDeterminingFilename` 与「只警告不删除」的兜底保留。新增用例 1 条，全量 692 项通过。 |
