@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.18
-> Last Updated: 2026-09-25
+> Version: 1.17.37
+> Last Updated: 2026-09-26
 
 ## Goals
 
@@ -914,6 +914,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.17.37 | 2026-09-26 | `popup/popup.js` 增加现场排查日志：`getYouTubeQualityOptions` 生成的清晰度选项按签名去重后打印 `[OVD] YouTube 清晰度选项 videoId=… hlsManifest=… streams=[Nv/Na/Nc] options=[…]`（含 HLS 清单有无、视/音/直出流条数与最终 option 标签），用于定位现场「自动 / HLS 选项消失、只剩默认最高画质」。纯日志，无行为变更。 |
 | 1.17.36 | 2026-09-26 | 继续收口「文件名仍是 `…_2160p.mp4.txt`」。两处新修复：①`offscreen/offscreen.js` 的 OPFS 对象 URL 之前直接 `URL.createObjectURL(file)` —— OPFS 取出的 `File` **类型为空**，浏览器无法判断媒体类型，可能按错误类型给文件名追加扩展名；现在按调用方给出的 MIME 包一层 `new Blob([file], {type})`（并记录 mime 日志）。②`decideCombinedDownloadRoute` 收紧：只有探测**明确确认**是 `video/*`/`audio/*` 才交给浏览器下载管理器，其余（`text/*`、空、`application/octet-stream`、探测被 CORS/网络挡住 status=0）一律由扩展自己取回并用 `video/mp4` 保存——不再赌"服务器这次可能标对了"。另有 `text/*`/`xml` 仍走高优先级的 self-save 分支；三处最终保存点（blob / OPFS / 内容侧 blob 交接）都补了带 filename+MIME 的日志，便于现场一眼定位是哪条路径在命名。全量 692 项通过。 |
 | 1.17.35 | 2026-09-26 | 修「文件名仍是 `…_2160p.mp4.txt`（内容其实是好视频）」。1.17.34 的 `downloads.onDeterminingFilename` 纠偏在现场没有生效，因此不再依赖它，改为**从源头用正确的 MIME 保存**：①`youtube-adaptive-download-strategy` 的 combined 分支新增 `decideCombinedDownloadRoute()`（纯函数+单测）——`4xx/5xx` → 改走合并路径；响应是 `text/*` / `xml`（CDN 误标有效媒体，现场就是这种）→ **`self-save`**：由扩展自己取回数据再保存（小于 512MB 走 Blob、更大的走 OPFS 流式落盘），MIME 固定 `video/mp4`，浏览器自然不会再追加 `.txt`；其余情况照旧交给下载管理器（省内存、可续传）。②`injected/page-http-utils.js#triggerPageBlobDownload` 增加 `withFilenameMimeType()`：页面上下文拿到的 Blob 若类型是 `text/*`/`xml`/`octet-stream`/空，按文件名扩展名纠正为对应媒体 MIME 再建对象 URL（页面内直链下载同样不会再出现 `.txt`）。③`onDeterminingFilename` 与「只警告不删除」的兜底保留。新增用例 1 条，全量 692 项通过。 |
 | 1.17.34 | 2026-09-26 | **回退 1.17.33 的"删除残片"行为**：现场反馈 `Learn 10 phrases …_2160p.mp4.txt` **改回后缀后能正常播放** —— 说明那是 CDN 把**有效媒体**标成了 `text/plain`（浏览器只是按 MIME 追加了后缀），而不是错误页。用 MIME 判定"残片"并删除用户文件是严重误判，已全部撤掉：①service worker 在 `state=complete` 时只**记录警告**（`[OVD] 下载产物 MIME 异常…`），**绝不删除文件、不再把任务标记为失败**；②删除 `probeDirectStream`/`classifyDirectProbe` 这套"响应是 text/plain 就拦下载"的逻辑（同样会误伤有效媒体）；③改成**文件名纠偏**：新增 `background/download-filename-registry.js`——提交下载（直链 / blob / OPFS 三条路径）时登记"拟用相对文件名"，service worker 用 `chrome.downloads.onDeterminingFilename` 把浏览器按 MIME 追加的 `.txt/.html/.xml` 改回 `xxx.mp4`（只改名、不动内容，改不动就保持浏览器原名），并提供 `stripSpuriousMimeSuffix` 兜底。新增用例 2 条，全量 691 项通过。 |
