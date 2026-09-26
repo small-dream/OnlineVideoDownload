@@ -1,6 +1,6 @@
 {
   "name": "online-video-downloader",
-  "version": "1.17.37",
+  "version": "1.17.39",
   "description": "A Chrome extension to detect and download online videos from YouTube, Bilibili, HLS streams and more",
   "license": "MIT",
   "keywords": [
