@@ -145,7 +145,9 @@ body {
   display: none;
 }
 
-.video-thumb-preview.preview-failed::before {
+/* 只有「没有静态封面」的条目在预览失败时才画占位渐变；
+   有封面时预览失败（如 HLS 无法原生播放）应保持封面可见 */
+.video-thumb-preview.preview-failed:not(.has-thumb)::before {
   display: block;
 }
 
@@ -164,8 +166,12 @@ body {
 }
 
 .video-thumb > .thumb-placeholder.is-static,
-.video-thumb-preview.preview-failed .thumb-placeholder {
+.video-thumb-preview.preview-failed:not(.has-thumb) .thumb-placeholder {
   display: flex;
+}
+
+.video-thumb.has-thumb .thumb-placeholder {
+  display: none;
 }
 
 .thumb-video {
@@ -178,7 +184,13 @@ body {
   opacity: 0;
 }
 
-.video-thumb-preview.preview-ready .thumb-video {
+/* 没有静态封面时，<video> 首帧本身就是封面 */
+.video-thumb-preview:not(.has-thumb).preview-ready .thumb-video {
+  opacity: 1;
+}
+
+/* 有静态封面时，只在鼠标悬停 / 键盘聚焦且画面已就绪时切换成动态画面 */
+.video-thumb-preview.has-thumb.preview-ready.preview-playing .thumb-video {
   opacity: 1;
 }
 

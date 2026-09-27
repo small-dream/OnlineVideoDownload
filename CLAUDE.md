@@ -107,8 +107,11 @@ function loadModule(globalKey, filePath) {
 | lib/byte-utils.js | test/byte-utils.test.js |
 | lib/http-utils.js | test/http-utils.test.js |
 | lib/message-types.js | test/message-types.test.js |
+| lib/page-message-guard.js | test/page-message-guard.test.js |
 | lib/video-utils.js | test/video-utils.test.js |
 | lib/video-source-utils.js | test/video-source-utils.test.js |
+| lib/video-filter.js | test/video-filter.test.js |
+| lib/preview-utils.js | test/preview-utils.test.js |
 | lib/constants.js | test/constants.test.js |
 | lib/progress-scale.js | test/progress-scale.test.js |
 | lib/bilibili-quality-utils.js | test/bilibili-quality-utils.test.js |
@@ -123,6 +126,7 @@ function loadModule(globalKey, filePath) {
 | content/strategies/bilibili-strategy.js | test/bilibili-strategy.test.js |
 | background/download-history-store.js | test/download-history-store.test.js |
 | background/download-state-store.js | test/download-state-store.test.js |
+| background/video-registry.js | test/video-registry.test.js |
 
 ---
 
