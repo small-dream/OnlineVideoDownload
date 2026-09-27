@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.19.0
+> **版本**：1.20.0
 > **最后更新**：2026-09-27
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -185,6 +185,8 @@ UI 要求：
 - 提供"全选"与"取消全选"操作
 - 选中的视频可一键并发下载
 - 下载队列控制最大并发数，从用户设置中读取
+- 并发上限是全局的：内容侧下载（Bilibili / YouTube 页面内下载）与后台下载共用同一队列，不再出现「设 2 个并发却同时开 5 个页面内合并」
+- 超出上限的条目进入队列等待，任务视图显示「排队中（第 N 位）」并可「取消排队」；取消排队不会留下半成品文件
 - 批量下载状态实时反映在各条目的进度中
 - DRM 保护的条目不可勾选，不参与批量下载
 - 列表头部提供「全选/取消全选」与「下载所选 (N)」按钮，N 为当前已选数量
@@ -240,6 +242,8 @@ UI 要求：
 | 解析下载的两阶段进度 | 条目按钮 / 任务列表 / 页面浮条三处显示同一数字 | `lib/progress-scale.js`（抓取 0..90、合并 90..99、完成 100） |
 | 直播流 | 全局状态文案（「检测到直播流，仅能下载当前播放窗口的 N 个分片」） | `SOURCE_DOWNLOAD_STATUS` |
 | 任务取消 | 任务视图「取消」按钮 + 取消结果提示 | `ABORT_SOURCE_DOWNLOAD` → `SOURCE_DOWNLOAD_RESULT` |
+| 排队等待 | 任务视图「排队中（第 N 位）」+ 条目按钮「排队中 #N」 | `DOWNLOAD_QUEUE_UPDATE`（后台队列快照广播） |
+| 暂停 / 继续（断点续传） | 任务视图「暂停」/「继续」按钮 + 状态标签 | `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK` → `chrome.downloads.pause` / `resume` |
 | 长任务（HLS / 录制等） | 页面右下角浮动反馈条（Popup 关闭后仍可见） | `content/float-button.js` |
 | 下载完成 / 失败 | 系统通知（设置 `downloadNotification` 控制） | `background/download-notification.js` |
 | 错误提示 | Popup 友好文案（错误码映射 + 关键词兜底） | `popup/popup-error-messages.js` |
@@ -270,6 +274,9 @@ UI 要求：
 - OPFS 临时文件约占用与文件等量的磁盘空间，下载结束/中断后由 service worker 删除；异常退出遗留的临时文件在下次启动时清理（保留 6 小时内的文件）
 - 域名黑名单在读取检测列表时生效，不会阻止仍在页面内发起的请求
 - 字幕只输出 `.srt`（不保留 VTT 样式与 karaoke 标记）；upstream 若对字幕接口做额外校验（如 YouTube timedtext 返回 403），会提示「字幕下载失败」而媒体下载照常完成
+- 并发队列与排队位次保存在 Service Worker 内存中：SW 被回收后重新计数（已提交给浏览器的下载不受影响）；队列不回填「上次没排完的队列」
+- 断点续传依赖浏览器下载本身：暂停/继续与中断后自动重试都走 `chrome.downloads`（HTTP Range）。扩展自己在页面/SW 内抓取合并的任务（Bilibili 视音频、YouTube 页面内抓取、HLS 分片）中断后只能整单重试，不支持从中间分片续传
+- 暂停仅对可续传的下载生效（`canResume`）；已经进入写盘的最后一小段无法暂停，此时按钮会提示原因
 
 ---
 
@@ -277,6 +284,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.20.0 | 2026-09-27 | 下载队列统一并发 + 断点续传（暂停/继续）。①`background/download-queue.js` 改为「按条目管理」：每个等待/进行中的下载是一个带 `id`/`label`/`owner`/`videoUrl` 的条目，新增 `snapshot()`（含排队位次）、`cancelQueued()`、`releaseOwner()` 与 `onChange()`；队列变化即时广播 `DOWNLOAD_QUEUE_UPDATE`。②内容侧下载（Bilibili / YouTube 页面内）不再绕过并发上限：Popup 通过新增的长连接端口 `ovd-download-slots` 申请槽位（`background/download-slot-port.js`，协议 ACQUIRE/RELEASE/CANCEL/PING），Popup 关闭时端口断开、后台按 owner 回收槽位，不会泄漏也不会让无人接收结果的任务偷偷开始；批量下载不再自带信号量，全部条目统一入队。③`DOWNLOAD_VIDEO` 与「重试」也改为条目化入队，任务视图把排队条目渲染成「排队中（第 N 位）」并支持「取消排队」。④断点续传：新增 `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`（`chrome.downloads.pause` / `resume`，仅对 `canResume` 的下载生效），任务状态新增 `paused`，`onChanged` 的 `paused` 增量同步任务状态；手动「重试」优先走 `resume` 从断点继续而不是从头重下；SW 重启核对任务时把 `paused` 一并纳入。⑤并发上限设置上限从 5 提到 10，与队列上限一致。新增用例 10 条，全量 780 项通过。 |
 | 1.19.0 | 2026-09-27 | 新增「字幕」侧车下载（对标 VDH 的字幕能力）：①新增 `lib/subtitle-utils.js` —— 统一解析 WebVTT / YouTube json3 / YouTube srv3-srv1 XML / Bilibili JSON / SRT 并输出 SRT（`parseSubtitleText` → `cuesToSrt`），含轨道归一化（兼容 YouTube `captionTracks` 与 Bilibili `player/v2` 两种形状）、语言选择、`<标题>.<语言>[.auto].srt` 命名与时间戳格式化。②YouTube 在检测阶段把 `captions.playerCaptionsTrackListRenderer.captionTracks` 随 videoInfo 上报（`injected/page-youtube-parser.js`），`mergeVideoInfo` 保护该字段不被后续网络拦截上报冲掉。③Bilibili 的 `fetchQualities` 并行调 `player/v2`（需页面 Cookie）返回字幕轨；HLS 的 `fetchQualities` 返回 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES` 轨道。④新增 `background/subtitle-downloader.js`：YouTube 按 `fmt=json3 → vtt → srv3` 逐个重试（HTTP 报错/空响应换下一种），Bilibili/HLS 单次取回后自动识别格式，统一转 `.srt` 经 offscreen 保存并登记到下载任务表；`DOWNLOAD_SUBTITLE` 消息由 Popup 在勾选字幕时与媒体下载并行发出（失败只提示不回滚媒体）。⑤Popup 新增「字幕」开关 + 语言下拉（默认「自动（推荐）」），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。⑥`lib/download-artifact-utils.js#isBrokenTextStubDownload` 放行字幕扩展名，避免把正常的小体积字幕误判为服务器错误页残片。新增用例 26 条，全量 770 项通过。 |
 | 1.18.0 | 2026-09-27 | 新增「仅音频」下载（对标 VDH 的音频下载能力）：YouTube 与 Bilibili 条目新增「仅音频」开关，勾选后只保存音轨、不下载视频画面也不做合并。①YouTube 走后台直链路径（`background/download-strategies/youtube-adaptive-download-strategy.js#downloadAudioOnlyInBackground`）：`pickBestAudioStream`（新增于 `lib/youtube-stream-utils.js`）优先原声轨、优先 MP4 容器、同容器取最高码率，无 MP4 音轨时退回 WebM/Opus；媒体 MIME 可信时交给下载管理器（可续传），MIME 不可信/探测失败时自行取回并按正确 MIME 保存（避免 `.txt`）。②Bilibili 走页面上下文（需页面 Cookie 调 WBI 签名 playurl）：只抓 DASH 音轨后保存为 `.m4a`。③`background/service-worker.js#fetchMediaStreams` 支持单侧抓取（视频/音频任一为空即只抓另一侧），供仅音频复用整条带进度/重试/备用 CDN 回退的抓取通道。④`lib/video-source-utils.js#getExecutionMode` 让 YouTube 仅音频始终走后台；`submitDirectDownload` 新增显式 `ext` 覆盖（googlevideo 路径无扩展名时按音轨 MIME 命名）。⑤Popup 在两个平台的条目控件里新增「仅音频」开关（勾选后禁用清晰度下拉），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。新增用例 14 条，全量 738 项通过。 |
 | 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图（同类插件能显示，鼠标移过去还能变成动态视频）」。①页面侧封面采集：扫描 `<video>` 时优先取 `poster`，没有 poster 才用 canvas 截当前帧（JPEG，宽 ≤320px），blob: / MSE 播放流也参与扫描并带上封面；元素级封面都拿不到、且本 frame 只有一个 `<video>` 时再退回页面 `og:image`（`injected/page-interceptor.js`）；②单 `<video>` 的 frame 内封面共享：同 frame 的 m3u8 / mpd / 直链 / MSE blob 条目共用该封面（`background/video-registry.js`，页面只在「本 frame 只有一个 `<video>`」时以 `thumbnailScope:'frame'` 授权）；③Popup 补全链路：直连预览被 CDN 拒绝（缺 Referer/Origin）时申请临时请求头规则并按需读取媒体前缀（单项 ≤2.5MB、单次会话累计 ≤12MB、排队并发 2 条）生成同源 blob，取一帧当静态封面、悬停时播放（新增 `lib/preview-utils.js`）；④有封面时静止显示封面、悬停切换动态画面，`<source type>` 声明为浏览器不支持的 MIME 时改为交给浏览器嗅探。⑤后续修正「HLS 条目缩略图 / 时长不正常」：内联预览只对渐进式直链开启（桌面 Chrome 播不了 m3u8，HLS 条目进 `<video>` 只会闪一下再变成暗色占位图），预览失败但有封面时保留封面（占位渐变只对无封面条目生效）；读取时把同页 `<video>` 元素量出的封面与时长借给清单条目（`lib/video-filter.js#backfillFrameMetadata`），解决「一个播放器同时登记 HLS 清单 + MSE blob 两条，后者有图有时长、前者既无图也是 `--:--`」。新增用例 28 条，全量 724 项通过。 |

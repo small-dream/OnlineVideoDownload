@@ -70,7 +70,9 @@ const DOWNLOAD_DISPLAY_LABELS = Object.freeze({
   completed: t('download_buttonCompleted', '已完成'),
   downloading: t('download_buttonDownloading', '下载中'),
   idle: t('download_button', '下载'),
+  paused: t('taskStatus_paused', '已暂停'),
   pending: t('download_buttonDownloading', '下载中'),
+  queued: t('taskStatus_queued', '排队中'),
 });
 
 let currentTabId = null;
@@ -89,6 +91,12 @@ const hlsVariantCache = new Map();
 const activeSourceTaskByTraceId = new Map();
 const activeSourceTaskByTaskKey = new Map();
 const activeBackgroundHlsTaskByUrl = new Map();
+
+// 下载并发队列（后台权威）：内容侧下载先申请槽位再开始，排队位次由快照驱动 UI
+let downloadQueueSnapshot = { active: 0, entries: [], limit: 3, pending: 0 };
+let downloadSlotPort = null;
+let downloadSlotSequence = 0;
+const downloadSlotRequests = new Map();
 
 // 检测窗口：打开 Popup 后先显示「正在检测」，期间自动轮询后台结果，
 // 避免内容脚本/页面还没上报视频时直接给用户一个「未检测到视频」的假结论。
@@ -202,6 +210,173 @@ function setDownloadButtonState(button, state) {
       </span>
     `
     : `<span class="dl-label">${label}</span>`;
+}
+
+/**
+ * 与后台建立长连接用于申请下载槽位。
+ * 用 Port 而不是 sendMessage：Popup 关闭时端口断开，后台会自动回收该端口排队的槽位，
+ * 否则「排队中」的任务会占着额度却没人接收结果。
+ */
+function getDownloadSlotPort() {
+  if (downloadSlotPort) {
+    return downloadSlotPort;
+  }
+  try {
+    downloadSlotPort = chrome.runtime.connect({ name: MSG.DOWNLOAD_SLOT_PORT || 'ovd-download-slots' });
+  } catch (err) {
+    console.warn(`[OVD] 连接下载槽位端口失败: ${err.message}`);
+    downloadSlotPort = null;
+    return null;
+  }
+
+  downloadSlotPort.onMessage.addListener(handleDownloadSlotMessage);
+  downloadSlotPort.onDisconnect.addListener(() => {
+    downloadSlotPort = null;
+    const error = new Error('扩展后台连接已断开');
+    error.code = 'DOWNLOAD_ABORTED';
+    for (const request of downloadSlotRequests.values()) {
+      request.reject(error);
+    }
+    downloadSlotRequests.clear();
+  });
+  return downloadSlotPort;
+}
+
+function handleDownloadSlotMessage(message = {}) {
+  if (message.type === 'SLOT_READY') {
+    if (message.queue) {
+      applyDownloadQueueSnapshot(message.queue);
+    }
+    return;
+  }
+
+  const request = downloadSlotRequests.get(message.id);
+  if (!request) {
+    return;
+  }
+  downloadSlotRequests.delete(message.id);
+
+  if (message.type === 'SLOT_ADMITTED') {
+    request.resolve(message);
+    return;
+  }
+  if (message.type === 'SLOT_ABORTED') {
+    const error = new Error(message.error || '下载排队已取消');
+    error.code = 'DOWNLOAD_ABORTED';
+    request.reject(error);
+  }
+}
+
+/** 申请一个下载槽位；后台不可用时按「放行」处理，避免因队列故障完全无法下载。 */
+function acquireDownloadSlot(entry = {}) {
+  const id = entry.id || `popup-${Date.now()}-${++downloadSlotSequence}`;
+  const port = getDownloadSlotPort();
+  if (!port) {
+    return Promise.resolve({ id, offline: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    downloadSlotRequests.set(id, { reject, resolve });
+    try {
+      port.postMessage({ entry: { ...entry, id }, id, type: 'ACQUIRE' });
+    } catch (err) {
+      downloadSlotRequests.delete(id);
+      resolve({ id, offline: true });
+    }
+  });
+}
+
+function releaseDownloadSlot(id) {
+  // 端口已断开时后台在 disconnect 里已经回收过该端口的槽位，这里不再重连
+  if (!id || !downloadSlotPort) {
+    return;
+  }
+  try {
+    downloadSlotPort.postMessage({ id, type: 'RELEASE' });
+  } catch (err) {
+    console.warn(`[OVD] 释放下载槽位失败: ${err.message}`);
+  }
+}
+
+/**
+ * 申请槽位并在排队期间更新条目按钮；被取消排队时返回空串。
+ * 排队位次由后台队列快照驱动（下载中/排队中都会广播 DOWNLOAD_QUEUE_UPDATE）。
+ */
+async function reserveDownloadSlot(entry = {}, { btn = null } = {}) {
+  const id = entry.id || `popup-${Date.now()}-${++downloadSlotSequence}`;
+  setDownloadButtonState(btn, 'queued');
+  try {
+    await acquireDownloadSlot({ ...entry, id });
+    return id;
+  } catch (err) {
+    if (err?.code === 'DOWNLOAD_ABORTED') {
+      setDownloadButtonState(btn, 'idle');
+      return '';
+    }
+    console.warn(`[OVD] 申请下载槽位失败，直接开始下载: ${err.message}`);
+    return id;
+  }
+}
+
+function findQueueEntryForVideo(video = {}) {
+  const videoUrl = video?.url || '';
+  if (!videoUrl) {
+    return null;
+  }
+  return (downloadQueueSnapshot.entries || []).find((entry) => entry.videoUrl === videoUrl) || null;
+}
+
+function applyDownloadQueueSnapshot(queue = {}) {
+  downloadQueueSnapshot = {
+    active: Number(queue.active) || 0,
+    entries: Array.isArray(queue.entries) ? queue.entries : [],
+    limit: Number(queue.limit) || 3,
+    pending: Number(queue.pending) || 0,
+  };
+  applyTaskStatesToVideoList();
+  if (tasksViewEl && !tasksViewEl.hidden) {
+    renderTasks(downloadTaskCache);
+  }
+}
+
+async function loadDownloadQueue() {
+  try {
+    const response = await sendRuntimeMessageAsync({
+      type: MSG.GET_DOWNLOAD_QUEUE || 'GET_DOWNLOAD_QUEUE',
+    });
+    if (response?.queue) {
+      applyDownloadQueueSnapshot(response.queue);
+    }
+  } catch (err) {
+    console.warn(`[OVD] 读取下载队列失败: ${err.message}`);
+  }
+}
+
+async function cancelQueuedDownload(queueId, button = null) {
+  if (!queueId) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const response = await sendRuntimeMessageAsync({
+      queueId,
+      type: MSG.CANCEL_QUEUED_DOWNLOAD || 'CANCEL_QUEUED_DOWNLOAD',
+    });
+    showMessage(
+      response?.cancelled ? t('tasks_queueCancelled', '已取消排队。') : t('tasks_cancelUnavailable', '该任务当前无法取消。'),
+      response?.cancelled ? 'success' : 'info'
+    );
+    await loadDownloadTasks({ renderTaskList: true });
+    await loadDownloadQueue();
+  } catch (err) {
+    showMessage(t('tasks_cancelFailed', '取消失败: $1', [err.message]), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
 }
 
 function normalizeAssetUrl(url) {
@@ -818,6 +993,13 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     return;
   }
 
+  if (msg.type === (MSG.DOWNLOAD_QUEUE_UPDATE || 'DOWNLOAD_QUEUE_UPDATE')) {
+    if (msg.queue) {
+      applyDownloadQueueSnapshot(msg.queue);
+    }
+    return;
+  }
+
   if (msg.type === (MSG.BILIBILI_STREAM_PROGRESS || 'BILIBILI_STREAM_PROGRESS') && msg.percent != null) {
     routeProgressToActiveItem(msg.percent);
     return;
@@ -936,7 +1118,7 @@ function wirePopupSettings() {
   wirePopupSettings.done = true;
 
   const controls = [
-    ['popupConcurrentLimit', 'concurrentDownloadLimit', (el) => Math.min(5, Math.max(1, parseInt(el.value, 10) || 3))],
+    ['popupConcurrentLimit', 'concurrentDownloadLimit', (el) => Math.min(10, Math.max(1, parseInt(el.value, 10) || 3))],
     ['popupDownloadNotification', 'downloadNotification', (el) => el.checked],
     ['popupYoutubeDefaultMode', 'youtubeDefaultMode', (el) => el.value],
     ['popupFilenameFormat', 'filenameFormat', (el) => el.value],
@@ -1329,10 +1511,11 @@ function setTrackedSourceTaskFinished(entry, completed) {
   }, 3000);
 }
 
-function trackSourceTask({ button = null, item = null, taskKey = '', traceId = '', videoUrl = '' } = {}) {
+function trackSourceTask({ button = null, item = null, taskKey = '', traceId = '', videoUrl = '', slotId = '' } = {}) {
   const entry = {
     button,
     item: item || button?.closest('.video-item') || null,
+    slotId,
     taskKey,
     traceId,
     videoUrl,
@@ -1370,6 +1553,8 @@ function releaseTrackedSourceTask(msg = {}, completed = false) {
     activeSourceTaskByTaskKey.delete(entry.taskKey);
   }
 
+  // 内容侧任务结束（成功/失败/取消）后归还并发槽位
+  releaseDownloadSlot(entry.slotId);
   setTrackedSourceTaskFinished(entry, completed);
 }
 
@@ -1418,7 +1603,7 @@ async function loadVideos({ silent = false } = {}) {
       setHidden(emptyStateEl, true);
     }
 
-    await loadDownloadStates();
+    await loadDownloadStatesAndQueue();
     refreshTrackedSourceTaskButtons();
   } catch (err) {
     console.warn(`[OVD] failed to load popup videos: ${err.message}`);
@@ -1431,6 +1616,12 @@ async function loadVideos({ silent = false } = {}) {
 
 async function loadDownloadStates() {
   await loadDownloadTasks({ renderTaskList: false });
+}
+
+/** 打开 Popup 时同步一次队列快照（广播只覆盖打开之后的变化）。 */
+async function loadDownloadStatesAndQueue() {
+  await loadDownloadStates();
+  await loadDownloadQueue();
 }
 
 async function loadDownloadTasks({ renderTaskList = false } = {}) {
@@ -1477,7 +1668,9 @@ function updateTaskEntryBadge(tasks = []) {
     return;
   }
 
-  const runningCount = tasks.filter((task) => task.status === 'running' || task.status === 'retrying').length;
+  const runningCount = tasks.filter((task) => (
+    task.status === 'running' || task.status === 'retrying' || task.status === 'paused'
+  )).length;
   if (runningCount <= 0) {
     taskEntryBadgeEl.hidden = true;
     taskEntryBadgeEl.textContent = '0';
@@ -1519,6 +1712,26 @@ function applyTaskStatesToVideoList() {
       return;
     }
 
+    // 排队中（尚未开始）：并发槽位满了在等，按钮显示位次
+    const queueEntry = findQueueEntryForVideo(video);
+    if (queueEntry) {
+      if (queueEntry.state === 'queued') {
+        setDownloadButtonState(btn, 'queued');
+        const position = Number(queueEntry.position) || 0;
+        const label = btn.querySelector('.dl-label');
+        if (label) {
+          label.textContent = position > 0
+            ? t('taskStatus_queuedWithPosition', '排队中 #$1', [String(position)])
+            : t('taskStatus_queued', '排队中');
+        }
+      } else if (btn.dataset.state === 'queued') {
+        // 排到了：把「排队中」换成「下载中」，随后的进度/任务消息接管按钮
+        setDownloadButtonState(btn, 'pending');
+      }
+      // 已经拿到槽位正在下载：按钮状态由进度/来源消息驱动，这里不要重置
+      return;
+    }
+
     if (!task) {
       resetVideoDownloadButton(video, item, btn);
       return;
@@ -1541,6 +1754,11 @@ function applyTaskStatesToVideoList() {
       return;
     }
 
+    if (task.status === 'paused') {
+      setDownloadButtonState(btn, 'paused');
+      return;
+    }
+
     if (task.status === 'failed' || task.status === 'interrupted') {
       setDownloadButtonState(btn, 'idle');
       btn.disabled = false;
@@ -1552,16 +1770,42 @@ function renderTasks(tasks = []) {
   if (!taskListEl) {
     return;
   }
+  // 排队中的条目还不是「任务」，但用户需要看到位次并能取消排队
+  const queueTasks = (downloadQueueSnapshot.entries || [])
+    .filter((entry) => entry.state === 'queued')
+    .map((entry) => ({
+      createdAt: entry.enqueuedAt,
+      message: entry.position > 0
+        ? t('tasks_queuedPosition', '排队中（第 $1 位）', [String(entry.position)])
+        : t('taskStatus_queued', '排队中'),
+      percent: 0,
+      queueId: entry.id,
+      sourceId: entry.sourceId || 'generic',
+      status: 'queued',
+      taskId: `queue:${entry.id}`,
+      title: entry.label || entry.videoUrl || t('tasks_defaultTitle', '下载任务'),
+      updatedAt: entry.enqueuedAt,
+      videoUrl: entry.videoUrl || '',
+    }));
+  const rows = [...queueTasks, ...tasks];
+
   taskListEl.innerHTML = '';
   if (tasksSubtitleEl) {
     const runningCount = tasks.filter((task) => task.status === 'running' || task.status === 'retrying').length;
+    const pausedCount = tasks.filter((task) => task.status === 'paused').length;
+    const queuedCount = queueTasks.length;
+    const queueSuffix = queuedCount > 0
+      ? ` · ${t('tasks_queueSummary', '$1 个排队中', [String(queuedCount)])}`
+      : '';
     tasksSubtitleEl.textContent = runningCount > 0
-      ? t('tasks_running', '$1 个任务进行中', [String(runningCount)])
-      : t('tasks_total', '共 $1 个任务', [String(tasks.length)]);
+      ? `${t('tasks_running', '$1 个任务进行中', [String(runningCount)])}${queueSuffix}`
+      : pausedCount > 0
+        ? `${t('tasks_pausedSummary', '$1 个已暂停', [String(pausedCount)])}${queueSuffix}`
+        : `${t('tasks_total', '共 $1 个任务', [String(rows.length)])}${queueSuffix}`;
   }
-  setHidden(tasksEmptyEl, tasks.length > 0);
+  setHidden(tasksEmptyEl, rows.length > 0);
 
-  tasks.forEach((task) => {
+  rows.forEach((task) => {
     const item = document.createElement('div');
     item.className = 'task-item';
     item.dataset.taskId = task.taskId || '';
@@ -1594,7 +1838,37 @@ function renderTasks(tasks = []) {
 
     const actions = item.querySelector('.task-actions');
 
-    if ((status === 'running' || status === 'retrying') && task.tabId != null) {
+    if (task.queueId) {
+      const cancelQueueButton = document.createElement('button');
+      cancelQueueButton.type = 'button';
+      cancelQueueButton.className = 'task-action-btn danger';
+      cancelQueueButton.textContent = t('tasks_cancelQueued', '取消排队');
+      cancelQueueButton.addEventListener('click', () => cancelQueuedDownload(task.queueId, cancelQueueButton));
+      actions?.appendChild(cancelQueueButton);
+      taskListEl.appendChild(item);
+      return;
+    }
+
+    // 断点续传：可续传的浏览器下载支持暂停，暂停后按钮变成「继续」
+    if ((status === 'running' || status === 'retrying') && task.downloadId != null) {
+      const pauseButton = document.createElement('button');
+      pauseButton.type = 'button';
+      pauseButton.className = 'task-action-btn secondary';
+      pauseButton.textContent = t('tasks_pause', '暂停');
+      pauseButton.addEventListener('click', () => pauseTask(task.taskId, pauseButton));
+      actions?.appendChild(pauseButton);
+    }
+
+    if (status === 'paused' && task.downloadId != null) {
+      const resumeButton = document.createElement('button');
+      resumeButton.type = 'button';
+      resumeButton.className = 'task-action-btn';
+      resumeButton.textContent = t('tasks_resume', '继续');
+      resumeButton.addEventListener('click', () => resumeTask(task.taskId, resumeButton));
+      actions?.appendChild(resumeButton);
+    }
+
+    if ((status === 'running' || status === 'retrying' || status === 'paused') && task.tabId != null) {
       const cancelButton = document.createElement('button');
       cancelButton.type = 'button';
       cancelButton.className = 'task-action-btn danger';
@@ -1639,6 +1913,8 @@ function getTaskStatusLabel(status) {
     complete: t('taskStatus_complete', '已完成'),
     failed: t('taskStatus_failed', '失败'),
     interrupted: t('taskStatus_interrupted', '已中断'),
+    paused: t('taskStatus_paused', '已暂停'),
+    queued: t('taskStatus_queued', '排队中'),
     retrying: t('taskStatus_retrying', '重试中'),
     running: t('taskStatus_running', '下载中'),
   };
@@ -1704,6 +1980,55 @@ async function cancelRunningTask(task = {}, button = null) {
     if (button) {
       button.disabled = false;
     }
+  }
+}
+
+/** 暂停一个可续传的下载（断点续传的暂停半程）。 */
+async function pauseTask(taskId, button = null) {
+  if (!taskId) {
+    return;
+  }
+  try {
+    if (button) {
+      button.disabled = true;
+    }
+    const response = await sendRuntimeMessageAsync({
+      taskId,
+      type: MSG.PAUSE_DOWNLOAD_TASK || 'PAUSE_DOWNLOAD_TASK',
+    });
+    if (response?.ok === false) {
+      throw new Error(response.error || '暂停失败');
+    }
+    showMessage(t('tasks_paused', '任务已暂停，可稍后继续。'), 'info');
+    await loadDownloadTasks({ renderTaskList: true });
+  } catch (err) {
+    showMessage(t('tasks_pauseFailed', '暂停失败: $1', [err.message]), 'error');
+    await loadDownloadTasks({ renderTaskList: true });
+  }
+}
+
+/** 从断点继续下载（HTTP Range，不重下已完成部分）。 */
+async function resumeTask(taskId, button = null) {
+  if (!taskId) {
+    return;
+  }
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = t('tasks_resuming', '继续中');
+    }
+    const response = await sendRuntimeMessageAsync({
+      taskId,
+      type: MSG.RESUME_DOWNLOAD_TASK || 'RESUME_DOWNLOAD_TASK',
+    });
+    if (response?.ok === false) {
+      throw new Error(response.error || '继续失败');
+    }
+    showMessage(t('tasks_resumed', '已从断点继续下载。'), 'success');
+    await loadDownloadTasks({ renderTaskList: true });
+  } catch (err) {
+    showMessage(t('tasks_resumeFailed', '继续失败: $1', [err.message]), 'error');
+    await loadDownloadTasks({ renderTaskList: true });
   }
 }
 
@@ -2876,6 +3201,13 @@ async function triggerDownload(video, btn) {
       }
     }
 
+    // 该视频已经在并发队列里排队：再次点击按钮视为「取消排队」（不再重复发字幕任务）
+    const queuedEntry = findQueueEntryForVideo(downloadVideo);
+    if (queuedEntry?.state === 'queued') {
+      await cancelQueuedDownload(queuedEntry.id);
+      return;
+    }
+
     // 字幕是与媒体并行的独立任务：失败只提示，不回滚媒体下载
     if (downloadVideo?.downloadOptions?.subtitles === true) {
       void triggerSubtitleDownload(downloadVideo).catch((err) => {
@@ -2889,9 +3221,21 @@ async function triggerDownload(video, btn) {
     const downloadToastKey = `source:${getSourceTaskKey(downloadVideo)}`;
 
     if (executionMode === 'content') {
+      // 内容侧下载与后台共用并发上限：先申请槽位（满了就排队），拿到了再让页面开始
+      const slotId = await reserveDownloadSlot({
+        label: downloadVideo?.title || downloadVideo?.url || '',
+        sourceId: sourceUtils.getSourceId?.(downloadVideo) || '',
+        tabId: currentTabId,
+        videoUrl: downloadVideo?.url || '',
+      }, { btn });
+      if (!slotId) {
+        return;
+      }
+
       const taskKey = getSourceTaskKey(downloadVideo);
       pendingSourceTask = trackSourceTask({
         button: btn,
+        slotId,
         taskKey,
         videoUrl: downloadVideo?.url || '',
       });
@@ -2961,6 +3305,13 @@ async function triggerDownload(video, btn) {
       releaseBackgroundHlsTask(pendingBackgroundHlsTask.videoUrl);
     }
 
+    // 排队被取消（用户点「取消排队」或 Popup 关闭）不是错误，给中性提示即可
+    if (err?.code === 'DOWNLOAD_ABORTED' || /取消排队|已取消排队/.test(err?.message || '')) {
+      setDownloadButtonState(btn, 'idle');
+      showMessage(t('tasks_queueCancelled', '已取消排队。'), 'info', { key: downloadToastKey });
+      return;
+    }
+
     const friendly = popupErrorMessages.buildFriendlyErrorMessage?.({
       code: err.code,
       message: err.message,
@@ -2996,38 +3347,16 @@ async function startBatchDownload() {
     return;
   }
 
-  const settings = await generalSettingsStore.getSettings?.() || {};
-  const maxConcurrent = settings.concurrentDownloadLimit || 3;
-
-  let running = 0;
-  let nextIdx = 0;
-
-  await new Promise((resolveAll) => {
-    function startNext() {
-      while (running < maxConcurrent && nextIdx < indices.length) {
-        const videoIndex = indices[nextIdx++];
-        const videoItem = videoListEl.querySelector(`.video-item[data-index="${videoIndex}"]`);
-        const btn = videoItem?.querySelector('.dl-btn');
-        if (!btn || btn.disabled) {
-          continue;
-        }
-
-        running++;
-        const video = buildDownloadRequest(currentVideos[videoIndex]);
-        triggerDownload(video, btn).finally(() => {
-          running--;
-          startNext();
-          if (running === 0 && nextIdx >= indices.length) {
-            resolveAll();
-          }
-        });
-      }
-
-      if (running === 0 && nextIdx >= indices.length) {
-        resolveAll();
-      }
+  // 并发由后台下载队列统一控制（内容侧与后台下载共用上限），这里只负责全部入队；
+  // 超出上限的条目会在任务列表里显示「排队中（第 N 位）」。
+  indices.forEach((videoIndex) => {
+    const videoItem = videoListEl.querySelector(`.video-item[data-index="${videoIndex}"]`);
+    const btn = videoItem?.querySelector('.dl-btn');
+    if (!btn || btn.disabled) {
+      return;
     }
-    startNext();
+    const video = buildDownloadRequest(currentVideos[videoIndex]);
+    void triggerDownload(video, btn).catch(() => {});
   });
 
   selectedIndices.clear();

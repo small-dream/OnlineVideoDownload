@@ -278,14 +278,14 @@ export class DownloadStateStore {
       this._nextTaskOrder = Math.max(this._nextTaskOrder, (raw.sortOrder || 0) + 1);
       restored++;
 
-      // 仅进行中的浏览器下载需要重建 downloadId→tabId 映射供 onChanged 使用
-      if (raw.downloadId != null && ['running', 'retrying'].includes(raw.status)) {
+      // 仅进行中（含已暂停）的浏览器下载需要重建 downloadId→tabId 映射供 onChanged 使用
+      if (raw.downloadId != null && ['running', 'retrying', 'paused'].includes(raw.status)) {
         this._states.set(raw.downloadId, {
           requiresTabContext: raw.requiresTabContext !== false,
           tabId: raw.tabId ?? null,
           videoUrl: raw.videoUrl || '',
           percent: raw.percent || 0,
-          state: raw.status === 'retrying' ? 'retrying' : 'downloading',
+          state: raw.status === 'retrying' ? 'retrying' : raw.status === 'paused' ? 'paused' : 'downloading',
         });
       }
     }
@@ -495,6 +495,7 @@ export class DownloadStateStore {
   _stateToStatus(state) {
     if (state === 'downloading') return 'running';
     if (state === 'retrying') return 'retrying';
+    if (state === 'paused') return 'paused';
     if (state === 'complete') return 'complete';
     if (state === 'failed') return 'failed';
     return undefined;

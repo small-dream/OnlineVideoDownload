@@ -593,6 +593,15 @@
   "taskStatus_interrupted": {
     "message": "Interrupted"
   },
+  "taskStatus_paused": {
+    "message": "Paused"
+  },
+  "taskStatus_queued": {
+    "message": "Queued"
+  },
+  "taskStatus_queuedWithPosition": {
+    "message": "Queued #$1"
+  },
   "taskStatus_retrying": {
     "message": "Retrying"
   },
@@ -601,6 +610,42 @@
   },
   "tasks_cancel": {
     "message": "Cancel"
+  },
+  "tasks_cancelQueued": {
+    "message": "Leave queue"
+  },
+  "tasks_pause": {
+    "message": "Pause"
+  },
+  "tasks_paused": {
+    "message": "Task paused. You can resume it later."
+  },
+  "tasks_pausedSummary": {
+    "message": "$1 paused"
+  },
+  "tasks_pauseFailed": {
+    "message": "Pause failed: $1"
+  },
+  "tasks_queueCancelled": {
+    "message": "Removed from the queue."
+  },
+  "tasks_queueSummary": {
+    "message": "$1 queued"
+  },
+  "tasks_queuedPosition": {
+    "message": "Queued (position $1)"
+  },
+  "tasks_resume": {
+    "message": "Resume"
+  },
+  "tasks_resumeFailed": {
+    "message": "Resume failed: $1"
+  },
+  "tasks_resumed": {
+    "message": "Resumed from where it left off."
+  },
+  "tasks_resuming": {
+    "message": "Resuming"
   },
   "tasks_cancelFailed": {
     "message": "Failed to cancel: $1",

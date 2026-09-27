@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.19.0
+> Version: 1.20.0
 > Last Updated: 2026-09-27
 
 ## Goals
@@ -49,6 +49,8 @@ Service Worker
   background/service-worker.js
   background/downloader.js
   background/subtitle-downloader.js
+  background/download-queue.js
+  background/download-slot-port.js
   background/hls-fetcher.js
   background/download-strategy-registry.js
   background/download-strategies/*
@@ -612,6 +614,9 @@ Responsibilities:
 - Lazily request Bilibili quality options from the active tab only when the quality selector is focused or clicked.
 - Persist the last selected Bilibili quality so later downloads default to the same preference.
 - 字幕控件：条目存在字幕轨时渲染「字幕」开关 + 语言下拉（默认「自动（推荐）」），`resolveSubtitleTrack` 按偏好挑轨，`triggerSubtitleDownload` 以 `DOWNLOAD_SUBTITLE` 与媒体下载并行发出（失败只提示）；YouTube 字幕轨来自检测结果，Bilibili / HLS 来自画质响应。
+- 下载队列 UI：打开时用长连接端口 `ovd-download-slots` 连接后台并同步一次 `GET_DOWNLOAD_QUEUE`，随后按 `DOWNLOAD_QUEUE_UPDATE` 广播更新；任务视图把排队条目渲染成「排队中（第 N 位）」并提供「取消排队」，列表头部显示「N 个排队中」，条目按钮显示「排队中 #N」。
+- 内容侧下载（`executionMode === 'content'`）在发 `SOURCE_DOWNLOAD` 前先 `reserveDownloadSlot()` 申请后台槽位，拿到才让页面开始；任务结束（`SOURCE_DOWNLOAD_RESULT`）或 Popup 关闭（端口断开）时归还槽位。批量下载不再自带信号量，全部条目统一入队。
+- 任务视图对可续传的浏览器下载提供「暂停」/「继续」（`PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`），并在状态标签里区分 `queued` / `paused`。
 - Reflect background broadcast progress for HLS, YouTube, and Bilibili workflows in a unified popup progress bar.
 - Own the visible video list, per-item progress, global progress, and source workflow status messages.
 - Support batch download: multi-select checkboxes, select-all toggle, and concurrent download dispatch.
@@ -698,9 +703,26 @@ File: [background/download-queue.js](D:/github/OnlineVideoDownload/background/do
 
 Responsibilities:
 
-- 为所有后台下载入口（直链/HLS/DASH/YouTube parse）提供统一并发上限，来源为 `concurrentDownloadLimit` 设置。
-- `handleMessage` 的 `DOWNLOAD_VIDEO` 分支先 `setLimit(settings.concurrentDownloadLimit)` 再 `run()`，超出上限的任务排队等待，长任务持续占用槽位。
-- `acquire()`/`release()` 支持限额调高后立即唤醒等待者；`run(task, { signal })` 对已取消任务抛 `DOWNLOAD_ABORTED`。
+- 为**所有**下载入口提供统一并发上限（后台直链/HLS/DASH/YouTube 与内容侧 Bilibili/YouTube 页面内下载），来源为 `concurrentDownloadLimit` 设置。条目化：每个等待/进行中的下载是一条 `{ id, label, owner, sourceId, tabId, videoUrl, enqueuedAt }` 记录，而不是匿名 promise。
+- `acquire(entry)` 在限额内立即放行（resolve `{ id, position: 0 }`），否则排队等待；`release(id)` 幂等归还；`cancelQueued(id)` 只取消尚未开始的条目；`releaseOwner(owner)` 用于端口断开时批量回收。
+- `snapshot()` 返回 `{ limit, active, pending, entries }`，排队条目带 1 起的 `position`，是 Popup「排队中（第 N 位）」的唯一数据源；`onChange(listener)` 让 SW 变化即广播 `DOWNLOAD_QUEUE_UPDATE`。
+- `run(task, { signal, entry })` 是兼容入口：申请槽位后执行任务，结束（含异常）一定归还；`signal` 在排队阶段中止时会取消该条目并抛 `DOWNLOAD_ABORTED`。
+- `handleMessage` 的 `DOWNLOAD_VIDEO` 与 `retryDownloadTask` 先 `setLimit(settings.concurrentDownloadLimit)` 再 `run()`，长任务持续占用槽位。
+
+Notes:
+
+- 队列状态在 SW 内存中，SW 被回收后重新计数；已提交给 `chrome.downloads` 的下载不受影响。
+- 上游（弹窗关闭、任务被删）通过 `releaseOwner` / `cancelQueued` 归还槽位，避免「排队任务没人接收结果却占着额度」。
+
+### Download Slot Port
+
+File: [background/download-slot-port.js](D:/github/OnlineVideoDownload/background/download-slot-port.js)
+
+Responsibilities:
+
+- 定义 Popup ↔ SW 的槽位协议（Port 名 `ovd-download-slots`）：`ACQUIRE` / `RELEASE` / `CANCEL` / `PING` → `SLOT_ADMITTED` / `SLOT_ABORTED` / `SLOT_RELEASED` / `SLOT_CANCELLED` / `SLOT_READY`（+ 队列快照）。
+- 纯函数 `handleDownloadSlotMessage(queue, owner, message)`，只依赖队列接口，因此可单测（`test/download-slot-port.test.js`）。
+- SW 侧胶水（`attachDownloadSlotPort`）负责端口生命周期：连接时握手并广播快照，断开时 `releaseOwner(owner)` 回收该 Popup 持有的全部槽位（含仍在排队的条目）。
 
 ### Save Location
 
@@ -849,6 +871,9 @@ Examples:
 - `INJECT_DOWNLOAD_HEADERS` / `RELEASE_DOWNLOAD_HEADERS`（content 侧 DASH 下载借用 background 的 DNR 规则）
 - `GET_DOWNLOAD_HISTORY`
 - `CLEAR_DOWNLOAD_HISTORY`
+- `GET_DOWNLOAD_QUEUE` / `CANCEL_QUEUED_DOWNLOAD`
+- `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`
+- `RETRY_DOWNLOAD_TASK` / `DELETE_DOWNLOAD_TASK`
 - `OPEN_DOWNLOAD_FOLDER`
 - `DELETE_DOWNLOAD_HISTORY_RECORD`
 
@@ -863,6 +888,7 @@ Notes:
 - `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
 - `VIDEO_DETECTED` 可选携带封面字段 `thumbnail` / `poster` / `cover`（页面侧采集，进入注册表前由 `lib/page-message-guard.js#sanitizeThumbnail` 清洗：仅 http(s) / 协议相对图片与 base64 图片，≤256KB）；`thumbnailScope: 'frame'` 表示该封面取自「本 frame 唯一的 `<video>`」，background 据此补全同 frame 的 hls / dash / direct / blob 条目。
 - `DOWNLOAD_SUBTITLE` 由 Popup 发出，字段为 `track`（`{ url, languageCode, languageName, isAsr, format }`）/ `sourceId` / `title` / `videoUrl`；background 的 `subtitle-downloader` 取流、转 `.srt` 并保存，返回 `{ ok, filename, downloadId, cues, format, size }`。它与媒体下载**并行**发出且为最佳努力：失败只提示，不回滚媒体文件。
+- `GET_DOWNLOAD_QUEUE` 返回 `{ queue: { limit, active, pending, entries } }`；`CANCEL_QUEUED_DOWNLOAD { queueId }` 只取消尚未开始的条目（返回 `{ cancelled }`）。`PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK { taskId }` 走 `chrome.downloads.pause` / `resume`：仅对 `canResume` 的下载生效，暂停后任务状态为 `paused`，继续时清空自动重试计数并从断点续传（返回 `{ ok, task }`，失败时 `{ ok:false, error }`）。`RETRY_DOWNLOAD_TASK` 现在优先 `resume` 续传，续传不可用才回退为重新发起下载。
 
 ### Background -> Content / Popup
 
@@ -887,12 +913,30 @@ Notes:
 
 - `UPDATE_BUTTON` 现在同时经 `safeTabMessage`（内容脚本浮条）与 `safeRuntimeMessage`（扩展页面）广播，并携带 `tabId`，因此 Popup 打开期间能实时刷新检测列表。
 - `RESCAN_TAB_VIDEOS` 由 Popup 发往 background，background 再经 `safeTabMessage` 广播给该 tab 的所有 frame；内容脚本把它转成页面上下文的 `RESCAN_PAGE_VIDEOS`（见 Message Router），页面重扫媒体元素并重跑平台解析，结果仍以 `VIDEO_DETECTED` 回流。
+- `DOWNLOAD_QUEUE_UPDATE` 由 background 的下载队列在每次变化（入队/放行/释放/取消/调限额）时经 `safeRuntimeMessage` 广播，携带完整队列快照 `{ limit, active, pending, entries:[{ id, label, owner, sourceId, videoUrl, state, position, enqueuedAt }] }`；Popup 据此渲染「排队中（第 N 位）」并支持取消排队。
+- `paused` 任务：`chrome.downloads.onChanged` 的 `paused` 增量会同步 `DownloadStateStore` 的 state 与任务状态（`paused` / `running`），Popup 据此在「暂停」与「继续」之间切换按钮。
 
 - `HLS_DOWNLOAD_DELEGATE` 由 background 的 `hls-download-strategy` 发往 content，字段为 `m3u8Url` / `filename` / `headers`（捕获到的 `Referer` / `Origin` / `Cookie`）/ `options`（`fetchOptions` 默认 `{ credentials: 'include' }`，用户选定的画质以 `quality`（变体 URL 或标签）透传）/ `taskMeta`；content 返回 `{ downloadId, filename, failedCount, segmentCount, quality, isLive, audioMerged }`，任务据此写入真实 `downloadId`。
 - 内容侧 HLS 因体积超限（`HLS_OUTPUT_TOO_LARGE`）中止时，`hls-download-strategy` 视为委托失败并自动回退到 `HlsFetcher`；后台路径用 OPFS 落盘，因此大文件不会因为内容侧的内存上限而整体失败。
 - `ABORT_SOURCE_DOWNLOAD` 由 popup 任务视图发往 content，字段 `taskKey` / `traceId` / `videoUrl`（任一匹配即可）。content 侧两种任务都会响应：`download-coordinator` 的内容任务（Bilibili/DASH/YouTube 录制）会 `abort()` 其 `AbortController` 并广播 `SOURCE_DOWNLOAD_RESULT{ ok:false, error:'已取消' }`；HLS 委托下载由 `message-router` 按 `taskMeta.taskKey`/`taskId` 保存的控制器中止，返回 `{ hlsCancelled: true }`。
 - 委托下载期间 background 通过 `injectHeaders(url, headers, { corsOrigin })` 注册临时 DNR 规则，让页面上下文的带 Cookie 请求能通过 CDN 的 CORS 校验；content 无响应或返回失败时，同一任务自动回退到 `HlsFetcher`。
 - `BILIBILI_STREAM_PROGRESS`（`phase: 'fetching'`）由 background 在抓取 Bilibili 视音频流时广播：`percent` 已按 `lib/progress-scale.js` 映射到统一进度（抓取阶段 0..90）；消息携带发起下载的 `frameId`，`tabs.sendMessage` 因此只发往该 frame 用于驱动页面浮条，同时经 `safeRuntimeMessage` 送达 Popup 条目进度；同一 `percent` 也已写进任务表，所以「下载任务」列表与条目、浮条三处一致。
+
+### Popup <-> Background (下载槽位 Port)
+
+Port name: `ovd-download-slots`（常量 `MSG.DOWNLOAD_SLOT_PORT`，协议实现见 [background/download-slot-port.js](D:/github/OnlineVideoDownload/background/download-slot-port.js)）
+
+Examples:
+
+- `ACQUIRE` / `RELEASE` / `CANCEL` / `PING`
+
+Notes:
+
+- 内容侧下载（Bilibili / YouTube 页面内）与后台下载共用同一并发上限，因此 Popup 在发 `SOURCE_DOWNLOAD` 前先 `ACQUIRE { id, entry }`；`entry` 携带 `label` / `sourceId` / `tabId` / `videoUrl`，后台把它登记进下载队列并回 `SLOT_ADMITTED`（限额未满）或保持挂起（排队中，位次由 `DOWNLOAD_QUEUE_UPDATE` 推送）。
+- `ACQUIRE` 被取消排队时回 `SLOT_ABORTED { error: '已取消排队' }`；此时 Popup 直接放弃本次下载，不产生任何半成品文件。
+- `RELEASE { id }` 在内容侧任务结束时归还槽位；`CANCEL { id }` 供 `CANCEL_QUEUED_DOWNLOAD` 的同源场景使用（端口内直接取消）。
+- 端口断开（Popup 关闭）时 SW 调 `downloadQueue.releaseOwner(owner)` 回收该端口持有的所有槽位——包括仍在排队的条目，避免「没人接收结果却占着并发额度」。
+- 后台不可用（端口建立失败）时 Popup 退化为「直接开始」，不因为队列故障导致完全无法下载。
 
 ### Popup -> Content
 
@@ -1023,6 +1067,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.20.0 | 2026-09-27 | Unified download concurrency and resumable downloads. `background/download-queue.js` is now entry-based: every waiting/running download is a record (`id`/`label`/`owner`/`sourceId`/`tabId`/`videoUrl`/`enqueuedAt`) with `snapshot()` (1-based queue positions), `cancelQueued()`, `releaseOwner()` and `onChange()`; queue changes broadcast `DOWNLOAD_QUEUE_UPDATE`. Content-side downloads (Bilibili / YouTube in-page) no longer bypass the limit: the popup acquires a slot over a long-lived port (`ovd-download-slots`, protocol in new `background/download-slot-port.js`; ACQUIRE/RELEASE/CANCEL/PING → SLOT_ADMITTED/SLOT_ABORTED/SLOT_RELEASED/SLOT_CANCELLED/SLOT_READY) before sending `SOURCE_DOWNLOAD`, and the service worker releases everything the port owned on disconnect, so closing the popup can neither leak slots nor start a queued job nobody can receive. `DOWNLOAD_VIDEO` and `RETRY_DOWNLOAD_TASK` also enqueue entry-based; the popup renders queued entries as 「排队中（第 N 位）」 rows with a 「取消排队」 action (and 「排队中 #N」 on the item button) and drops its own batch semaphore. Resumable downloads: new `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK` (`chrome.downloads.pause` / `resume`, gated on `canResume`, plus `pauseDownloadAsync`/`supportsDownloadPause` in `lib/browser-compat.js`), a new `paused` task state kept in sync from `onChanged.paused`, retry that prefers `resume` over restarting, and SW-restart reconciliation that also verifies paused tasks. The concurrency setting ceiling moved from 5 to 10 to match the queue. 10 new test cases, 780 total passing. |
 | 1.19.0 | 2026-09-27 | Subtitle sidecar download (VDH parity). Popup gains a 「字幕」 toggle plus language dropdown on YouTube, Bilibili and HLS items (default 「自动（推荐）」: preferred language → manual zh → manual en → any manual → first track; persisted in `youtubeDownloadPrefs.subtitles`/`subtitleLang` and `bilibiliQualityPrefs.subtitles`/`subtitleLang`). New `lib/subtitle-utils.js` parses WebVTT / YouTube `json3` / `srv3`·`srv1` XML / Bilibili JSON / SRT into cues (`parseSubtitleText` auto-detects when `format:'auto'`), emits SRT (`cuesToSrt`), normalizes tracks from both YouTube `captionTracks` and Bilibili `player/v2` shapes, picks a track (`selectSubtitleTrack`), builds `<title>.<lang>[.auto].srt` names, and builds YouTube fetch attempts (`fmt=json3 → vtt → srv3`; the `fmt` swap uses string replace so signed `sparams` commas survive). New `background/subtitle-downloader.js` fetches (`fetchSubtitleCues`, 8MB cap), converts and saves via offscreen (`downloadSubtitle`); `background/service-worker.js` adds the `DOWNLOAD_SUBTITLE` branch and registers the task with `strategyId:'subtitle'`. Track URLs come from the page: `injected/page-youtube-parser.js` reports YouTube `captionTracks` (`mergeVideoInfo` keeps later network hits from clearing them), `content/strategies/bilibili-strategy.js#fetchSubtitleTracks` fetches the page-cookie `player/v2` subtitle list alongside qualities, and `content/strategies/hls-strategy.js#fetchQualities` exposes Master Playlist `EXT-X-MEDIA TYPE=SUBTITLES` tracks; all three surfaces return `subtitles`. Popup fires the subtitle download in parallel with the media download (best-effort: a failure only toasts and never rolls back the media file). `lib/download-artifact-utils.js#isBrokenTextStubDownload` now allows subtitle extensions so small `.srt` files are not misread as error-page stubs. 26 new test cases, 770 total passing. |
 | 1.18.0 | 2026-09-27 | Audio-only download (VDH parity). Popup gains a 「仅音频」 toggle on YouTube and Bilibili items (persisted in `youtubeDownloadPrefs.audioOnly` / `bilibiliQualityPrefs.audioOnly`; the clarity dropdown is disabled while it is on). YouTube: `lib/youtube-stream-utils.js` adds `isAudioStream` and `pickBestAudioStream` (original track → MP4 container → highest bitrate, WebM/Opus fallback) and `estimateYouTubeDownloadSize` returns `kind:'audio'` when `options.audioOnly`; `lib/video-source-utils.js#getExecutionMode` routes YouTube audio-only to the background in both capture and parse modes; `background/download-strategies/youtube-adaptive-download-strategy.js` gains `resolveAudioContainer`/`buildAudioFilename`/`downloadAudioOnlyInBackground` and `supports()` now also matches `audioOnly`; `submitDirectDownload` accepts an explicit `ext` override so extension-less googlevideo URLs are saved as `.m4a`/`.webm` instead of `.mp3`. Bilibili: `content/strategies/bilibili-strategy.js` adds `downloadBilibiliAudioOnly` and a `resolveBilibiliAudioContainer` helper, saving the DASH audio track as `.m4a`/`.webm`/`.mp3` without muxing. `background/service-worker.js#fetchMediaStreams` now accepts a single-sided request (empty `videoUrls` or `audioUrls`), so audio-only reuses the existing progress/retry/backup-CDN fetch pipeline. `lib/bilibili-quality-utils.js#estimateBilibiliDownloadSize` honours `options.audioOnly`. 14 new test cases, 738 total passing. |
 | 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图」。①页面侧封面采集（`injected/page-interceptor.js`）：新增 `sanitizeThumbnailValue` / `resolvePosterThumbnail` / `captureFrameThumbnail` / `extractMediaThumbnail` / `takeThumbnailPayload`，扫描 `<video>` 时优先取 `poster`、没有 poster 才 canvas 截帧（JPEG，宽 ≤320px），同一元素 + 同一 src 只截/只上报一次，元素级封面都拿不到且本 frame 只有一个 `<video>` 时 `resolvePageThumbnail` 退回页面 `og:image`；`scanVideoElements` 不再跳过 `blob:` 源，并在本 frame 只有一个 `<video>` 时附 `thumbnailScope: 'frame'`；MSE 的 `addSourceBuffer` 上报同样带封面。`page-context-script.js` 的媒体事件补 `loadeddata`（此时才有可绘制画面）。②`background/video-registry.js`：`mergeVideoInfo` 保留 `thumbnail`/`poster`/`cover`；新增 `_syncFrameThumbnail` 把 frame 内唯一 `<video>` 的封面补到同 tab + 同 frameId 的 hls/dash/direct/blob 条目（按 `${tabId}:${frameId}` 缓存，`clearTab`/`clearFrame` 清理，只补空缺、不覆盖自带封面、audio 与结构化来源不参与）。③新增 `lib/preview-utils.js`（纯函数 + 单测）：`shouldMaterializePreview` / `readPrefixBlob`（限长读取、到上限即 `cancel()`）/ `resolvePreviewMimeType` / `resolvePreviewSourceType` / `isSafeThumbnail` / `escapeCssUrl`（`encodeURIComponent` 不转义 `'`、`(`、`)`，改为自算 `%XX`）。④`popup/popup.js`：`canUseInlinePreview(video)` 不再因「有封面」而放弃 `<video>`；有封面时静止显示封面、悬停加 `preview-playing` 切动态画面（`popup.css` 用 `.has-thumb` / `.preview-ready` / `.preview-playing` 控制图层）；直连预览失败后走 `materializePreviewForItem`（`INJECT_DOWNLOAD_HEADERS` → Popup fetch → 2.5MB 前缀 blob → `capturePreviewThumbnail` 截帧 → `RELEASE_DOWNLOAD_HEADERS`），同一 URL 只做一次、单项 2.5MB / 单次会话累计 12MB、请求排队并发 2（超预算的排队项返回 skipped，不判定为失败），blob URL 在 Popup 卸载时统一 revoke；`<source type>` 为浏览器不支持的 MIME 时移除 type 交给嗅探（HLS 清单保留）。⑤`lib/page-message-guard.js` 新增 `sanitizeThumbnail`：`thumbnail`/`poster`/`cover` 只保留 http(s)/协议相对图片与 base64 图片、限长 256KB，其余清空而不是丢弃整条检测结果。⑥后续修正「同页 HLS 条目缩略图 / 时长不正常、列表出现 HLS + Blob 两行却只有一行有图有时长」：`canUseInlinePreview` 只保留 `direct`（桌面 Chrome 不能原生播放 m3u8，HLS 条目进 `<video>` 只会闪一下再落进 `preview-failed`），`popup.css` 把预览失败态限定为 `.preview-failed:not(.has-thumb)`，有封面时保持封面可见；`lib/video-filter.js` 新增 `backfillFrameMetadata`，在 `getVisibleVideosForTab` 读取时把同页 `<video>` 元素量出的封面（`thumbnailScope: "frame"`）与时长借给同 tab 缺字段的 hls / dash / direct / blob 条目（只补空缺、不覆盖、按标题匹配、音频时长不作来源、结构化来源封面不参与），HLS 清单条目的 `--:--` 由此消除。新增用例 28 条（另含 `test/video-filter.test.js`），全量 724 项通过。 |
