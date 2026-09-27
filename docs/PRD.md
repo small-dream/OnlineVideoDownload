@@ -1,7 +1,7 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.39
-> **最后更新**：2026-09-26
+> **版本**：1.17.40
+> **最后更新**：2026-09-27
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
 ---
@@ -51,6 +51,9 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 - `<video>` / `<source>` / `<audio>` 扫描，并用 `MutationObserver` + 媒体事件持续监听动态插入/懒加载的播放器（不再只在 init/load 各扫一次）
 - MIME 嗅探覆盖 `video/mp2t`、`video/quicktime`、`video/x-matroska`；`application/octet-stream` 必须由扩展名或 `Content-Disposition` 文件名二次确认才登记
 - MediaSource / blob URL 捕获
+- 页面侧封面采集：扫描 `<video>` 时优先取作者提供的 `poster`，没有 poster 才用 canvas 截当前帧（JPEG，宽 ≤320px）当缩略图；跨域且未声明 CORS 的视频会污染 canvas，此时跳过截帧，元素级封面都拿不到时再退回页面 `og:image` / `twitter:image`（仅限本 frame 只有一个 `<video>`），否则交给 Popup 侧的带请求头补全
+- blob:（MSE 播放流 / `createObjectURL` 自建播放器）同样参与 `<video>` 扫描并附带封面
+- 单 `<video>` frame 的封面共享：同一 frame 只有一个 `<video>` 时（典型 hls.js / dash.js 播放器），它的封面会补到同 frame 的 m3u8 / mpd / 直链 / MSE blob 条目，列表里不再只有一行有图
 - blob 条目去重：blob: URL 随 MSE 播放器重建/切流不断变化，同一播放器被嵌在多份 iframe（多线路预加载、弹幕播放器）时会出现多行同标题重复项；现在按标题跨 frame 只保留最新一条，无标题时才退回按 frame 去重
 - 子框架上报的通用/ blob 检测不再使用 iframe 自己的 `document.title`（现场表现为整列标题都是「弹幕播放器」），留空由 background 用标签页标题（视频名）补全；顶层页面维持原行为
 - 子框架被移除或导航时清掉它上报的检测条目，避免播放器 iframe 反复重建（切线路、换源）在列表里留下失效重复项
@@ -66,7 +69,11 @@ UI 要求：
 - 支持从 Popup 发起下载
 - 支持显示视频标题、格式标签、时长、大小、缩略图与进度
 - Popup 视频条目采用卡片式布局，左侧展示视频缩略图
-- 无封面且无法内联预览的条目（blob / dash 等）显示媒体占位图标，不再留一块空黑框；内联预览加载失败时同样回落到占位图标
+- 内联预览只对渐进式直链（mp4/webm）开启：桌面 Chrome 不能原生播放 HLS 清单，HLS / DASH 条目只显示静态封面（页面截帧 / 同页借用封面 / 平台封面），不会先闪一下再变成占位图
+- 有封面的直链条目：静止时显示封面图片，鼠标悬停（或键盘聚焦）时切换成正在播放的动态视频；预览失败但有封面时保留封面显示（占位渐变只对没有封面的条目生效）
+- 同一页面把同一个播放器登记成多条时（hls.js / dash.js 的 m3u8 / mpd 清单条目 + MSE blob 条目），清单条目会借用同页 `<video>` 元素量出的封面与真实时长，不再只剩占位图和 `--:--`
+- 直连预览被 CDN 拒绝（缺 Referer/Origin）时，Popup 会申请临时请求头规则并按需读取媒体前缀（≤2.5MB）生成同源 blob：用其中一帧当静态封面，悬停时直接播放；同一 URL 只补全一次，单项 ≤2.5MB、单次 Popup 会话累计 ≤12MB；补全请求排队执行（并发 2 条，预算用尽的排队条目直接跳过而不判定为失败），确认失败才回落占位图标
+- 既无封面又无法内联预览的条目（blob / dash / 预览补全失败）显示媒体占位图标，不再留一块空黑框
 - Popup 中的 YouTube 条目支持在设置中切换下载模式（录制模式 / 解析下载），解析下载模式下可在条目中选择分辨率
 - Popup 从内容侧发起下载时，条目按钮应保持”进行中”状态直到收到完成或失败结果，避免用户误以为任务未启动并重复点击
 - 支持批量选择多个视频，从 Popup 一键并发下载
@@ -250,6 +257,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图（同类插件能显示，鼠标移过去还能变成动态视频）」。①页面侧封面采集：扫描 `<video>` 时优先取 `poster`，没有 poster 才用 canvas 截当前帧（JPEG，宽 ≤320px），blob: / MSE 播放流也参与扫描并带上封面；元素级封面都拿不到、且本 frame 只有一个 `<video>` 时再退回页面 `og:image`（`injected/page-interceptor.js`）；②单 `<video>` 的 frame 内封面共享：同 frame 的 m3u8 / mpd / 直链 / MSE blob 条目共用该封面（`background/video-registry.js`，页面只在「本 frame 只有一个 `<video>`」时以 `thumbnailScope:'frame'` 授权）；③Popup 补全链路：直连预览被 CDN 拒绝（缺 Referer/Origin）时申请临时请求头规则并按需读取媒体前缀（单项 ≤2.5MB、单次会话累计 ≤12MB、排队并发 2 条）生成同源 blob，取一帧当静态封面、悬停时播放（新增 `lib/preview-utils.js`）；④有封面时静止显示封面、悬停切换动态画面，`<source type>` 声明为浏览器不支持的 MIME 时改为交给浏览器嗅探。⑤后续修正「HLS 条目缩略图 / 时长不正常」：内联预览只对渐进式直链开启（桌面 Chrome 播不了 m3u8，HLS 条目进 `<video>` 只会闪一下再变成暗色占位图），预览失败但有封面时保留封面（占位渐变只对无封面条目生效）；读取时把同页 `<video>` 元素量出的封面与时长借给清单条目（`lib/video-filter.js#backfillFrameMetadata`），解决「一个播放器同时登记 HLS 清单 + MSE blob 两条，后者有图有时长、前者既无图也是 `--:--`」。新增用例 28 条，全量 724 项通过。 |
 | 1.17.39 | 2026-09-26 | 修复「检测列表出现多行同名 Blob 条目、标题是播放器名字、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 改为按标题跨 frame 去重（此前按 `frameId + 标题`，同一播放器被嵌在多份 iframe 时每个 frame 各留一行），无标题时才退回按 frame 去重；②`injected/page-interceptor.js` 里子框架上报的通用 / blob 检测不再带 iframe 自己的 `document.title`（「弹幕播放器」这类播放器名），留空由 background 用标签页标题补全，下载文件名随之变成视频名；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），避免播放器 iframe 反复重建后注册表残留失效条目；④`popup/popup.js` + `popup.css` 为无封面且无法内联预览的条目（blob / dash / 内联预览失败）增加媒体占位图标。新增用例 3 条，全量 696 项通过。 |
 | 1.17.38 | 2026-09-26 | 修复「打开 Popup 只看到空列表、一直等也不更新」。检测列表不再只在打开时读取一次：background 每次检测到视频都经 `safeRuntimeMessage` 广播 `UPDATE_BUTTON`（带 `tabId`），Popup 据此自动刷新；Popup 打开后先显示「正在检测页面视频…」并每 1.2s 轮询结果（总窗口 15s，页面 load 完成后再宽限 8s），窗口内不再提前显示「未检测到视频」；空状态按上下文给出提示并新增「重新检测」按钮，经新增的 `RESCAN_TAB_VIDEOS`（Popup → SW → Content → 页面上下文 `RESCAN_PAGE_VIDEOS`）重扫媒体元素并重跑 YouTube/Bilibili 解析。 |
 | 1.17.37 | 2026-09-26 | 本版为「YouTube 下载链路收口 + 大文件稳定性」发布版：①界面双语化（`_locales/zh_CN` 与 `en`，Popup、内容脚本状态与错误文案按语言显示，缺 key 回退中文原文）；②YouTube 清晰度与下载模式收口——识别 `hls_variant` master 清单、按合并后的记录构造过滤上下文、悬空的 `hls:` 偏好自动回退普通清晰度、音频流优先原声轨（避免把自动配音合进视频）、设置中的「解析下载 / 录制」与下载偏好打通；③大文件不再内存合并：新增流式合并落盘（`lib/fmp4-file-merge.js`），GB 级文件不再因内存上限中止；④下载产物命名与保存正确性——CDN 把有效媒体误标 `text/plain` 时不再产出 `xxx.mp4.txt`，改为扩展按 `video/mp4` 自行保存，OPFS 对象 URL 带显式 MIME，且只有明确探测为媒体才交给浏览器下载管理器。 |
