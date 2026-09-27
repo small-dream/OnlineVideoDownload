@@ -12,6 +12,7 @@ import { DownloadNotificationManager } from './download-notification.js';
 import { createTabBadgeManager } from './action-badge.js';
 import { resolveClearVideoScope } from './clear-video-scope.js';
 import { DownloadQueue } from './download-queue.js';
+import { handleDownloadSlotMessage } from './download-slot-port.js';
 import { resolveSaveAs } from './save-location.js';
 import { releaseOpfsDownload } from './offscreen-download.js';
 import { downloadSubtitle } from './subtitle-downloader.js';
@@ -19,10 +20,12 @@ import { takeOpfsTempFile } from './opfs-temp-registry.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
+  pauseDownloadAsync,
   resumeDownloadAsync,
   safeRuntimeMessage,
   safeTabMessage,
   sendTabMessageAsync,
+  supportsDownloadPause,
   supportsDownloadResume,
 } from '../lib/browser-compat.module.js';
 
@@ -156,6 +159,27 @@ let headerInjectionToken = 0;
 
 // 全局下载并发队列：让 concurrentDownloadLimit 覆盖所有下载入口，而非仅 popup 批量下载
 const downloadQueue = new DownloadQueue({ limit: 3 });
+let backgroundQueueEntrySequence = 0;
+
+// 队列变化即时广播给 Popup（进行中数量 / 排队位次），Popup 据此渲染「排队中」
+downloadQueue.onChange((snapshot) => {
+  safeRuntimeMessage({
+    queue: snapshot,
+    type: MSG.DOWNLOAD_QUEUE_UPDATE || 'DOWNLOAD_QUEUE_UPDATE',
+  });
+});
+
+// Popup 通过长连接申请内容侧下载槽位：端口断开即回收该端口持有的槽位，避免泄漏
+try {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port?.name !== (MSG.DOWNLOAD_SLOT_PORT || 'ovd-download-slots')) {
+      return;
+    }
+    attachDownloadSlotPort(port);
+  });
+} catch (err) {
+  console.warn(`[OVD] 注册下载槽位端口失败: ${err.message}`);
+}
 
 // OPFS 落盘能力（临时文件登记见 background/opfs-temp-registry.js）
 const opfsSink = globalThis.__OVD_OPFS_SINK__ || {};
@@ -348,6 +372,16 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     }
   }
 
+  if (delta.paused) {
+    // 暂停/继续：DownloadStateStore 的 state 与任务状态一起更新，Popup 据此切换按钮
+    const paused = delta.paused.current === true;
+    downloadStore.update(downloadId, { state: paused ? 'paused' : 'downloading' });
+    broadcastTaskUpdate(downloadStore.updateTaskByDownloadId(downloadId, {
+      message: paused ? '已暂停，可继续下载' : '已从断点继续',
+      status: paused ? 'paused' : 'running',
+    }));
+  }
+
   if (!delta.state) return;
   const nextState = delta.state.current;
 
@@ -529,6 +563,96 @@ async function tryAutoResumeDownload(downloadId, tabId, reason) {
   return true;
 }
 
+let downloadSlotPortSequence = 0;
+
+/**
+ * Popup 的下载槽位端口：内容侧下载（Bilibili / YouTube 页面内）先申请槽位再开始，
+ * 与后台下载共用同一并发上限。端口断开（Popup 关闭）时回收该端口持有的槽位，
+ * 既不会泄漏，也不会让已排队的任务在无人接收结果时偷偷开始。
+ */
+function attachDownloadSlotPort(port) {
+  const owner = `port:${++downloadSlotPortSequence}`;
+
+  port.onMessage.addListener((message = {}) => {
+    void handleDownloadSlotMessage(downloadQueue, owner, message).then((reply) => {
+      if (reply) {
+        postSlotMessage(port, reply);
+      }
+    });
+  });
+  port.onDisconnect.addListener(() => {
+    const released = downloadQueue.releaseOwner(owner);
+    if (released > 0) {
+      console.warn(`[OVD] 下载槽位端口断开，回收槽位 owner=${owner} count=${released}`);
+    }
+  });
+
+  postSlotMessage(port, { owner, queue: downloadQueue.snapshot(), type: 'SLOT_READY' });
+}
+
+function postSlotMessage(port, message) {
+  try {
+    port.postMessage(message);
+  } catch (err) {
+    console.warn(`[OVD] 下载槽位端口回传失败: ${err.message}`);
+  }
+}
+
+/** 暂停一个可续传的浏览器下载（断点续传的暂停半程）。 */
+async function pauseDownloadTask(taskId) {
+  const task = downloadStore.getTask(taskId);
+  if (!task?.downloadId) {
+    return { ok: false, error: '该任务没有可暂停的浏览器下载' };
+  }
+  if (!supportsDownloadPause?.()) {
+    return { ok: false, error: '当前浏览器不支持暂停下载' };
+  }
+  const item = await getDownloadItem(task.downloadId);
+  if (!item?.canResume) {
+    return { ok: false, error: '该下载不支持断点续传，无法暂停' };
+  }
+  try {
+    await pauseDownloadAsync(task.downloadId);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+
+  const pausedTask = downloadStore.upsertTask({
+    message: '已暂停，可继续下载',
+    status: 'paused',
+    taskId,
+  });
+  broadcastTaskUpdate(pausedTask);
+  return { ok: true, task: pausedTask };
+}
+
+/** 从断点继续一个暂停的浏览器下载（续传走 HTTP Range，不重新下载已完成部分）。 */
+async function resumeDownloadTaskNow(taskId) {
+  const task = downloadStore.getTask(taskId);
+  if (!task?.downloadId) {
+    return { ok: false, error: '该任务没有可继续的浏览器下载' };
+  }
+  if (!supportsDownloadResume?.()) {
+    return { ok: false, error: '当前浏览器不支持续传' };
+  }
+
+  // 手动继续视为一次全新机会：清空自动重试计数，后续再中断仍能自动续传
+  clearDownloadResumeTracking(task.downloadId);
+  try {
+    await resumeDownloadAsync(task.downloadId);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+
+  const runningTask = downloadStore.upsertTask({
+    message: '已从断点继续',
+    status: 'running',
+    taskId,
+  });
+  broadcastTaskUpdate(runningTask);
+  return { ok: true, task: runningTask };
+}
+
 async function handleMessage(msg, sender) {
   assertValidMessage(msg);
   const tabId = sender.tab?.id ?? msg.tabId;
@@ -561,11 +685,27 @@ async function handleMessage(msg, sender) {
       } catch (err) {
         console.warn(`[OVD] 读取并发设置失败，沿用当前上限: ${err.message}`);
       }
+      const queueEntry = {
+        id: `bg-${Date.now()}-${++backgroundQueueEntrySequence}`,
+        label: msg.payload?.title || msg.payload?.url || '',
+        owner: 'background',
+        sourceId: msg.payload?.sourceId || msg.payload?.type || '',
+        tabId: msg.tabId ?? tabId ?? null,
+        videoUrl: msg.payload?.url || '',
+      };
       if (downloadQueue.pendingCount > 0) {
         console.log(`[OVD] 下载排队中 pending=${downloadQueue.pendingCount} active=${downloadQueue.activeCount}`);
       }
-      return downloadQueue.run(() => handleDownloadVideo(msg.payload, msg.tabId ?? tabId, msg));
+      return downloadQueue.run(() => handleDownloadVideo(msg.payload, msg.tabId ?? tabId, msg), {
+        entry: queueEntry,
+      });
     }
+
+    case MSG.GET_DOWNLOAD_QUEUE || 'GET_DOWNLOAD_QUEUE':
+      return { queue: downloadQueue.snapshot() };
+
+    case MSG.CANCEL_QUEUED_DOWNLOAD || 'CANCEL_QUEUED_DOWNLOAD':
+      return { cancelled: downloadQueue.cancelQueued(msg.queueId || msg.id) };
 
     case MSG.GET_DOWNLOAD_STATES || 'GET_DOWNLOAD_STATES':
       return { states: downloadStore.getStatesForTab(msg.tabId) };
@@ -575,6 +715,12 @@ async function handleMessage(msg, sender) {
 
     case MSG.RETRY_DOWNLOAD_TASK || 'RETRY_DOWNLOAD_TASK':
       return retryDownloadTask(msg.taskId);
+
+    case MSG.PAUSE_DOWNLOAD_TASK || 'PAUSE_DOWNLOAD_TASK':
+      return pauseDownloadTask(msg.taskId);
+
+    case MSG.RESUME_DOWNLOAD_TASK || 'RESUME_DOWNLOAD_TASK':
+      return resumeDownloadTaskNow(msg.taskId);
 
     case MSG.DELETE_DOWNLOAD_TASK || 'DELETE_DOWNLOAD_TASK':
       return deleteDownloadTask(msg.taskId);
@@ -1107,6 +1253,45 @@ function updateSourceDownloadTask(msg = {}, tabId = null) {
   return task;
 }
 
+/**
+ * 手动重试时优先走断点续传：中断的浏览器下载（canResume）能用 HTTP Range 接着下，
+ * 不必从头再来。续传不可用时返回 null，调用方回退为重新发起下载。
+ */
+async function tryResumeExistingDownload(task = {}) {
+  if (task.downloadId == null || !supportsDownloadResume?.()) {
+    return null;
+  }
+
+  const item = await getDownloadItem(task.downloadId);
+  if (!item?.canResume) {
+    return null;
+  }
+
+  // 手动重试视为一次全新机会：清空自动重试计数，后续再中断仍能自动续传
+  clearDownloadResumeTracking(task.downloadId);
+  broadcastTaskUpdate(downloadStore.upsertTask({
+    error: '',
+    message: '从断点继续…',
+    status: 'retrying',
+    taskId: task.taskId,
+  }));
+
+  try {
+    await resumeDownloadAsync(task.downloadId);
+  } catch (err) {
+    console.warn(`[OVD] 断点续传失败，回退为重新下载: ${err.message}`);
+    return null;
+  }
+
+  const nextTask = downloadStore.upsertTask({
+    message: '已从断点继续',
+    status: 'running',
+    taskId: task.taskId,
+  });
+  broadcastTaskUpdate(nextTask);
+  return { ok: true, resumed: true, task: nextTask };
+}
+
 async function retryDownloadTask(taskId) {
   const task = downloadStore.getTask(taskId);
   if (!task) {
@@ -1119,6 +1304,14 @@ async function retryDownloadTask(taskId) {
     return { ok: false, error: 'Original tab is missing' };
   }
 
+  // 浏览器下载若支持续传，优先从断点继续（HTTP Range），而不是从头重下
+  if (task.downloadId != null) {
+    const resumed = await tryResumeExistingDownload(task);
+    if (resumed) {
+      return resumed;
+    }
+  }
+
   const retryingTask = downloadStore.upsertTask({
     error: '',
     message: 'Retrying...',
@@ -1128,6 +1321,23 @@ async function retryDownloadTask(taskId) {
   });
   broadcastTaskUpdate(retryingTask);
 
+  // 重试同样占用并发槽位（内容侧下载也在内），排到队时 Popup 会显示位次
+  return downloadQueue.run(
+    () => startRetriedDownload(task, taskId),
+    {
+      entry: {
+        id: `retry-${Date.now()}-${++backgroundQueueEntrySequence}`,
+        label: task.title || task.videoUrl || '',
+        owner: 'background',
+        sourceId: task.sourceId || '',
+        tabId: task.tabId ?? null,
+        videoUrl: task.videoUrl || '',
+      },
+    }
+  );
+}
+
+async function startRetriedDownload(task, taskId) {
   const isContentTask = task.strategyId && task.strategyId !== 'browser-download' && task.strategyId !== 'youtube-adaptive-background';
   if (isContentTask) {
     try {

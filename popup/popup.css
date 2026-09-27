@@ -557,6 +557,16 @@ body {
   background: #55aee0;
 }
 
+.dl-btn[data-state="queued"] {
+  color: #6a4a10;
+  background: #fdf1d6;
+}
+
+.dl-btn[data-state="paused"] {
+  color: #3f4650;
+  background: #e8eaee;
+}
+
 .dl-btn[data-state="completed"] {
   background: #3aa76d;
 }
@@ -896,6 +906,16 @@ body {
 .task-status.retrying {
   color: #075f91;
   background: #e4f4ff;
+}
+
+.task-status.queued {
+  color: #7a5209;
+  background: #fdf1d6;
+}
+
+.task-status.paused {
+  color: #3f4650;
+  background: #e8eaee;
 }
 
 .task-status.complete {

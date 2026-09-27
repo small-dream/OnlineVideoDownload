@@ -19,7 +19,8 @@ export async function recoverDownloadTasks(downloadStore, {
   const tasks = downloadStore.getTasks({ limit: 500 });
 
   for (const task of tasks) {
-    if (!['running', 'retrying'].includes(task.status)) continue;
+    // paused 也要核对：SW 回收期间下载可能已完成/中断，暂停任务不能永远停在 paused
+    if (!['running', 'retrying', 'paused'].includes(task.status)) continue;
 
     // 无 downloadId 的是 SW/页面内执行的任务（双流抓取、合并等），
     // SW 被杀即中断，标记为可重试而非永远 running

@@ -593,6 +593,15 @@
   "taskStatus_interrupted": {
     "message": "已中断"
   },
+  "taskStatus_paused": {
+    "message": "已暂停"
+  },
+  "taskStatus_queued": {
+    "message": "排队中"
+  },
+  "taskStatus_queuedWithPosition": {
+    "message": "排队中 #$1"
+  },
   "taskStatus_retrying": {
     "message": "重试中"
   },
@@ -601,6 +610,42 @@
   },
   "tasks_cancel": {
     "message": "取消"
+  },
+  "tasks_cancelQueued": {
+    "message": "取消排队"
+  },
+  "tasks_pause": {
+    "message": "暂停"
+  },
+  "tasks_paused": {
+    "message": "任务已暂停，可稍后继续。"
+  },
+  "tasks_pausedSummary": {
+    "message": "$1 个已暂停"
+  },
+  "tasks_pauseFailed": {
+    "message": "暂停失败: $1"
+  },
+  "tasks_queueCancelled": {
+    "message": "已取消排队。"
+  },
+  "tasks_queueSummary": {
+    "message": "$1 个排队中"
+  },
+  "tasks_queuedPosition": {
+    "message": "排队中（第 $1 位）"
+  },
+  "tasks_resume": {
+    "message": "继续"
+  },
+  "tasks_resumeFailed": {
+    "message": "继续失败: $1"
+  },
+  "tasks_resumed": {
+    "message": "已从断点继续下载。"
+  },
+  "tasks_resuming": {
+    "message": "继续中"
   },
   "tasks_cancelFailed": {
     "message": "取消失败: $1",

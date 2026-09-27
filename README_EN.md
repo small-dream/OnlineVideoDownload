@@ -27,6 +27,8 @@
 - 🔀 **In-Browser Merging** — YouTube 1080p+ and Bilibili DASH audio/video streams are merged in the browser — **no ffmpeg or local tools required**
 - 🎵 **Audio-Only Download** — Save just the audio track (M4A, falling back to WebM) from YouTube / Bilibili items without the video — great for music
 - 📝 **Subtitle Download** — Save YouTube / Bilibili / HLS subtitles as `.srt` sidecar files (same name as the video, so players match them automatically); auto-generated tracks are tagged `.auto`
+- 🧵 **Unified Download Queue** — Every download (including Bilibili / YouTube in-page downloads) shares one concurrency limit; extra jobs queue up as "Queued (position N)" and can be removed from the queue
+- ⏸️ **Pause / Resume** — Resumable downloads can be paused and continued; interrupted downloads retry automatically and resume from where they left off instead of restarting
 - 🌐 **Broad Compatibility** — Specialized support for YouTube and Bilibili, plus HLS / DASH / MP4 / Blob videos from any website
 - 🔒 **Privacy First** — All processing happens locally, no data is ever sent to third-party servers
 - 🛡️ **DRM Respect** — Encrypted content is flagged but never bypassed
