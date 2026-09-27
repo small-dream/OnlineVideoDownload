@@ -86,6 +86,131 @@ test('结构化来源不受阈值过滤影响', () => {
   );
 });
 
+// ---------------------------------------------------------------
+// 元数据借用：hls.js / dash.js 播放器的 m3u8 / mpd 清单条目只有 URL，
+// 借用同标题 MSE blob 条目的页面截帧（thumbnailScope: 'frame'）与真实时长
+// ---------------------------------------------------------------
+
+const FRAME_COVER = 'data:image/jpeg;base64,AAAA';
+
+test('backfillFrameMetadata 把页面截帧补到同标题的 HLS 清单条目', () => {
+  const mod = loadModule();
+  const title = '在线播放 - demo';
+  const videos = [
+    { type: 'hls', url: 'https://cdn.example/master.m3u8', title },
+    { type: 'blob', url: 'blob:https://page.example/uuid', title, thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+  ];
+
+  const result = mod.backfillFrameMetadata(videos);
+  assert.equal(result[0].thumbnail, FRAME_COVER);
+  assert.equal(result[0].thumbnailScope, 'frame');
+  assert.equal(result[1].thumbnail, FRAME_COVER);
+  // 原数组不被就地修改
+  assert.equal(videos[0].thumbnail, undefined);
+});
+
+test('backfillFrameMetadata 把时长补到同标题的 HLS 清单条目', () => {
+  const mod = loadModule();
+  const title = '在线播放 - demo';
+  const videos = [
+    { type: 'hls', url: 'https://cdn.example/master.m3u8', title, duration: 0 },
+    { type: 'blob', url: 'blob:https://page.example/uuid', title, duration: 3977 },
+    { type: 'direct', url: 'https://cdn.example/other.mp4', title, duration: 12 },
+  ];
+
+  const result = mod.backfillFrameMetadata(videos);
+  assert.equal(result[0].duration, 3977);
+  // 已有真实时长不覆盖
+  assert.equal(result[2].duration, 12);
+});
+
+test('backfillFrameMetadata 只补空缺、只借页面截帧', () => {
+  const mod = loadModule();
+  const title = 'demo';
+  const ownCover = 'https://i.ytimg.com/vi/x/hq.jpg';
+  const videos = [
+    { type: 'hls', url: 'https://cdn.example/a.m3u8', title, thumbnail: ownCover },
+    { type: 'hls', url: 'https://cdn.example/b.m3u8', title },
+    // 结构化来源自带封面，不是页面截帧，不参与借用
+    { type: 'bilibili-meta', url: 'https://www.bilibili.com/video/BV1', title, thumbnail: ownCover },
+  ];
+
+  const result = mod.backfillFrameMetadata(videos);
+  assert.equal(result[0].thumbnail, ownCover);
+  assert.equal(result[1].thumbnail, undefined);
+});
+
+test('backfillFrameMetadata 同页有多个不同取值时按标题匹配，标题对不上不借用', () => {
+  const mod = loadModule();
+  const videos = [
+    { type: 'hls', url: 'https://cdn.example/a.m3u8', title: '第一个视频' },
+    { type: 'blob', url: 'blob:https://page.example/u1', title: '第一个视频', thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+    { type: 'blob', url: 'blob:https://page.example/u2', title: '第二个视频', thumbnail: 'data:image/jpeg;base64,BBBB', thumbnailScope: 'frame' },
+  ];
+
+  const result = mod.backfillFrameMetadata(videos);
+  // 标题匹配 → 借用对应那条的封面
+  assert.equal(result[0].thumbnail, FRAME_COVER);
+
+  const stranger = mod.backfillFrameMetadata([
+    { type: 'hls', url: 'https://cdn.example/b.m3u8', title: '第三个视频' },
+    { type: 'blob', url: 'blob:https://page.example/u1', title: '第一个视频', thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+    { type: 'blob', url: 'blob:https://page.example/u2', title: '第二个视频', thumbnail: 'data:image/jpeg;base64,BBBB', thumbnailScope: 'frame' },
+  ]);
+  assert.equal(stranger[0].thumbnail, undefined);
+});
+
+test('backfillFrameMetadata 全页只有一个取值时，标题对不上也能借用', () => {
+  const mod = loadModule();
+  const videos = [
+    { type: 'hls', url: 'https://cdn.example/master.m3u8', title: '在线播放' },
+    // 播放器在 iframe 里上报，标题是标签页标题；清单条目在顶层 frame，标题来自 document.title
+    { type: 'blob', url: 'blob:https://page.example/u1', title: '在线播放 - 站点名', duration: 600, thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+  ];
+
+  const result = mod.backfillFrameMetadata(videos);
+  assert.equal(result[0].thumbnail, FRAME_COVER);
+  assert.equal(result[0].duration, 600);
+});
+
+test('backfillFrameMetadata 全页有多个不同取值时不冒险借用', () => {
+  const mod = loadModule();
+
+  const single = mod.backfillFrameMetadata([
+    { type: 'hls', url: 'https://cdn.example/a.m3u8' },
+    { type: 'blob', url: 'blob:https://page.example/u1', thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+  ]);
+  assert.equal(single[0].thumbnail, FRAME_COVER);
+
+  const ambiguous = mod.backfillFrameMetadata([
+    { type: 'hls', url: 'https://cdn.example/a.m3u8' },
+    { type: 'blob', url: 'blob:https://page.example/u1', thumbnail: FRAME_COVER, thumbnailScope: 'frame' },
+    { type: 'blob', url: 'blob:https://page.example/u2', thumbnail: 'data:image/jpeg;base64,BBBB', thumbnailScope: 'frame' },
+  ]);
+  assert.equal(ambiguous[0].thumbnail, undefined);
+
+  const durations = mod.backfillFrameMetadata([
+    { type: 'hls', url: 'https://cdn.example/a.m3u8', title: 'x' },
+    { type: 'blob', url: 'blob:https://page.example/u1', title: 'y', duration: 600 },
+    { type: 'blob', url: 'blob:https://page.example/u2', title: 'z', duration: 900 },
+  ]);
+  assert.equal(durations[0].duration, undefined);
+});
+
+test('backfillFrameMetadata 不用 audio 的时长，输入为空或非数组时安全', () => {
+  const mod = loadModule();
+  assert.deepEqual(mod.backfillFrameMetadata(null), []);
+  assert.deepEqual(mod.backfillFrameMetadata([]), []);
+  const list = [{ type: 'hls', url: 'https://cdn.example/a.m3u8' }];
+  assert.equal(mod.backfillFrameMetadata(list), list);
+
+  const withAudio = mod.backfillFrameMetadata([
+    { type: 'hls', url: 'https://cdn.example/a.m3u8', title: 'demo' },
+    { type: 'audio', url: 'https://cdn.example/a.mp3', title: 'demo', duration: 30 },
+  ]);
+  assert.equal(withAudio[0].duration, undefined);
+});
+
 test('filterVideos 返回保留项并支持空列表', () => {
   const mod = loadModule();
   const videos = [

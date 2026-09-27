@@ -72,3 +72,38 @@ test('validateDetectedPayload 拒绝伪造类型、危险协议与异常字段',
   assert.equal(longTitle.ok, false);
   assert.match(longTitle.reason, /title/);
 });
+
+// ---------------------------------------------------------------
+// 缩略图字段：保留合规值、清空可疑值，但不丢弃整条检测结果
+// ---------------------------------------------------------------
+
+test('sanitizeThumbnail 只保留图片地址与 base64 图片', () => {
+  const guard = loadGuard();
+  const dataUrl = `data:image/jpeg;base64,${'A'.repeat(64)}`;
+
+  assert.equal(guard.sanitizeThumbnail('https://i0.hdslb.com/bfs/archive/a.jpg'), 'https://i0.hdslb.com/bfs/archive/a.jpg');
+  assert.equal(guard.sanitizeThumbnail('//i0.hdslb.com/bfs/archive/a.jpg'), '//i0.hdslb.com/bfs/archive/a.jpg');
+  assert.equal(guard.sanitizeThumbnail(dataUrl), dataUrl);
+  assert.equal(guard.sanitizeThumbnail(' http://x/a.png '), 'http://x/a.png');
+
+  // 危险协议 / 非图片 data URL / 超长载荷 / 非字符串一律清空
+  assert.equal(guard.sanitizeThumbnail('javascript:alert(1)'), '');
+  assert.equal(guard.sanitizeThumbnail('data:text/html;base64,PHNjcmlwdD4='), '');
+  assert.equal(guard.sanitizeThumbnail(`https://x/${'a'.repeat(guard.MAX_THUMBNAIL_LENGTH)}`), '');
+  assert.equal(guard.sanitizeThumbnail(''), '');
+  assert.equal(guard.sanitizeThumbnail(null), '');
+  assert.equal(guard.sanitizeThumbnail({ url: 'https://x/a.png' }), '');
+});
+
+test('validateDetectedPayload 清洗缩略图字段而不丢弃条目', () => {
+  const guard = loadGuard();
+
+  const kept = { thumbnail: '//i0.hdslb.com/a.jpg', type: 'bilibili-meta', url: 'https://www.bilibili.com/video/BV1' };
+  assert.equal(guard.validateDetectedPayload(kept).ok, true);
+  assert.equal(kept.thumbnail, '//i0.hdslb.com/a.jpg');
+
+  const cleaned = { poster: 'javascript:alert(1)', thumbnail: 'data:text/html;base64,AAA', type: 'direct', url: 'https://site.example/v.mp4' };
+  assert.equal(guard.validateDetectedPayload(cleaned).ok, true);
+  assert.equal(cleaned.poster, undefined);
+  assert.equal(cleaned.thumbnail, undefined);
+});

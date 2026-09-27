@@ -11,6 +11,7 @@ const bilibiliQualityUtils = globalThis.__OVD_BILIBILI_QUALITY_UTILS__ || {};
 const bilibiliQualityStore = globalThis.__OVD_BILIBILI_QUALITY_STORE__ || {};
 const generalSettingsStore = globalThis.__OVD_GENERAL_SETTINGS_STORE__ || {};
 const popupErrorMessages = globalThis.__OVD_POPUP__ || {};
+const previewUtils = globalThis.__OVD_PREVIEW_UTILS__ || {};
 const MSG = messageTypes;
 // 国际化：缺 key 时退回中文原文（见 lib/i18n.js）
 const i18n = globalThis.__OVD_I18N__ || {};
@@ -213,12 +214,64 @@ function normalizeAssetUrl(url) {
   return value;
 }
 
-function canUseInlinePreview(video, thumbnailUrl) {
-  if (thumbnailUrl || !video?.url) {
+// 直连预览被 CDN 拒绝（缺 Referer/Origin）时，改用「注入请求头 + 限长读取」的同源 blob
+// 补全封面与动态预览。上限的目的：不为了列表里的一张封面把整部影片拉进 Popup。
+const PREVIEW_MAX_BYTES = previewUtils.DEFAULT_PREVIEW_MAX_BYTES || 2621440;
+// 单次 Popup 会话为「预览补全」最多读取的总字节数：按体积而不是条目数封顶，
+// 小文件视频能多补几条，大文件视频也不会把整部影片拉下来
+const PREVIEW_TOTAL_BUDGET_BYTES = 12 * 1024 * 1024;
+const PREVIEW_MAX_CONCURRENT = 2;
+const PREVIEW_THUMBNAIL_TIMEOUT_MS = 6000;
+const PREVIEW_THUMBNAIL_MAX_WIDTH = 320;
+const PREVIEW_THUMBNAIL_JPEG_QUALITY = 0.72;
+// url → { objectUrl, mimeType, thumbnail }；null 表示已失败，不再重试
+const previewMaterializationCache = new Map();
+const previewObjectUrls = new Set();
+// 补全任务队列：列表里被 CDN 拒绝的条目会在同一瞬间齐发 error 事件
+const previewMaterializationQueue = [];
+let previewActiveDownloads = 0;
+let previewBytesRead = 0;
+
+window.addEventListener('unload', () => {
+  for (const objectUrl of previewObjectUrls) {
+    try {
+      URL.revokeObjectURL(objectUrl);
+    } catch (_err) {
+      // 忽略
+    }
+  }
+  previewObjectUrls.clear();
+});
+
+/**
+ * 只有渐进式直链（mp4/webm）才做内联预览：桌面 Chrome 不能原生播放 HLS 清单，
+ * 把 m3u8 塞进 <video> 只会先闪一下再被判失败（还会触发预览失败态），
+ * 因此 HLS 条目只展示静态封面（页面截帧 / 共享封面）。
+ */
+function canUseInlinePreview(video) {
+  if (!video?.url) {
     return false;
   }
 
-  return ['direct', 'hls'].includes(video.type);
+  return video.type === 'direct';
+}
+
+/**
+ * 静态封面走行内 background-image（`.video-thumb[style]::before` 会关掉渐变底），
+ * URL 经 escapeCssUrl 处理，避免封面地址里的引号/括号截断样式。
+ */
+function applyThumbBackground(thumbEl, thumbnailUrl) {
+  if (!thumbEl) {
+    return;
+  }
+
+  if (!thumbnailUrl) {
+    thumbEl.removeAttribute('style');
+    return;
+  }
+
+  const escaped = previewUtils.escapeCssUrl ? previewUtils.escapeCssUrl(thumbnailUrl) : thumbnailUrl;
+  thumbEl.style.backgroundImage = `url("${escaped}")`;
 }
 
 /**
@@ -241,14 +294,16 @@ function buildThumbPlaceholderHtml(extraClass = '') {
 }
 
 function buildThumbHtml(video, thumbnailUrl, durationText) {
-  if (canUseInlinePreview(video, thumbnailUrl)) {
+  if (canUseInlinePreview(video)) {
     const previewUrl = escapeHtml(normalizeAssetUrl(video.url));
-    const previewType = video.type === 'hls'
-      ? 'application/vnd.apple.mpegurl'
-      : escapeHtml(video.mimeType || 'video/mp4');
+    const previewType = escapeHtml(previewUtils.resolvePreviewSourceType?.(video) || video.mimeType || 'video/mp4');
+    // 有静态封面时，<video> 只在鼠标悬停（preview-playing）时才盖住封面显示
+    const thumbClass = thumbnailUrl
+      ? 'video-thumb video-thumb-preview has-thumb'
+      : 'video-thumb video-thumb-preview';
 
     return `
-      <div class="video-thumb video-thumb-preview">
+      <div class="${thumbClass}">
         <video class="thumb-video" muted playsinline loop preload="metadata" data-preview-type="${escapeHtml(video.type || '')}">
           <source src="${previewUrl}" type="${previewType}">
         </video>
@@ -268,10 +323,9 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
     `;
   }
 
-  const thumbnailStyle = thumbnailUrl ? ` style="background-image: url('${escapeHtml(thumbnailUrl)}')"` : '';
   const placeholderHtml = thumbnailUrl ? '' : buildThumbPlaceholderHtml('is-static');
   return `
-    <div class="video-thumb"${thumbnailStyle}>
+    <div class="video-thumb">
       ${placeholderHtml}
       <div class="thumb-shade"></div>
       <span class="duration-badge">
@@ -288,16 +342,239 @@ function buildThumbHtml(video, thumbnailUrl, durationText) {
   `;
 }
 
+/**
+ * 从已经能解码的 <video> 里截一帧当静态封面。
+ * blob URL 与扩展页同源，因此不会污染 canvas（页面侧的跨域视频则可能被污染）。
+ */
+function capturePreviewThumbnail(videoEl, timeoutMs = PREVIEW_THUMBNAIL_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (value) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      videoEl.removeEventListener('loadeddata', onReady);
+      resolve(value);
+    };
+
+    const onReady = () => {
+      try {
+        const width = videoEl.videoWidth;
+        const height = videoEl.videoHeight;
+        if (!width || !height) {
+          finish('');
+          return;
+        }
+
+        const scale = Math.min(1, PREVIEW_THUMBNAIL_MAX_WIDTH / width);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(width * scale));
+        canvas.height = Math.max(1, Math.round(height * scale));
+        const context = canvas.getContext('2d');
+        if (!context) {
+          finish('');
+          return;
+        }
+
+        context.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+        finish(canvas.toDataURL('image/jpeg', PREVIEW_THUMBNAIL_JPEG_QUALITY));
+      } catch (_err) {
+        finish('');
+      }
+    };
+
+    timer = setTimeout(() => finish(''), timeoutMs);
+    if (videoEl.readyState >= 2) {
+      onReady();
+      return;
+    }
+    videoEl.addEventListener('loadeddata', onReady, { once: true });
+  });
+}
+
+/**
+ * 用带临时请求头规则的前缀读取，把媒体变成扩展页同源的 blob。
+ * 返回 `{ objectUrl, mimeType, bytes }`；失败抛错，由调用方回落到占位图标。
+ */
+async function requestPreviewSource(video) {
+  const url = normalizeAssetUrl(video?.url || '');
+  if (!previewUtils.isHttpUrl?.(url)) {
+    throw new Error('不支持的预览地址');
+  }
+
+  let token = '';
+  try {
+    const response = await sendRuntimeMessageAsync({
+      headers: video.requestHeaders || {},
+      type: MSG.INJECT_DOWNLOAD_HEADERS || 'INJECT_DOWNLOAD_HEADERS',
+      url,
+    });
+    token = response?.token || '';
+
+    const fetchResponse = await fetch(url, { credentials: 'include' });
+    if (!fetchResponse.ok && fetchResponse.status !== 206) {
+      throw new Error(`HTTP ${fetchResponse.status}`);
+    }
+
+    const mimeType = previewUtils.resolvePreviewMimeType?.(video, fetchResponse.headers.get('content-type')) || 'video/mp4';
+    const { blob, bytes } = await previewUtils.readPrefixBlob(fetchResponse, {
+      limit: PREVIEW_MAX_BYTES,
+      mimeType,
+    });
+    if (!blob || !bytes) {
+      throw new Error('预览数据为空');
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    previewObjectUrls.add(objectUrl);
+    return { bytes, mimeType, objectUrl };
+  } finally {
+    if (token) {
+      sendRuntimeMessageAsync({
+        token,
+        type: MSG.RELEASE_DOWNLOAD_HEADERS || 'RELEASE_DOWNLOAD_HEADERS',
+      }).catch(() => {});
+    }
+  }
+}
+
+function applyPreviewSource(videoEl, result) {
+  const source = videoEl.querySelector('source');
+  const mimeType = result.mimeType || 'video/mp4';
+  // 声明浏览器不认识的 MIME 会让 <source> 被直接跳过，此时宁可交给浏览器嗅探内容
+  const typeAttr = videoEl.canPlayType?.(mimeType) ? mimeType : '';
+  if (source) {
+    source.setAttribute('src', result.objectUrl);
+    if (typeAttr) {
+      source.setAttribute('type', typeAttr);
+    } else {
+      source.removeAttribute('type');
+    }
+  } else {
+    videoEl.setAttribute('src', result.objectUrl);
+  }
+  videoEl.preload = 'auto';
+  try {
+    videoEl.load();
+  } catch (_err) {
+    // 忽略：加载失败会走 error 分支
+  }
+}
+
+/** 应用补全结果：先换源，再把截到的帧当静态封面（截帧失败也不影响悬停播放） */
+function applyPreviewResult(videoEl, result) {
+  applyPreviewSource(videoEl, result);
+  const thumbEl = videoEl.closest('.video-thumb');
+
+  if (result.thumbnail) {
+    applyThumbBackground(thumbEl, result.thumbnail);
+    thumbEl?.classList.add('has-thumb');
+    return;
+  }
+
+  void capturePreviewThumbnail(videoEl).then((dataUrl) => {
+    if (!dataUrl) {
+      return;
+    }
+    result.thumbnail = dataUrl;
+    applyThumbBackground(thumbEl, dataUrl);
+    thumbEl?.classList.add('has-thumb');
+  });
+}
+
+/**
+ * 直连预览失败后的补全：带请求头拉前缀 → 同源 blob → 截帧当封面 + 悬停时播放。
+ * 同一 URL 只做一次；返回 'ok' / 'failed'（可记负缓存）/ 'skipped'（这次没做，不算失败）。
+ */
+async function materializePreviewForItem(videoEl, video) {
+  const cacheKey = previewUtils.previewCacheKey?.(video) || '';
+  if (!cacheKey) {
+    return 'skipped';
+  }
+
+  const cached = previewMaterializationCache.get(cacheKey);
+  if (cached === null) {
+    return 'failed';
+  }
+  if (cached) {
+    applyPreviewResult(videoEl, cached);
+    return 'ok';
+  }
+
+  try {
+    const result = await requestPreviewSource(video);
+    result.thumbnail = '';
+    previewMaterializationCache.set(cacheKey, result);
+    previewBytesRead += result.bytes || 0;
+    applyPreviewResult(videoEl, result);
+    return 'ok';
+  } catch (err) {
+    console.warn(`[OVD] 预览补全失败: ${err.message}`);
+    previewMaterializationCache.set(cacheKey, null);
+    return 'failed';
+  }
+}
+
+/**
+ * 补全任务排队执行。直接按并发上限「丢弃」超出部分会把后面的条目永久判为失败，
+ * 因此在「开始下一个任务」时才判断并发与总字节预算；预算用尽的排队项返回 'skipped'。
+ */
+function enqueuePreviewMaterialization(videoEl, video) {
+  return new Promise((resolve) => {
+    previewMaterializationQueue.push({ resolve, video, videoEl });
+    drainPreviewMaterializationQueue();
+  });
+}
+
+function drainPreviewMaterializationQueue() {
+  if (previewBytesRead >= PREVIEW_TOTAL_BUDGET_BYTES) {
+    const skipped = previewMaterializationQueue.splice(0);
+    for (const job of skipped) {
+      job.resolve('skipped');
+    }
+  }
+
+  while (previewActiveDownloads < PREVIEW_MAX_CONCURRENT && previewMaterializationQueue.length) {
+    const job = previewMaterializationQueue.shift();
+    previewActiveDownloads += 1;
+    void materializePreviewForItem(job.videoEl, job.video)
+      .then((status) => job.resolve(status))
+      .catch(() => job.resolve('failed'))
+      .finally(() => {
+        previewActiveDownloads -= 1;
+        drainPreviewMaterializationQueue();
+      });
+  }
+}
+
 function wireThumbPreview(item, videoIndex = -1) {
   const videoEl = item.querySelector('.thumb-video');
   if (!videoEl) {
     return;
   }
 
+  const video = currentVideos[videoIndex] || {};
   const thumbEl = videoEl.closest('.video-thumb');
   const durationBadgeEl = thumbEl?.querySelector('.duration-badge');
   const durationTextEl = durationBadgeEl?.querySelector('.duration-text');
+  let failed = false;
+  let materializing = false;
+  let materializeTried = false;
+
+  // mkv / flv 等直链的 MIME 常被浏览器判为「不支持」，声明的 type 会让 <source> 被整条跳过。
+  // 去掉后浏览器会按实际内容嗅探容器，能播的视频不再白屏。
+  const sourceEl = videoEl.querySelector('source');
+  const declaredType = sourceEl?.getAttribute('type') || '';
+  if (declaredType && !videoEl.canPlayType?.(declaredType)) {
+    sourceEl.removeAttribute('type');
+  }
+
   const markFailed = () => {
+    if (failed) {
+      return;
+    }
+    failed = true;
+    thumbEl?.classList.remove('preview-playing');
     thumbEl?.classList.add('preview-failed');
     videoEl.removeAttribute('src');
     videoEl.querySelectorAll('source').forEach((source) => source.removeAttribute('src'));
@@ -306,8 +583,40 @@ function wireThumbPreview(item, videoIndex = -1) {
     } catch (_err) {}
   };
 
-  videoEl.addEventListener('error', markFailed, { once: true });
-  videoEl.querySelector('source')?.addEventListener('error', markFailed, { once: true });
+  const tryMaterialize = () => {
+    if (materializing || failed || materializeTried) {
+      return false;
+    }
+    if (!previewUtils.shouldMaterializePreview?.(video)) {
+      return false;
+    }
+
+    materializeTried = true;
+    materializing = true;
+    void enqueuePreviewMaterialization(videoEl, video).then((status) => {
+      materializing = false;
+      // 'skipped'（超出并发/预算的排队项）只是这次没做，不能判定为失败
+      if (status === 'failed') {
+        markFailed();
+      }
+    }).catch(() => {
+      materializing = false;
+      markFailed();
+    });
+    return true;
+  };
+
+  const handlePreviewError = () => {
+    if (materializing || failed) {
+      return;
+    }
+    if (!tryMaterialize()) {
+      markFailed();
+    }
+  };
+
+  videoEl.addEventListener('error', handlePreviewError);
+  videoEl.querySelector('source')?.addEventListener('error', handlePreviewError);
   videoEl.addEventListener('loadeddata', () => {
     thumbEl?.classList.add('preview-ready');
   }, { once: true });
@@ -345,13 +654,19 @@ function wireThumbPreview(item, videoIndex = -1) {
     if (thumbEl?.classList.contains('preview-failed')) {
       return;
     }
+    // 有静态封面时，这个类决定是否把封面换成正在播放的视频
+    thumbEl?.classList.add('preview-playing');
     const playResult = videoEl.play?.();
     if (playResult?.catch) {
-      playResult.catch(() => markFailed());
+      playResult.catch(() => {
+        thumbEl?.classList.remove('preview-playing');
+        markFailed();
+      });
     }
   };
 
   const pausePreview = () => {
+    thumbEl?.classList.remove('preview-playing');
     if (!videoEl.paused) {
       videoEl.pause();
     }
@@ -1478,7 +1793,9 @@ function createVideoItem(video, index) {
   const title = escapeHtml(video.title || deriveTitleFromUrl(video.url) || t('title_unknownVideo', '未知视频'));
   const isDrm = video.type === 'drm-detected';
   const durationText = formatDuration(video.duration || 0) || '--:--';
-  const thumbnailUrl = normalizeAssetUrl(video.thumbnail || video.cover || video.poster || '');
+  const rawThumbnailUrl = normalizeAssetUrl(video.thumbnail || video.cover || video.poster || '');
+  // 页面来源的封面属于不可信数据：只渲染图片地址或 base64 图片
+  const thumbnailUrl = previewUtils.isSafeThumbnail?.(rawThumbnailUrl) ? rawThumbnailUrl : '';
 
   item.innerHTML = `
     <input type="checkbox" class="video-checkbox" data-index="${index}" ${isDrm ? 'disabled' : ''} ${selectedIndices.has(index) ? 'checked' : ''}>
@@ -1515,6 +1832,8 @@ function createVideoItem(video, index) {
       ${buildNoteHtml(video)}
     </div>
   `;
+
+  applyThumbBackground(item.querySelector('.video-thumb'), thumbnailUrl);
 
   const titleEl = item.querySelector('.video-title');
   titleEl?.addEventListener('click', () => startTitleEdit(titleEl, index));

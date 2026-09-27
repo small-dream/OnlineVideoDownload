@@ -216,3 +216,109 @@ test('restoreAll 保留 frameId', async () => {
   assert.equal(registry.getByUrl(9, 'blob:https://example.com/uuid-c').frameId, 4);
   assert.equal(registry.countForTab(9), 2);
 });
+
+// ---------------------------------------------------------------
+// 缩略图：merge 时保留已捕获封面，frame 内唯一 <video> 的封面共享给兄弟条目
+// ---------------------------------------------------------------
+
+const COVER = 'data:image/jpeg;base64,AAAA';
+
+test('merge 保留已捕获的封面（后到的无封面上报不覆盖）', async () => {
+  const registry = await createRegistry();
+  const url = 'https://example.com/cover.mp4';
+
+  registry.add(1, { url, type: 'direct', frameId: 0, thumbnail: COVER, title: 'demo' });
+  registry.add(1, { url, type: 'direct', frameId: 0, mimeType: 'video/mp4' });
+
+  const video = registry.getByUrl(1, url);
+  assert.equal(video.thumbnail, COVER);
+  assert.equal(video.mimeType, 'video/mp4');
+});
+
+test('frame 内唯一 <video> 的封面补到同 frame 的 m3u8 / blob 条目', async () => {
+  const registry = await createRegistry();
+  const hlsUrl = 'https://example.com/master.m3u8';
+  const blobUrl = 'blob:https://example.com/uuid-thumb';
+
+  // HLS 清单元数据先到，此时还没有封面
+  registry.add(3, { url: hlsUrl, type: 'hls', frameId: 0 });
+  assert.equal(registry.getByUrl(3, hlsUrl).thumbnail, undefined);
+
+  // 页面元素扫描拿到封面上报（thumbnailScope=frame）
+  registry.add(3, { url: hlsUrl, type: 'hls', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  // 另一条 MSE blob 条目后到，也应继承同一个封面
+  registry.add(3, { url: blobUrl, type: 'blob', frameId: 0, requiresTabContext: true });
+
+  assert.equal(registry.getByUrl(3, hlsUrl).thumbnail, COVER);
+  assert.equal(registry.getByUrl(3, blobUrl).thumbnail, COVER);
+});
+
+test('没有 thumbnailScope 的上报不会共享封面', async () => {
+  const registry = await createRegistry();
+  const withCover = 'https://example.com/a.mp4';
+  const withoutCover = 'https://example.com/b.mp4';
+
+  registry.add(4, { url: withCover, type: 'direct', frameId: 0, thumbnail: COVER });
+  registry.add(4, { url: withoutCover, type: 'direct', frameId: 0 });
+
+  assert.equal(registry.getByUrl(4, withCover).thumbnail, COVER);
+  assert.equal(registry.getByUrl(4, withoutCover).thumbnail, undefined);
+});
+
+test('封面共享按 tab + frameId 隔离，且不覆盖条目自带封面', async () => {
+  const registry = await createRegistry();
+  const ownCover = 'https://i.ytimg.com/vi/x/hq.jpg';
+
+  registry.add(5, { url: 'https://example.com/master.m3u8', type: 'hls', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  registry.add(5, { url: 'https://example.com/other.m3u8', type: 'hls', frameId: 2 });
+  registry.add(6, { url: 'https://example.com/tab6.m3u8', type: 'hls', frameId: 0 });
+  registry.add(5, { url: 'https://example.com/meta.m3u8', type: 'hls', frameId: 0, thumbnail: ownCover });
+
+  assert.equal(registry.getByUrl(5, 'https://example.com/other.m3u8').thumbnail, undefined);
+  assert.equal(registry.getByUrl(6, 'https://example.com/tab6.m3u8').thumbnail, undefined);
+  assert.equal(registry.getByUrl(5, 'https://example.com/meta.m3u8').thumbnail, ownCover);
+});
+
+test('audio 条目不会成为或继承共享封面', async () => {
+  const registry = await createRegistry();
+
+  registry.add(8, { url: 'https://example.com/a.mp3', type: 'audio', frameId: 0 });
+  registry.add(8, { url: 'https://example.com/b.mp3', type: 'audio', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  registry.add(8, { url: 'https://example.com/c.mp3', type: 'audio', frameId: 0 });
+
+  assert.equal(registry.getByUrl(8, 'https://example.com/a.mp3').thumbnail, undefined);
+  assert.equal(registry.getByUrl(8, 'https://example.com/c.mp3').thumbnail, undefined);
+});
+
+test('clearFrame 之后同 frame 不再共享旧封面', async () => {
+  const registry = await createRegistry();
+
+  registry.add(9, { url: 'https://example.com/a.mp4', type: 'direct', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  registry.clearFrame(9, 0);
+  registry.add(9, { url: 'https://example.com/b.mp4', type: 'direct', frameId: 0 });
+
+  assert.equal(registry.getByUrl(9, 'https://example.com/b.mp4').thumbnail, undefined);
+});
+
+test('clearTab 同时清空封面缓存', async () => {
+  const registry = await createRegistry();
+
+  registry.add(11, { url: 'https://example.com/a.mp4', type: 'direct', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  registry.clearTab(11);
+
+  registry.add(11, { url: 'https://example.com/c.mp4', type: 'direct', frameId: 0 });
+  assert.equal(registry.getByUrl(11, 'https://example.com/c.mp4').thumbnail, undefined);
+});
+
+test('封面共享会写入 session 镜像', async () => {
+  const { VideoRegistry } = await import('../background/video-registry.js');
+  const snapshots = [];
+  const registry = new VideoRegistry({ scheduleSave: (snapshot) => snapshots.push(snapshot) });
+
+  registry.add(12, { url: 'https://example.com/master.m3u8', type: 'hls', frameId: 0, thumbnail: COVER, thumbnailScope: 'frame' });
+  registry.add(12, { url: 'https://example.com/segment-blob', type: 'blob', frameId: 0 });
+
+  assert.ok(snapshots.length >= 2);
+  const last = snapshots[snapshots.length - 1];
+  assert.equal(last[12].find((v) => v.url === 'https://example.com/segment-blob').thumbnail, COVER);
+});

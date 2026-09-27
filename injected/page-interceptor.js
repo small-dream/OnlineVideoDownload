@@ -126,32 +126,192 @@
       });
   }
 
+  const THUMBNAIL_MAX_WIDTH = 320;
+  const THUMBNAIL_JPEG_QUALITY = 0.72;
+  // 与 lib/page-message-guard.js 的上限保持一致
+  const THUMBNAIL_MAX_LENGTH = 262144;
+  const THUMBNAIL_DATA_URL_PATTERN = /^data:image\/(?:jpeg|jpg|png|webp);base64,/i;
+  // <video> 元素 → 已截取的封面，避免每次重扫都做一次 canvas 编码
+  const videoThumbnailCache = new WeakMap();
+  // <video> 元素 → 已经上报过封面的 src，避免把几十 KB 的 data URL 反复 postMessage
+  const reportedThumbnailCache = new WeakMap();
+  // 页面级封面（og:image 一族）：跨域播放器截不了帧、也没有 poster 时兜底
+  const PAGE_THUMBNAIL_META_SELECTOR = 'meta[property="og:image"], meta[name="twitter:image"], meta[itemprop="thumbnailUrl"]';
+  let cachedPageThumbnail = '';
+
+  /** 页面数据不可信：只接受图片地址或 base64 图片 data URL */
+  function sanitizeThumbnailValue(value) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw || raw.length > THUMBNAIL_MAX_LENGTH) {
+      return '';
+    }
+    if (THUMBNAIL_DATA_URL_PATTERN.test(raw)) {
+      return raw;
+    }
+    return /^(?:https?:\/\/|\/\/)/i.test(raw) ? raw : '';
+  }
+
+  function resolvePosterThumbnail(videoElement) {
+    try {
+      const poster = videoElement?.poster || videoElement?.getAttribute?.('poster') || '';
+      if (!poster) {
+        return '';
+      }
+      return sanitizeThumbnailValue(new URL(poster, location.href).href);
+    } catch (err) {
+      console.warn(`[OVD][PAGE] failed to resolve video poster: ${err.message}`);
+      return '';
+    }
+  }
+
+  /**
+   * 截取当前画面当封面。跨域且未声明 CORS 的媒体会污染 canvas（drawImage/toDataURL 抛错），
+   * 此时返回空串，由 poster 或 Popup 侧的带请求头补全兜底。
+   */
+  function captureFrameThumbnail(videoElement) {
+    try {
+      if (!videoElement || videoElement.tagName !== 'VIDEO' || videoElement.readyState < 2) {
+        return '';
+      }
+
+      const width = videoElement.videoWidth;
+      const height = videoElement.videoHeight;
+      if (!width || !height) {
+        return '';
+      }
+
+      const scale = Math.min(1, THUMBNAIL_MAX_WIDTH / width);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+
+      const context = canvas.getContext('2d');
+      if (!context) {
+        return '';
+      }
+
+      context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+      return sanitizeThumbnailValue(canvas.toDataURL('image/jpeg', THUMBNAIL_JPEG_QUALITY));
+    } catch (err) {
+      console.warn(`[OVD][PAGE] thumbnail frame capture skipped: ${err.message}`);
+      return '';
+    }
+  }
+
+  /**
+   * 缩略图优先取作者提供的 poster（不存在跨域污染），没有 poster 才截当前帧。
+   * 同一元素 + 同一 src 只截一次，避免媒体事件触发的重扫反复编码。
+   */
+  function extractMediaThumbnail(mediaElement, sourceUrl) {
+    if (!mediaElement || mediaElement.tagName !== 'VIDEO') {
+      return '';
+    }
+
+    const poster = resolvePosterThumbnail(mediaElement);
+    if (poster) {
+      return poster;
+    }
+
+    const cacheKey = String(sourceUrl || '');
+    const cached = videoThumbnailCache.get(mediaElement);
+    if (cached && cached.sourceUrl === cacheKey && cached.thumbnail) {
+      return cached.thumbnail;
+    }
+
+    const captured = captureFrameThumbnail(mediaElement);
+    if (captured) {
+      videoThumbnailCache.set(mediaElement, { sourceUrl: cacheKey, thumbnail: captured });
+    }
+    return captured;
+  }
+
+  /**
+   * 页面自报的社交卡片封面。这类图片是作者为「这个页面」准备的，因此只在
+   * 本 frame 只有一个 <video>（封面不会张冠李戴到另一个播放器）时启用。
+   * 没找到时不做负缓存：og:image 可能由页面脚本稍后注入。
+   */
+  function resolvePageThumbnail() {
+    if (cachedPageThumbnail) {
+      return cachedPageThumbnail;
+    }
+
+    try {
+      const meta = document.querySelector(PAGE_THUMBNAIL_META_SELECTOR);
+      const content = meta?.getAttribute?.('content') || '';
+      if (!content) {
+        return '';
+      }
+
+      const resolved = sanitizeThumbnailValue(new URL(content, location.href).href);
+      if (resolved) {
+        cachedPageThumbnail = resolved;
+      }
+      return resolved;
+    } catch (err) {
+      console.warn(`[OVD][PAGE] failed to resolve page thumbnail: ${err.message}`);
+      return '';
+    }
+  }
+
+  /**
+   * 只在首次拿到封面时附带 thumbnail 字段：注册表合并时会保留已捕获的封面，
+   * 后续重扫（媒体事件、MutationObserver）不必再重复传一次 data URL。
+   * 元素级封面（poster / 截帧）优先；单 <video> frame 才退回页面级封面。
+   */
+  function takeThumbnailPayload(mediaElement, sourceUrl, soleVideoElement = false) {
+    const thumbnail = extractMediaThumbnail(mediaElement, sourceUrl)
+      || (soleVideoElement ? resolvePageThumbnail() : '');
+    if (!thumbnail || reportedThumbnailCache.get(mediaElement) === sourceUrl) {
+      return {};
+    }
+
+    reportedThumbnailCache.set(mediaElement, sourceUrl);
+    return soleVideoElement ? { thumbnail, thumbnailScope: 'frame' } : { thumbnail };
+  }
+
   function scanVideoElements() {
     if (isYouTubePage()) {
       return;
     }
 
-    const videos = document.querySelectorAll('video[src], video source[src]');
-    for (const element of videos) {
+    // 本 frame 只有一个 <video> 时，它的封面可以代表该 frame 的其它检测条目：
+    // 典型场景是 hls.js 播放器同时上报 m3u8 与 MSE blob 两条记录，只有一条拿得到画面。
+    const soleVideoElement = document.querySelectorAll('video').length === 1;
+    const mediaElements = document.querySelectorAll('video[src], video source[src]');
+
+    for (const element of mediaElements) {
       const src = element.src || element.getAttribute('src');
-      if (!src || src.startsWith('blob:') || src.startsWith('data:')) {
+      if (!src) {
         continue;
       }
 
+      const videoElement = element.tagName === 'VIDEO' ? element : element.closest('video');
       try {
         const fullUrl = new URL(src, location.href).href;
-        const type = detectVideoType(fullUrl, '');
+        // blob:（MSE 播放流）同样登记：补上封面，也覆盖 createObjectURL 的自建播放器
+        const isBlobSource = /^blob:/i.test(fullUrl);
+        if (!isBlobSource && fullUrl.startsWith('data:')) {
+          continue;
+        }
+
+        const type = isBlobSource ? 'blob' : detectVideoType(fullUrl, '');
         if (!type) {
           continue;
         }
 
-        const videoElement = element.tagName === 'VIDEO' ? element : element.closest('video');
         const duration = (videoElement?.duration && Number.isFinite(videoElement.duration))
           ? Math.round(videoElement.duration)
           : null;
+        const extra = {
+          duration,
+          source: 'video-element',
+          ...takeThumbnailPayload(videoElement, fullUrl, soleVideoElement),
+        };
 
-        reportVideo(fullUrl, type, { duration, source: 'video-element' });
-        fetchMediaElementSize(fullUrl, type, duration, 'video-element');
+        reportVideo(fullUrl, type, extra);
+        if (!isBlobSource) {
+          fetchMediaElementSize(fullUrl, type, duration, 'video-element');
+        }
       } catch (err) {
         console.warn(`[OVD][PAGE] failed to scan video element source: ${err.message}`);
       }
@@ -333,6 +493,7 @@
         if (mimeType && (mimeType.startsWith('video/') || mimeType.startsWith('audio/') || mimeType.includes('mp4'))) {
           setTimeout(() => {
             const mediaElements = document.querySelectorAll('video, audio');
+            const soleVideoElement = document.querySelectorAll('video').length === 1;
             for (const mediaElement of mediaElements) {
               if (mediaElement.src && mediaElement.src.startsWith('blob:')) {
                 if (youtubeParser.rememberBlobUrl(mediaElement.src)) {
@@ -344,6 +505,7 @@
                   title: frameDisplayTitle(),
                   type: 'blob',
                   url: mediaElement.src,
+                  ...takeThumbnailPayload(mediaElement, mediaElement.src, soleVideoElement),
                 });
               }
             }
@@ -401,12 +563,17 @@
   }
 
   window.__OVD_PAGE_INTERCEPTOR__ = {
+    captureFrameThumbnail,
     detectVideoType,
+    extractMediaThumbnail,
     fetchMediaElementSize,
     install,
     isYouTubeMediaUrl,
     reportVideo,
+    resolvePageThumbnail,
+    sanitizeThumbnailValue,
     scanAudioElements,
     scanVideoElements,
+    takeThumbnailPayload,
   };
 })();

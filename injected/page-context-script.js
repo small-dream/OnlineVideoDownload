@@ -160,8 +160,9 @@
       subtree: true,
     });
 
-    // src 由 JS 直接赋值（property）时属性观察可能不触发，补一条媒体事件监听
-    for (const eventName of ['loadstart', 'loadedmetadata']) {
+    // src 由 JS 直接赋值（property）时属性观察可能不触发，补一条媒体事件监听。
+    // loadeddata 之后再扫一次是为了截帧：这时才有可绘制的画面（loadedmetadata 时还没有）。
+    for (const eventName of ['loadstart', 'loadedmetadata', 'loadeddata']) {
       document.addEventListener(eventName, (event) => {
         const tag = event.target?.tagName;
         if (tag === 'VIDEO' || tag === 'AUDIO') {
