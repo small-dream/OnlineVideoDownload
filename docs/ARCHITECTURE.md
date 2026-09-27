@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.39
-> Last Updated: 2026-09-26
+> Version: 1.17.40
+> Last Updated: 2026-09-27
 
 ## Goals
 
@@ -61,6 +61,7 @@ Popup
   lib/bilibili-quality-store.js
   lib/youtube-download-mode-store.js
   lib/youtube-stream-utils.js
+  lib/preview-utils.js
   popup/popup-error-messages.js
   popup/popup.js
 ```
@@ -305,13 +306,14 @@ Responsibilities:
 - 域名黑名单（子域名匹配，blob 条目回退到所属页面域名）、最小时长、最小体积。
 - 阈值过滤只作用于通用嗅探条目，结构化来源（YouTube/Bilibili）永远显示。
 - blob 条目去重：按标题跨 frame 只保留最新一条（`blobDedupeKey`），无标题时退回按 frame 去重。
+- 同页元数据借用（`backfillFrameMetadata`）：hls.js / dash.js 播放器会同时登记 m3u8 / mpd 清单条目（只有 URL）与 MSE blob 条目（`<video>` 元素扫描，能读到画面与真实时长），URL 不同去重去不掉，于是清单条目既没封面也没时长（列表显示 `--:--`）；读取时把页面元素量出的封面（`thumbnailScope: 'frame'`）与时长补到同 tab 缺字段的 hls / dash / direct / blob 条目：只补空缺、不覆盖；优先按标题匹配，全 tab 只有一个不同取值时标题对不上也能借（音频时长不作为视频来源，结构化来源自带的封面不参与）。
 - Expose helpers through `globalThis.__OVD_VIDEO_FILTER__`.
 
 Public surface:
 
 - `shouldFilterVideo(video, settings, context) -> { filtered, reason }`
 - `filterVideos(videos, settings, context)`
-- `collapseDuplicateBlobEntries(videos)` / `blobDedupeKey(video)`
+- `collapseDuplicateBlobEntries(videos)` / `blobDedupeKey(video)` / `backfillFrameMetadata(videos)`
 - `parseDomainList(value)` / `normalizeDomain(input)` / `isBlacklistedHost(host, domains)` / `hostOf(url)`
 
 Notes:
@@ -319,6 +321,29 @@ Notes:
 - 过滤在 `background/service-worker.js#getVisibleVideosForTab` 读取时应用，因此改设置后无需重新检测即可生效，徽章计数与 popup 列表始终一致。
 - 时长/体积未知（0 或缺失）时不过滤，避免误杀。
 - blob 去重同样在 `getVisibleVideosForTab` 读取时应用；标题相同即视为同一播放器的副本（多 iframe / MSE 反复重建），因此不同 frame 的同名 blob 也只会剩一条。
+
+### `lib/preview-utils.js`
+
+Responsibilities:
+
+- Popup 缩略图 / 内联预览补全的纯函数层（不含 DOM 与 chrome API，可直接单测）。
+- 判定哪些条目值得做「带请求头的预览补全」（目前仅 `direct` 且 URL 为 http(s)）。
+- 限长读取响应体：达到上限即取消剩余读取，避免为了列表里的一张封面把整部影片拉进 Popup。
+- MIME 决策：`resolvePreviewMimeType`（响应头 → 检测结果 → `video/mp4`）与 `resolvePreviewSourceType`（HLS 清单必须声明 `application/vnd.apple.mpegurl`，否则浏览器不会去解析）。
+- 渲染安全：`isSafeThumbnail`（只接受图片地址或 base64 图片）与 `escapeCssUrl`（把单引号、双引号、圆括号、反斜杠与换行转成 `%XX`，防止封面地址截断行内样式；注意 `encodeURIComponent` 不转义单引号与圆括号）。
+
+Public surface:
+
+- `shouldMaterializePreview(video, { directPreviewFailed })`
+- `readPrefixBlob(response, { limit, mimeType }) -> { blob, bytes, truncated }`
+- `resolvePreviewMimeType(video, responseMimeType)` / `resolvePreviewSourceType(video)`
+- `isSafeThumbnail(value)` / `escapeCssUrl(value)` / `previewCacheKey(video)` / `isHttpUrl(url)`
+- `DEFAULT_PREVIEW_MAX_BYTES`（2.5MB）/ `normalizePreviewByteLimit(limit)`
+
+Notes:
+
+- 背景：Popup 里用 `<video src=媒体直链>` 取首帧时请求不带页面 Referer/Origin，CDN 常直接 403，条目只剩占位图标。补全流程 = Popup 向 background 申请临时 DNR 请求头规则（复用 `INJECT_DOWNLOAD_HEADERS` / `RELEASE_DOWNLOAD_HEADERS`）→ Popup 自己 fetch（扩展页有 host 权限，不受 CORS 限制）→ 限长读取前缀 → `URL.createObjectURL` 得到扩展页同源的 blob。
+- 同源 blob 既能用 canvas 截一帧当静态封面，也能在鼠标悬停时直接播放，因此一次读取同时解决「没有封面」与「不能动态预览」。
 
 ### `lib/opfs-sink.js`
 
@@ -388,6 +413,8 @@ Responsibilities:
 - `page-bilibili-parser`: own Bilibili page metadata extraction and validation across `__INITIAL_STATE__`, `__playinfo__`, and player APIs. Extracts thumbnail from `videoData.pic`, `videoData.cover`, `initialState.pic`, and DOM `<meta>` / `<img>` elements.
 - `page-interceptor`: own XHR/fetch interception, `MediaSource` / blob detection, DRM detection, history hooks, and generic audio/video element scans.
 - `page-interceptor` 上报通用 / blob 检测时用 `frameDisplayTitle()`：顶层 frame 取 `document.title`，子框架留空（iframe 标题通常是播放器名，如「弹幕播放器」，交由 background 用标签页标题补全）。
+- `page-interceptor` 的通用扫描同时采集封面：`extractMediaThumbnail(mediaElement, src)` 优先取 `poster`，没有 poster 才 `captureFrameThumbnail` 用 canvas 截当前帧（JPEG，宽 ≤320px）。跨域未声明 CORS 的媒体会污染 canvas，`drawImage`/`toDataURL` 抛错时返回空串（`<video>` 元素与 src 组合各缓存一次，避免每次重扫都重新编码）。元素级封面都拿不到、且本 frame 只有一个 `<video>` 时，`resolvePageThumbnail()` 退回页面 `og:image` / `twitter:image` / `itemprop="thumbnailUrl"`，取得的结果按页面缓存（未命中不缓存，允许脚本稍后注入）。
+- `scanVideoElements` 现在也登记 `blob:` 源的 `<video>`（MSE 播放流与 `createObjectURL` 自建播放器），并在「本 frame 只有一个 `<video>`」时给带封面的上报加 `thumbnailScope: 'frame'`，授权 background 把该封面共享给同 frame 的其它条目。`takeThumbnailPayload()` 保证同一元素 + 同一 src 只上报一次 data URL（注册表合并时会保留已捕获的封面）。
 
 Notes:
 
@@ -546,6 +573,11 @@ Responsibilities:
 - 空状态提供「重新检测」按钮：发送 `RESCAN_TAB_VIDEOS`（Popup → SW → content → 页面上下文 `RESCAN_PAGE_VIDEOS`），并按上下文切换提示文案（页面仍在加载 / 视频可能还没加载 / 页面类型不支持检测）。
 - Render source-specific controls per item instead of treating all videos as a generic download row.
 - Video items use a card layout with thumbnail images on the left and metadata/controls on the right.
+- 缩略图分四层：①页面侧采集的封面（`video.thumbnail` / `poster` / `cover`，只渲染通过 `isSafeThumbnail` 的 http(s) 或 base64 图片）；②读取时借到的同页元数据（`lib/video-filter.js#backfillFrameMetadata`：清单条目没有画面也没有时长，借同页 `<video>` 元素量出的封面与时长）；③直链条目的内联 `<video preload="metadata">` 首帧；④直连预览失败后的带请求头补全。
+- 内联预览只对渐进式直链（`direct`）开启：桌面 Chrome 不能原生播放 m3u8，HLS 条目进 `<video>` 只会闪一下再判失败，因此 HLS / DASH 条目只显示静态封面（页面截帧 / 借用封面 / 平台封面）。有封面的直链条目静止时显示封面（行内 `background-image`，经 `escapeCssUrl` 转义），鼠标悬停 / 键盘聚焦时加 `preview-playing` 切换成正在播放的视频；没有封面时 `<video>` 首帧就充当封面。
+- 直连预览失败（CDN 校验 Referer/Origin → 403）时走 `materializePreviewForItem`：`INJECT_DOWNLOAD_HEADERS` 申请临时请求头规则 → Popup fetch（扩展页有 host 权限）→ `readPrefixBlob` 限长读取（`PREVIEW_MAX_BYTES` 2.5MB）→ 同源 blob URL；随后 `applyPreviewResult` 换源并用 `capturePreviewThumbnail` 截一帧当静态封面（截帧失败不影响悬停播放），最后 `RELEASE_DOWNLOAD_HEADERS` 释放规则。
+- 补全有配额且排队执行：同一 URL 只做一次（`previewMaterializationCache`，失败记 `null` 不再重试）、单项 `PREVIEW_MAX_BYTES`（2.5MB）、单次会话累计 `PREVIEW_TOTAL_BUDGET_BYTES`（12MB）、并发 `PREVIEW_MAX_CONCURRENT`（2）。列表里被 CDN 拒绝的条目会同时触发 error 事件，因此补全任务进入 `previewMaterializationQueue` 排队（而非超限即丢弃并把条目永久判为失败）；预算用尽的排队项返回 `skipped`。blob URL 在 Popup 卸载时统一 `revokeObjectURL`。预览失败态用 `.preview-failed:not(.has-thumb)` 限定：有静态封面时失败也保持封面可见，只有本来就没封面的条目才画占位渐变与占位图标。
+- `<source type>` 声明为浏览器不支持的 MIME 时（mkv / flv 等直链）会被整条跳过，此时移除 type 交给浏览器嗅探容器；HLS 清单保留 `application/vnd.apple.mpegurl`，让 Chrome 直接跳过而不去请求播不了的 m3u8。
 - YouTube download mode (录制/解析) is configured in the settings view; only the resolution selector appears inline for parse mode.
 - Lazily request Bilibili quality options from the active tab only when the quality selector is focused or clicked.
 - Persist the last selected Bilibili quality so later downloads default to the same preference.
@@ -573,6 +605,16 @@ Responsibilities:
 - Pass shared execution context such as `filenameBase`, `tabId`, and `hlsFetcher`.
 
 `Downloader` intentionally no longer owns the concrete direct/HLS/DASH/YouTube download implementations.
+
+### Video Registry
+
+File: [background/video-registry.js](D:/github/OnlineVideoDownload/background/video-registry.js)
+
+Responsibilities:
+
+- `Map<tabId, Map<registryKey, VideoInfo>>` 内存注册表，并按去抖写入 `storage.session`（`SessionMirror`），SW 重启后 Popup 仍能看到检测列表。
+- `mergeVideoInfo` 合并同 URL 的多次上报：新值为空时保留旧值（requestHeaders、title、mimeType、filename、`thumbnail` / `poster` / `cover`、fileSize / size / duration）。封面必须一起保留——页面封面是一次性上报的，后续同 URL 的网络拦截上报不带 thumbnail，直接覆盖会让列表里的封面闪一下又变回占位图。
+- Frame 级封面共享：页面在本 frame 只有一个 `<video>` 时，用 `thumbnailScope: 'frame'` 授权把自己的封面共享给同 tab + 同 frameId 的 m3u8 / mpd / 直链 / MSE blob 条目（`_syncFrameThumbnail`，按 `${tabId}:${frameId}` 缓存，`clearTab` / `clearFrame` 时清理）。共享只补空缺，不覆盖条目自带封面；结构化来源（YouTube / Bilibili）与 audio 不参与。
 
 ### Background Strategy Registry
 
@@ -739,6 +781,8 @@ Notes:
 - `lib/message-types.js` now centralizes shared message names and page-context source identifiers across background, content, popup, and injected page runtime.
 - `YOUTUBE_DIRECT_DOWNLOAD` and `YOUTUBE_MEDIA_STREAMS_REQUEST` from content to page now include optional `traceId`.
 - `RESCAN_PAGE_VIDEOS`（content → page）由 `content/message-router.js` 在收到 background 的 `RESCAN_TAB_VIDEOS` 时发出，页面上下文据此重扫 `<video>`/`<audio>` 并重跑 YouTube / Bilibili 解析；无 payload 字段。
+- 检测结果新增可选字段 `thumbnail`（页面采集的封面 URL 或 base64 data URL）与 `thumbnailScope: 'frame'`（仅当页面本 frame 只有一个 `<video>` 时出现在带封面的通用上报上，表示该封面可代表同 frame 的其它条目）。
+- `lib/page-message-guard.js#sanitizeThumbnail` 把 `thumbnail` / `poster` / `cover` 当不可信数据清洗：只保留 http(s) / 协议相对图片地址与 base64 图片、限长 256KB，其余清空（不丢弃整条检测结果）。
 - YouTube stream payloads now include `itag` for combined/video/audio candidates.
 - The injected page runtime may issue an additional Android-style YouTube player request when adaptive video/audio entries exist but usable direct URLs are missing, or when the initial payload only exposes low-quality direct URLs while higher qualities remain inaccessible.
 - The page-context YouTube parser suppresses repeated identical source-hit/debug summaries and records explicit fallback trigger / response / no-improvement logs once per video.
@@ -771,6 +815,7 @@ Notes:
 - Download completion now passes `downloadId` (browser download ID) through the history record so the store can deduplicate entries and the options page can open the download folder.
 - `INJECT_PAGE_SCRIPTS` 字段为 `files`（`injected/*` 与 `lib/message-types.js` 的有序列表）；background 用 `sender.frameId` 定向到发起注入的 frame，CSP 严格站点不再依赖 `<script src>`（DOM 注入保留为回退）。
 - `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
+- `VIDEO_DETECTED` 可选携带封面字段 `thumbnail` / `poster` / `cover`（页面侧采集，进入注册表前由 `lib/page-message-guard.js#sanitizeThumbnail` 清洗：仅 http(s) / 协议相对图片与 base64 图片，≤256KB）；`thumbnailScope: 'frame'` 表示该封面取自「本 frame 唯一的 `<video>`」，background 据此补全同 frame 的 hls / dash / direct / blob 条目。
 
 ### Background -> Content / Popup
 
@@ -929,6 +974,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图」。①页面侧封面采集（`injected/page-interceptor.js`）：新增 `sanitizeThumbnailValue` / `resolvePosterThumbnail` / `captureFrameThumbnail` / `extractMediaThumbnail` / `takeThumbnailPayload`，扫描 `<video>` 时优先取 `poster`、没有 poster 才 canvas 截帧（JPEG，宽 ≤320px），同一元素 + 同一 src 只截/只上报一次，元素级封面都拿不到且本 frame 只有一个 `<video>` 时 `resolvePageThumbnail` 退回页面 `og:image`；`scanVideoElements` 不再跳过 `blob:` 源，并在本 frame 只有一个 `<video>` 时附 `thumbnailScope: 'frame'`；MSE 的 `addSourceBuffer` 上报同样带封面。`page-context-script.js` 的媒体事件补 `loadeddata`（此时才有可绘制画面）。②`background/video-registry.js`：`mergeVideoInfo` 保留 `thumbnail`/`poster`/`cover`；新增 `_syncFrameThumbnail` 把 frame 内唯一 `<video>` 的封面补到同 tab + 同 frameId 的 hls/dash/direct/blob 条目（按 `${tabId}:${frameId}` 缓存，`clearTab`/`clearFrame` 清理，只补空缺、不覆盖自带封面、audio 与结构化来源不参与）。③新增 `lib/preview-utils.js`（纯函数 + 单测）：`shouldMaterializePreview` / `readPrefixBlob`（限长读取、到上限即 `cancel()`）/ `resolvePreviewMimeType` / `resolvePreviewSourceType` / `isSafeThumbnail` / `escapeCssUrl`（`encodeURIComponent` 不转义 `'`、`(`、`)`，改为自算 `%XX`）。④`popup/popup.js`：`canUseInlinePreview(video)` 不再因「有封面」而放弃 `<video>`；有封面时静止显示封面、悬停加 `preview-playing` 切动态画面（`popup.css` 用 `.has-thumb` / `.preview-ready` / `.preview-playing` 控制图层）；直连预览失败后走 `materializePreviewForItem`（`INJECT_DOWNLOAD_HEADERS` → Popup fetch → 2.5MB 前缀 blob → `capturePreviewThumbnail` 截帧 → `RELEASE_DOWNLOAD_HEADERS`），同一 URL 只做一次、单项 2.5MB / 单次会话累计 12MB、请求排队并发 2（超预算的排队项返回 skipped，不判定为失败），blob URL 在 Popup 卸载时统一 revoke；`<source type>` 为浏览器不支持的 MIME 时移除 type 交给嗅探（HLS 清单保留）。⑤`lib/page-message-guard.js` 新增 `sanitizeThumbnail`：`thumbnail`/`poster`/`cover` 只保留 http(s)/协议相对图片与 base64 图片、限长 256KB，其余清空而不是丢弃整条检测结果。⑥后续修正「同页 HLS 条目缩略图 / 时长不正常、列表出现 HLS + Blob 两行却只有一行有图有时长」：`canUseInlinePreview` 只保留 `direct`（桌面 Chrome 不能原生播放 m3u8，HLS 条目进 `<video>` 只会闪一下再落进 `preview-failed`），`popup.css` 把预览失败态限定为 `.preview-failed:not(.has-thumb)`，有封面时保持封面可见；`lib/video-filter.js` 新增 `backfillFrameMetadata`，在 `getVisibleVideosForTab` 读取时把同页 `<video>` 元素量出的封面（`thumbnailScope: "frame"`）与时长借给同 tab 缺字段的 hls / dash / direct / blob 条目（只补空缺、不覆盖、按标题匹配、音频时长不作来源、结构化来源封面不参与），HLS 清单条目的 `--:--` 由此消除。新增用例 28 条（另含 `test/video-filter.test.js`），全量 724 项通过。 |
 | 1.17.39 | 2026-09-26 | 修复「检测列表多行同名 Blob、标题是播放器名、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 由 `frameId + 标题` 改为按标题跨 frame 去重（新增 `blobDedupeKey`：有标题按标题、无标题退回 frame），多 iframe 场景下同一个播放器只留最新一条；②`injected/page-interceptor.js` 新增 `frameDisplayTitle()`，子框架的通用 / blob 检测不再带 iframe 自己的 `document.title`，留空由 `service-worker.js#enrichTitles` 用标签页标题补全（标题与下载文件名都变成视频名）；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），background 按 `sender.frameId > 0` 只清该 frame 的条目；④`popup/popup.js` 抽出 `buildThumbPlaceholderHtml()`，blob / dash 等无封面且无法内联预览的条目、以及内联预览失败的条目改用媒体占位图标，`popup.css` 增加 `.thumb-placeholder` 样式。新增用例 3 条，全量 696 项通过。 |
 | 1.17.38 | 2026-09-26 | 修复「打开 Popup 只见空列表且一直不更新」。①检测结果实时化：`notifyVisibleVideoCount` 在原有 `safeTabMessage` 之外新增 `safeRuntimeMessage`，把带 `tabId` 的 `UPDATE_BUTTON` 广播给 Popup，`popup/popup.js` 按当前 tab 过滤后自动 `loadVideos`。②新增扫描态：打开 Popup 先显示「正在检测页面视频…」（`scanState` + 旋转指示），在检测窗口内每 1.2s 轮询 `GET_VIDEOS_FOR_TAB`（上限 15s，`chrome.tabs.onUpdated` 上报 `complete` 后宽限 8s），窗口结束才回落到空状态；`chrome.tabs.onUpdated` 的 URL 变化（含 SPA）会重开检测窗口。③新增手动重试链路：空状态「重新检测」按钮发送 `RESCAN_TAB_VIDEOS`（Popup → SW `safeTabMessage` 广播全 frame → `content/message-router.js` 经 `postMessageToPage` 转 `RESCAN_PAGE_VIDEOS` → `injected/page-context-script.js` 重扫 `<video>`/`<audio>` 并重跑 YouTube/Bilibili 解析）。④空状态文案按上下文区分（页面仍在加载 / 视频可能未加载 / 页面类型不支持）。`lib/message-types.js` 新增 `RESCAN_TAB_VIDEOS` / `RESCAN_PAGE_VIDEOS`。新增用例 1 条，全量 693 项通过。 |
 | 1.17.37 | 2026-09-26 | `popup/popup.js` 增加现场排查日志：`getYouTubeQualityOptions` 生成的清晰度选项按签名去重后打印 `[OVD] YouTube 清晰度选项 videoId=… hlsManifest=… streams=[Nv/Na/Nc] options=[…]`（含 HLS 清单有无、视/音/直出流条数与最终 option 标签），用于定位现场「自动 / HLS 选项消失、只剩默认最高画质」。纯日志，无行为变更。 |
