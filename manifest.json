@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "109",
   "name": "Online Video Downloader",
-  "version": "1.17.40",
+  "version": "1.19.0",
   "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
   "default_locale": "zh_CN",
   "permissions": [
@@ -52,6 +52,7 @@
         "lib/ovd-logger.js",
         "lib/youtube-download-mode-store.js",
         "lib/youtube-stream-utils.js",
+        "lib/subtitle-utils.js",
         "content/source-handlers.js",
         "content/progress-reporter.js",
         "content/youtube-download-options.js",

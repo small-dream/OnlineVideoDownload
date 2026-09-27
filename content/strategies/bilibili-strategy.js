@@ -159,18 +159,69 @@
     }
 
     /**
+     * 取 Bilibili 字幕轨列表（player/v2）。
+     * 该接口要带页面 Cookie，只能在页面上下文调用，因此和画质一起在这里取；
+     * 真正的字幕取流/转换/保存由 SW 完成（见 background/subtitle-downloader.js）。
+     * @param {Object} meta - 包含 bvid, cid 的视频元信息
+     * @returns {Promise<Array<{isAsr: boolean, languageCode: string, languageName: string, url: string}>>}
+     */
+    async function fetchSubtitleTracks(meta) {
+      if (!meta?.cid || !meta?.bvid) {
+        return [];
+      }
+
+      try {
+        const query = new URLSearchParams({ bvid: meta.bvid, cid: String(meta.cid) });
+        const data = await fetchJsonWithContext(
+          `https://api.bilibili.com/x/player/v2?${query.toString()}`,
+          {
+            credentials: 'include',
+            headers: { Referer: 'https://www.bilibili.com' },
+          },
+          '获取 Bilibili 字幕列表失败'
+        );
+
+        const list = data?.data?.subtitle?.subtitles;
+        if (!Array.isArray(list)) {
+          return [];
+        }
+
+        const tracks = list
+          .filter((item) => item?.subtitle_url)
+          .map((item) => ({
+            isAsr: Number(item.ai_status) === 1 || /^ai[-_]/i.test(String(item.id_str || item.id || '')),
+            languageCode: item.lan || '',
+            languageName: item.lan_doc || item.lan || '',
+            // 接口返回的地址可能是 //aisubtitle.hdslb.com/... 协议相对形式
+            url: String(item.subtitle_url).startsWith('//')
+              ? `https:${item.subtitle_url}`
+              : String(item.subtitle_url),
+          }));
+        console.log(`[OVD] Bilibili 字幕轨 count=${tracks.length} langs=${tracks.map((track) => track.languageCode).join(', ')}`);
+        return tracks;
+      } catch (err) {
+        // 字幕是可选增强：拿不到不影响画质列表与下载
+        console.warn(`[OVD] Bilibili 字幕列表获取失败: ${err.message}`);
+        return [];
+      }
+    }
+
+    /**
      * 获取 Bilibili 视频可用清晰度列表
      * 供 popup 通过 message-router 调用，延迟加载
      * @param {Object} meta - 包含 bvid, cid 的视频元信息
-     * @returns {Object} { qualities: [{id, label}], acceptQuality: number }
+     * @returns {Object} { qualities: [{id, label}], acceptQuality: number, subtitles: [...] }
      */
     async function fetchQualities(meta) {
-      const playData = await fetchPlayData(meta, '127');
+      const [playData, subtitles] = await Promise.all([
+        fetchPlayData(meta, '127'),
+        fetchSubtitleTracks(meta),
+      ]);
 
       const dash = playData?.data?.dash;
       if (!dash || !Array.isArray(dash.video)) {
         console.warn('[OVD] Bilibili playurl 响应不包含 DASH 数据，无法获取清晰度列表');
-        return { qualities: [], acceptQuality: 0 };
+        return { acceptQuality: 0, qualities: [], subtitles };
       }
 
       const videoStreams = dash.video.sort((left, right) => right.id - left.id);
@@ -178,7 +229,76 @@
       const acceptQuality = videoStreams[0]?.id || 0;
 
       console.log(`[OVD] Bilibili 可用清晰度 count=${qualities.length} acceptQuality=${acceptQuality} qualities=${qualities.map((q) => q.label).join(', ')}`);
-      return { acceptQuality, dash, qualities };
+      return { acceptQuality, dash, qualities, subtitles };
+    }
+
+    // 仅音频下载：容器由音轨 MIME 决定（B 站通常为 audio/mp4 → .m4a）
+    function resolveBilibiliAudioContainer(stream) {
+      if (/audio\/webm/i.test(stream?.mimeType || '')) {
+        return { ext: '.webm', mimeType: 'audio/webm' };
+      }
+      if (/audio\/(?:mpeg|l4a|aac)/i.test(stream?.mimeType || '')) {
+        return { ext: '.mp3', mimeType: 'audio/mpeg' };
+      }
+      return { ext: '.m4a', mimeType: 'audio/mp4' };
+    }
+
+    /**
+     * 「仅音频」下载：只取 DASH 音轨，不做音视频合并。
+     * 复用后台抓流通道（仅音频），回传后按音轨 MIME 保存。
+     * @param {string[]} audioUrls - 音频流候选地址（主地址 + 备用 CDN）
+     * @param {string} title - 视频标题
+     * @param {Object} headers - 请求头
+     * @param {Object} stream - 选中的音频流（读取 mimeType 决定容器）
+     */
+    async function downloadBilibiliAudioOnly(audioUrls, title, headers, progressReporter, context = {}, meta = {}, stream = null) {
+      getFloatButton()?.showMessage(t('bili_fetchingAudio', '正在获取 Bilibili 音频数据...'), false, 0);
+      progressReporter?.status(t('bili_fetchingAudio', '正在获取 Bilibili 音频数据...'));
+      progressReporter?.progress(0, { phase: 'fetching' });
+
+      // 只抓音轨：videoUrls 传空数组，后台不会再下载整段视频
+      const { audioBuffer } = await fetchMediaStreamsAndWait(
+        [],
+        audioUrls,
+        headers,
+        'bili-audio',
+        '等待 Bilibili 音频数据回传超时',
+        {
+          sourceId: context.sourceId || 'bilibili',
+          strategyId: context.strategyId || 'page-api',
+          taskKey: context.taskKey || '',
+          title: context.title || meta?.title || title || '',
+          traceId: context.traceId || '',
+          videoUrl: context.videoUrl || meta?.url || '',
+        }
+      );
+
+      if (context?.signal?.aborted) {
+        const aborted = new Error('下载已取消');
+        aborted.code = 'DOWNLOAD_ABORTED';
+        throw aborted;
+      }
+
+      const { ext, mimeType } = resolveBilibiliAudioContainer(stream);
+      const filename = videoUtils.buildMediaFilename?.({
+        ext,
+        fallback: 'bilibili_audio',
+        title,
+        type: 'audio',
+      }) || `bilibili_audio${ext}`;
+
+      const blob = new Blob([audioBuffer], { type: mimeType });
+      const saveResult = await saveBlobViaBrowserDownload(blob, filename, context, meta);
+      getFloatButton()?.showProgress(100);
+      getFloatButton()?.showMessage(t('download_doneShort', '下载完成: $1', [filename]));
+      progressReporter?.progress(100, { phase: 'complete' });
+      console.log(`[OVD] Bilibili 音频下载完成 filename=${filename} size=${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+      return {
+        ...saveResult,
+        filename,
+        ok: true,
+        size: blob.size,
+      };
     }
 
     /**
@@ -316,18 +436,33 @@
         const requiredHeaders = { Referer: 'https://www.bilibili.com' };
 
         if (data.dash) {
-          const videoStreams = data.dash.video.sort((left, right) => right.id - left.id);
-          const audioStreams = data.dash.audio.sort((left, right) => right.id - left.id);
+          const videoStreams = Array.isArray(data.dash.video)
+            ? data.dash.video.slice().sort((left, right) => right.id - left.id)
+            : [];
+          const audioStreams = Array.isArray(data.dash.audio)
+            ? data.dash.audio.slice().sort((left, right) => right.id - left.id)
+            : [];
 
-          const selectedVideo = qualityUtils.pickBilibiliVideoStream?.(videoStreams, qualityId) || videoStreams[0];
           const selectedAudio = qualityUtils.pickBilibiliAudioStream?.(audioStreams) || audioStreams[0];
 
           // B 站会同时返回主地址与备用 CDN 地址（backupUrl）。主地址常是 PCDN 边缘节点，
           // 部分网络下不可达；把备用地址一起交给后台按顺序回退，避免「主地址失败即整体失败」。
-          const videoUrls = qualityUtils.listBilibiliStreamUrls?.(selectedVideo)
-            || [selectedVideo?.baseUrl || selectedVideo?.base_url].filter(Boolean);
           const audioUrls = qualityUtils.listBilibiliStreamUrls?.(selectedAudio)
             || [selectedAudio?.baseUrl || selectedAudio?.base_url].filter(Boolean);
+
+          // 仅音频：只下载音轨（无需视频流，也不再合并）
+          if (meta?.downloadOptions?.audioOnly) {
+            if (audioUrls.length === 0) {
+              throw new Error('无法获取音频流地址');
+            }
+            const audioQualityLabel = qualityUtils.BILIBILI_QUALITY_LABELS?.[selectedAudio?.id] || `${selectedAudio?.id}K`;
+            console.log(`[OVD] Bilibili 仅音频模式：选中音频流 id=${selectedAudio?.id} (${audioQualityLabel})`);
+            return downloadBilibiliAudioOnly(audioUrls, meta.title, requiredHeaders, progressReporter, context, meta, selectedAudio);
+          }
+
+          const selectedVideo = qualityUtils.pickBilibiliVideoStream?.(videoStreams, qualityId) || videoStreams[0];
+          const videoUrls = qualityUtils.listBilibiliStreamUrls?.(selectedVideo)
+            || [selectedVideo?.baseUrl || selectedVideo?.base_url].filter(Boolean);
 
           if (videoUrls.length === 0 || audioUrls.length === 0) {
             throw new Error('无法获取音视频流地址');

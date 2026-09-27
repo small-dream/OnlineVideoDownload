@@ -13,8 +13,13 @@ export function extFromUrl(url) {
   }
 }
 
-export async function submitDirectDownload({ url, filenameNoExt, headers, type }) {
-  const ext = extFromUrl(url) || (type === 'audio' ? '.mp3' : '.mp4');
+/**
+ * @param {Object} options
+ * @param {string} [options.ext] 显式扩展名覆盖（如仅音频下载要按音轨 MIME 存成 .m4a/.webm，
+ *   而 googlevideo 直链路径本身没有扩展名，靠 URL/类型推断会得到 .mp3）
+ */
+export async function submitDirectDownload({ url, filenameNoExt, headers, type, ext: explicitExt = '' }) {
+  const ext = explicitExt || extFromUrl(url) || (type === 'audio' ? '.mp3' : '.mp4');
   const filename = filenameNoExt.endsWith(ext) ? filenameNoExt : filenameNoExt + ext;
   console.log(`[OVD] direct download${type === 'audio' ? ' (audio)' : ''} filename="${filename}" url=${url} browser=${browserInfo.name}`);
 

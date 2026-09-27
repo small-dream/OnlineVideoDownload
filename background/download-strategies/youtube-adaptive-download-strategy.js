@@ -66,6 +66,24 @@ function buildMergeFilename(meta, videoStream) {
   });
 }
 
+// 仅音频下载：容器由音轨 MIME 决定（audio/mp4 → .m4a，audio/webm → .webm）
+function resolveAudioContainer(stream) {
+  if (/audio\/webm/i.test(stream?.mimeType || '')) {
+    return { ext: '.webm', mimeType: 'audio/webm' };
+  }
+  return { ext: '.m4a', mimeType: 'audio/mp4' };
+}
+
+function buildAudioFilename(meta, stream) {
+  const { ext } = resolveAudioContainer(stream);
+  return videoUtils.buildMediaFilename({
+    ext,
+    fallback: 'youtube_audio',
+    title: meta?.title || 'youtube_audio',
+    type: 'audio',
+  });
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -274,6 +292,15 @@ async function fetchAdaptiveMediaBuffer(stream, label, headers, onProgress = nul
 }
 
 function selectTarget(meta, downloadOptions) {
+  // 「仅音频」优先：只要有可用音轨就下音轨，不再取视频/合并
+  if (downloadOptions.audioOnly) {
+    const audioOnlyStream = streamUtils.pickBestAudioStream?.(meta) || null;
+    if (!audioOnlyStream) {
+      throw new Error('未找到可下载的 YouTube 音频流');
+    }
+    return { kind: 'audio', stream: audioOnlyStream };
+  }
+
   const exactCombinedTarget = downloadOptions.preferCombined && downloadOptions.resolution !== 'auto'
     ? streamUtils.pickCombinedStream?.(meta, {
       ...downloadOptions,
@@ -595,15 +622,71 @@ async function mergeAdaptiveStreams(meta, target, context) {
   }
 }
 
+/**
+ * 「仅音频」下载：只取音轨，不做音视频合并。
+ * 直链被服务器标注为媒体类型时交给下载管理器（可续传、省内存）；
+ * MIME 不可信（text/plain / 探测失败）时自己取回并用正确 MIME 保存，避免存成 .txt。
+ */
+async function downloadAudioOnlyInBackground(meta, stream, context) {
+  const headers = meta?.requestHeaders || {};
+  const { ext, mimeType } = resolveAudioContainer(stream);
+  const filename = buildAudioFilename(meta, stream);
+  const filenameNoExt = filename.slice(0, filename.length - ext.length);
+
+  const probe = await probeDirectStream(stream.url, headers);
+  if (decideCombinedDownloadRoute(probe) === 'download-manager') {
+    return submitDirectDownload({
+      ext,
+      filenameNoExt,
+      headers,
+      type: 'audio',
+      url: stream.url,
+    });
+  }
+
+  const corsOrigin = chrome?.runtime?.getURL ? chrome.runtime.getURL('').replace(/\/$/, '') : '';
+  let cleanupRules = null;
+  try {
+    cleanupRules = await injectHeaders(stream.url, headers, { corsOrigin });
+    const buffer = await fetchAdaptiveMediaBuffer(stream, 'audio', headers, (label, loaded, total) => {
+      if (Number(total) > 0) {
+        context.onTaskProgress?.(Math.min(96, Math.round((loaded / total) * 96)), {
+          phase: 'fetching',
+          status: 'running',
+        });
+      }
+    });
+
+    const blob = new Blob([buffer], { type: mimeType });
+    const saved = await submitBlobDownloadFromOffscreen(blob, filename, mimeType, context.taskMeta || {});
+    if (!saved?.ok) {
+      throw new Error(saved?.error || '保存音频文件失败');
+    }
+    context.onTaskProgress?.(100, { phase: 'complete', status: 'running' });
+    return saved;
+  } finally {
+    await cleanupRules?.().catch(() => {});
+  }
+}
+
 export function createYouTubeAdaptiveDownloadStrategy() {
   return {
     id: 'youtube-adaptive-background',
     supports(videoInfo) {
-      return videoInfo?.type === 'youtube-adaptive' && videoInfo?.downloadOptions?.mode === 'parse';
+      if (videoInfo?.type !== 'youtube-adaptive') {
+        return false;
+      }
+      // 仅音频与「解析下载」都在后台完成；录制模式（capture）仍交给页面侧
+      return videoInfo?.downloadOptions?.audioOnly === true
+        || videoInfo?.downloadOptions?.mode === 'parse';
     },
     async download(videoInfo, context) {
       const downloadOptions = videoInfo?.downloadOptions || {};
       const target = selectTarget(videoInfo, downloadOptions);
+
+      if (target.kind === 'audio') {
+        return downloadAudioOnlyInBackground(videoInfo, target.stream, context);
+      }
 
       if (target.kind === 'combined') {
         const headers = videoInfo?.requestHeaders || {};

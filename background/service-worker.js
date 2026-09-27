@@ -14,6 +14,7 @@ import { resolveClearVideoScope } from './clear-video-scope.js';
 import { DownloadQueue } from './download-queue.js';
 import { resolveSaveAs } from './save-location.js';
 import { releaseOpfsDownload } from './offscreen-download.js';
+import { downloadSubtitle } from './subtitle-downloader.js';
 import { takeOpfsTempFile } from './opfs-temp-registry.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
@@ -580,6 +581,24 @@ async function handleMessage(msg, sender) {
 
     case MSG.DOWNLOAD_BLOB_DATA || 'DOWNLOAD_BLOB_DATA':
       return downloadBlobData(msg, tabId, frameId);
+
+    case MSG.DOWNLOAD_SUBTITLE || 'DOWNLOAD_SUBTITLE': {
+      const subtitleResult = await downloadSubtitle(msg.track || {}, {
+        sourceId: msg.sourceId || '',
+        title: msg.title || '',
+        videoUrl: msg.videoUrl || '',
+      });
+      // 登记到下载状态表：侧车字幕与媒体文件一样出现在任务列表 / 完成通知里
+      downloadStore.registerDownload(subtitleResult.downloadId, {
+        requiresTabContext: false,
+        sourceId: msg.sourceId || 'generic',
+        strategyId: 'subtitle',
+        tabId,
+        title: subtitleResult.filename,
+        videoUrl: msg.videoUrl || '',
+      });
+      return subtitleResult;
+    }
 
     case MSG.INJECT_PAGE_SCRIPTS || 'INJECT_PAGE_SCRIPTS': {
       // 页面注入优先走 chrome.scripting.executeScript({ world: 'MAIN' })，
@@ -1483,7 +1502,8 @@ async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferI
   let audioTotal = 0;
   let lastBroadcastPercent = 0;
 
-  if (videoCandidates.length === 0 || audioCandidates.length === 0) {
+  // 允许只抓单侧（仅音频下载 / 仅视频）：至少要有地址
+  if (videoCandidates.length === 0 && audioCandidates.length === 0) {
     throw new Error('缺少视音频流地址');
   }
 
@@ -1558,8 +1578,12 @@ async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferI
     }
 
     const [videoBuffer, audioBuffer] = await Promise.all([
-      fetchMediaStreamWithFallback(videoCandidates, 'video', headers, onStreamProgress),
-      fetchMediaStreamWithFallback(audioCandidates, 'audio', headers, onStreamProgress),
+      videoCandidates.length > 0
+        ? fetchMediaStreamWithFallback(videoCandidates, 'video', headers, onStreamProgress)
+        : Promise.resolve(null),
+      audioCandidates.length > 0
+        ? fetchMediaStreamWithFallback(audioCandidates, 'audio', headers, onStreamProgress)
+        : Promise.resolve(null),
     ]);
 
     // 回传是本地 IPC（不是网络），256KB + 逐条 await 会让大文件被 IPC 往返拖住：
@@ -1570,6 +1594,9 @@ async function fetchMediaStreams(videoUrls, audioUrls, headers, tabId, transferI
     await sendTabMessageAsync(tabId, { type: MSG.MEDIA_STREAM_START || 'MEDIA_STREAM_START', transferId }, frameOptions);
 
     for (const [label, buffer] of [['video', videoBuffer], ['audio', audioBuffer]]) {
+      if (!buffer) {
+        continue;
+      }
       const bytes = new Uint8Array(buffer);
       let seq = 0;
       let inFlight = [];

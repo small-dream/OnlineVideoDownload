@@ -81,3 +81,26 @@ test('isBrokenTextStubDownload 识别小体积文本响应（MIME 命中）', ()
   );
   assert.equal(utils.isBrokenTextStubDownload(null), false);
 });
+
+test('isBrokenTextStubDownload 不误判字幕侧车文件', () => {
+  const utils = loadUtils();
+
+  // 字幕本来就是小体积文本：文件名带字幕扩展名时永远不算"错误页残片"
+  assert.equal(
+    utils.isBrokenTextStubDownload({ filename: 'My Video.zh-Hans.srt', fileSize: 4096, mime: 'text/plain' }),
+    false
+  );
+  assert.equal(
+    utils.isBrokenTextStubDownload({ filename: 'My Video.en.auto.srt', fileSize: 2048, mime: 'application/octet-stream' }),
+    false
+  );
+  assert.equal(
+    utils.isBrokenTextStubDownload({ filename: 'My Video.en.vtt', fileSize: 1024, mime: 'text/vtt' }),
+    false
+  );
+  // 但文本 MIME 的正常视频文件仍然会被识别为残片
+  assert.equal(
+    utils.isBrokenTextStubDownload({ filename: 'My Video.mp4', fileSize: 2048, mime: 'text/plain' }),
+    true
+  );
+});

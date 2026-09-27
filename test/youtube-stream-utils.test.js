@@ -551,3 +551,99 @@ test('listAvailableVideoQualities sorts descending by height', () => {
   });
   assert.deepEqual(result.map((q) => q.height), [1080, 720, 360]);
 });
+
+// ---------------------------------------------------------------
+// isAudioStream / pickBestAudioStream（仅音频下载）
+// ---------------------------------------------------------------
+
+test('isAudioStream 接受带 URL 的 audio/* 流', () => {
+  const mod = loadModule();
+  assert.equal(mod.isAudioStream({ mimeType: 'audio/mp4', url: 'https://e.com/a' }), true);
+  assert.equal(mod.isAudioStream({ mimeType: 'audio/webm', url: 'https://e.com/a' }), true);
+});
+
+test('isAudioStream 拒绝空 URL 与非音频流', () => {
+  const mod = loadModule();
+  assert.equal(mod.isAudioStream({ mimeType: 'audio/mp4', url: '' }), false);
+  assert.equal(mod.isAudioStream({ mimeType: 'video/mp4', url: 'https://e.com/v' }), false);
+});
+
+test('pickBestAudioStream 优先原声轨', () => {
+  const mod = loadModule();
+  const picked = mod.pickBestAudioStream({
+    audioStreams: [
+      { audioTrackName: 'English (US)', bitrate: 160000, mimeType: 'audio/mp4', url: 'https://e.com/dub' },
+      { audioTrackIsDefault: true, bitrate: 128000, mimeType: 'audio/mp4', url: 'https://e.com/orig' },
+    ],
+  });
+  assert.equal(picked.url, 'https://e.com/orig');
+});
+
+test('pickBestAudioStream 同容器取最高码率', () => {
+  const mod = loadModule();
+  const picked = mod.pickBestAudioStream({
+    audioStreams: [
+      { bitrate: 128000, mimeType: 'audio/mp4', url: 'https://e.com/aac128' },
+      { bitrate: 256000, mimeType: 'audio/mp4', url: 'https://e.com/aac256' },
+    ],
+  });
+  assert.equal(picked.url, 'https://e.com/aac256');
+});
+
+test('pickBestAudioStream 优先 MP4 容器，无 MP4 时退回 WebM', () => {
+  const mod = loadModule();
+  const withMp4 = mod.pickBestAudioStream({
+    audioStreams: [
+      { bitrate: 160000, mimeType: 'audio/webm', url: 'https://e.com/opus' },
+      { bitrate: 128000, mimeType: 'audio/mp4', url: 'https://e.com/aac' },
+    ],
+  });
+  assert.equal(withMp4.url, 'https://e.com/aac');
+
+  const webmOnly = mod.pickBestAudioStream({
+    audioStreams: [{ bitrate: 160000, mimeType: 'audio/webm', url: 'https://e.com/opus' }],
+  });
+  assert.equal(webmOnly.url, 'https://e.com/opus');
+});
+
+test('pickBestAudioStream 跳过无 URL 的加密音轨', () => {
+  const mod = loadModule();
+  const picked = mod.pickBestAudioStream({
+    audioStreams: [
+      { bitrate: 300000, mimeType: 'audio/mp4', signatureCipher: 'cipher' },
+      { bitrate: 128000, mimeType: 'audio/mp4', url: 'https://e.com/aac' },
+    ],
+  });
+  assert.equal(picked.url, 'https://e.com/aac');
+});
+
+test('pickBestAudioStream 无可用音轨返回 null', () => {
+  const mod = loadModule();
+  assert.equal(mod.pickBestAudioStream({}), null);
+  assert.equal(mod.pickBestAudioStream({ audioStreams: [] }), null);
+});
+
+test('estimateYouTubeDownloadSize audioOnly 只计音轨体积', () => {
+  const mod = loadModule();
+  const result = mod.estimateYouTubeDownloadSize(
+    {
+      combined: [],
+      duration: 100,
+      audioStreams: [{ bitrate: 128000, contentLength: 1600000, mimeType: 'audio/mp4', url: 'https://e.com/a' }],
+      videoStreams: [{ bitrate: 4000000, contentLength: 50000000, height: 1080, mimeType: 'video/mp4', url: 'https://e.com/v' }],
+    },
+    { audioOnly: true },
+  );
+  assert.equal(result.kind, 'audio');
+  assert.equal(result.bytes, 1600000);
+});
+
+test('estimateYouTubeDownloadSize audioOnly 无音轨时返回空', () => {
+  const mod = loadModule();
+  const result = mod.estimateYouTubeDownloadSize(
+    { combined: [], videoStreams: [{ height: 1080, mimeType: 'video/mp4', url: 'https://e.com/v' }] },
+    { audioOnly: true },
+  );
+  assert.equal(result.kind, null);
+  assert.equal(result.bytes, 0);
+});

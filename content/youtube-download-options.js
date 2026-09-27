@@ -8,10 +8,13 @@
   const modeStore = globalThis.__OVD_YOUTUBE_DOWNLOAD_MODE_STORE__ || {};
 
   const DEFAULT_OPTIONS = {
+    audioOnly: false,
     fallbackToLowerQuality: true,
     mode: 'capture',
     preferCombined: true,
     resolution: 'auto',
+    subtitleLang: '',
+    subtitles: false,
   };
 
   function normalizeYouTubeDownloadOptions(videoInfo = {}) {
