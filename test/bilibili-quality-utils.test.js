@@ -243,3 +243,35 @@ test('buildBilibiliSelectionSnapshot includes selected size fields', () => {
   assert.equal(snapshot.selectedSizeKind, 'dash');
   assert.equal(snapshot.selectedSizeBytes, 207000000);
 });
+
+// ---------------------------------------------------------------
+// 仅音频下载：体积估算只计音轨
+// ---------------------------------------------------------------
+
+test('estimateBilibiliDownloadSize audioOnly 只计算音轨体积', () => {
+  const mod = loadModule();
+  const result = mod.estimateBilibiliDownloadSize(
+    {
+      audio: [{ id: 30280, contentLength: 7000000, baseUrl: 'https://example.com/a.m4s' }],
+      video: [
+        { id: 64, contentLength: 120000000, baseUrl: 'https://example.com/v64.m4s' },
+        { id: 80, contentLength: 200000000, baseUrl: 'https://example.com/v80.m4s' },
+      ],
+    },
+    { audioOnly: true, qualityId: 80 },
+  );
+
+  assert.equal(result.kind, 'audio');
+  assert.equal(result.bytes, 7000000);
+});
+
+test('estimateBilibiliDownloadSize audioOnly 无音轨时返回空', () => {
+  const mod = loadModule();
+  const result = mod.estimateBilibiliDownloadSize(
+    { audio: [], video: [{ id: 80, contentLength: 200000000, baseUrl: 'https://example.com/v80.m4s' }] },
+    { audioOnly: true },
+  );
+
+  assert.equal(result.kind, null);
+  assert.equal(result.bytes, 0);
+});

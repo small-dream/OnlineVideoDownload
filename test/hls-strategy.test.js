@@ -216,6 +216,8 @@ function loadRealPipeline() {
 const MASTER_WITH_AUDIO = [
   '#EXTM3U',
   '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="主音轨",DEFAULT=YES,URI="audio.m3u8"',
+  '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="English",LANGUAGE="en",URI="subs/en.vtt"',
+  '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="中文",LANGUAGE="zh-Hans",URI="subs/zh.vtt"',
   '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360,AUDIO="aud"',
   'low.m3u8',
   '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="aud"',
@@ -302,8 +304,14 @@ test('fetchQualities 返回 Master Playlist 的全部变体，单码率流返回
     assert.ok(master.qualities[1].url.endsWith('high.m3u8'));
     assert.match(master.qualities[1].detail, /1280x720/);
 
+    // 独立字幕轨：语言/名称/绝对地址一起给 popup，下载时由 SW 取回转 SRT
+    assert.deepEqual(master.subtitles, [
+      { isAsr: false, languageCode: 'en', languageName: 'English', url: 'https://cdn.example.com/subs/en.vtt' },
+      { isAsr: false, languageCode: 'zh-Hans', languageName: '中文', url: 'https://cdn.example.com/subs/zh.vtt' },
+    ]);
+
     const single = await handler.fetchQualities('https://cdn.example.com/single.m3u8', {});
-    assert.deepEqual(single, { isMaster: false, qualities: [] });
+    assert.deepEqual(single, { isMaster: false, qualities: [], subtitles: [] });
   } finally {
     stub.restore();
     delete globalThis.__OVD_HLS_PIPELINE__;

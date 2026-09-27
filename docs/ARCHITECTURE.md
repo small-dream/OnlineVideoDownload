@@ -1,6 +1,6 @@
 # Online Video Downloader Architecture
 
-> Version: 1.17.40
+> Version: 1.19.0
 > Last Updated: 2026-09-27
 
 ## Goals
@@ -29,6 +29,7 @@ Content Script
   lib/settings-store.js
   lib/youtube-download-mode-store.js
   lib/youtube-stream-utils.js
+  lib/subtitle-utils.js
   lib/progress-scale.js
   lib/ui-dom-utils.js
   lib/wbi-signer.js
@@ -47,6 +48,7 @@ Content Script
 Service Worker
   background/service-worker.js
   background/downloader.js
+  background/subtitle-downloader.js
   background/hls-fetcher.js
   background/download-strategy-registry.js
   background/download-strategies/*
@@ -61,6 +63,7 @@ Popup
   lib/bilibili-quality-store.js
   lib/youtube-download-mode-store.js
   lib/youtube-stream-utils.js
+  lib/subtitle-utils.js
   lib/preview-utils.js
   popup/popup-error-messages.js
   popup/popup.js
@@ -176,6 +179,7 @@ Responsibilities:
 - Normalize Bilibili quality labels for popup rendering and logs.
 - List unique available DASH video quality options from `data.dash.video`.
 - Pick the requested Bilibili video stream and fall back safely when a preferred quality is unavailable.
+- `estimateBilibiliDownloadSize` / `buildBilibiliSelectionSnapshot` 接受 `options.audioOnly`：只估算音轨体积（`kind: 'audio'`），供「仅音频」条目的体积显示。
 
 Public surface:
 
@@ -242,6 +246,7 @@ Responsibilities:
 - Normalize YouTube `combined`, `videoStreams`, and `audioStreams`.
 - List available quality options for the popup UI.
 - Pick the most appropriate combined/adaptive stream pair for parse downloads.
+- Pick the best audio-only track for「仅音频」downloads (`pickBestAudioStream`: original track → MP4 container → highest bitrate, falling back to WebM/Opus).
 - Build debug snapshots when stream selection fails.
 
 Public surface:
@@ -251,7 +256,28 @@ Public surface:
 - `pickCombinedStream(meta, options)`
 - `pickAdaptiveVideoStream(meta, options)`
 - `pickAdaptiveAudioStream(meta)`
+- `isAudioStream(stream)`
+- `pickBestAudioStream(meta)`
 - `buildYouTubeSelectionSnapshot(meta, options)`
+
+### `lib/subtitle-utils.js`
+
+Responsibilities:
+
+- 把各来源字幕统一成 cue 列表并输出 `.srt`：解析 WebVTT、YouTube `json3` / `srv3` / `srv1` XML、Bilibili 字幕 JSON、SRT；`format: 'auto'` 时按内容自动识别格式。
+- 归一化轨道列表：兼容 YouTube `captionTracks` 与 Bilibili `player/v2` 两种形状，统一为 `{ id, isAsr, languageCode, languageName, url }`。
+- 选择要下载的轨道（偏好语言精确匹配 → 主语言前缀匹配 → 人工中文 → 人工英文 → 任意人工 → 首条），并生成侧车文件名 `<媒体标题>.<语言>[.auto].srt`（非法字符清洗 + 长度截断）。
+- 构造取流尝试序列：YouTube 按 `fmt=json3 → vtt → srv3` 逐个重试，其它来源单次请求并自动识别；`youTubeCaptionUrlWithFormat` 用字符串替换而非 URL API，避免 `URLSearchParams` 重新编码 `sparams` 里的逗号破坏签名。
+- Expose helpers through `globalThis.__OVD_SUBTITLE_UTILS__`.
+
+Public surface:
+
+- `parseSubtitleText(text, options)` → cue 列表（`options.format` 为 `'auto'` 时自动识别）
+- `cuesToSrt(cues)` / `formatSrtTimestamp(seconds)`
+- `normalizeSubtitleTracks(raw, options)` / `selectSubtitleTrack(tracks, preferredLanguage)`
+- `buildSubtitleFilename(baseName, track, ext)` / `subtitleMimeTypeForExtension(ext)`
+- `buildSubtitleFetchAttempts(url, format)`（YouTube 多 `fmt` 重试、其它来源单次）
+- `isYouTubeCaptionUrl(url)` / `youTubeCaptionUrlWithFormat(url, format)`
 
 ### `lib/mpd-parser.js`
 
@@ -477,7 +503,10 @@ Responsibilities:
 - `youtube-parse-download-strategy`: select YouTube streams by requested mode/resolution and mux adaptive tracks in-page.
 - `bilibili-strategy`: call Bilibili APIs, sign WBI requests, fetch available qualities on demand, fetch DASH streams, relay merge progress, mux in-page, and save merged blob via browser download API with in-page blob fallback.
 - `generic-strategy`: delegate background-driven downloads.
+- `bilibili-strategy`（仅音频）：`downloadOptions.audioOnly` 为真时只取 DASH 音轨（`pickBilibiliAudioStream`），经 `FETCH_MEDIA_STREAMS` 单侧抓取后按音轨 MIME 保存为 `.m4a`/`.webm`/`.mp3`，不下载视频流、不合并。
+- `bilibili-strategy`（字幕）：`fetchQualities` 在请求清晰度的同时并行调 `player/v2` 取字幕轨（需要页面 Cookie），把 `//` 协议相对地址补成 https 后随画质列表返回 `subtitles`；接口失败只降级为空列表，不影响清晰度与媒体下载。
 - `hls-strategy`: handle `HLS_DOWNLOAD_DELEGATE` in content using the shared HLS pipeline; page requests carry site cookies and page origin so CDN bot protection (Cloudflare WAF etc.) does not see an extension-context fetch.
+- `hls-strategy`（字幕）：`fetchQualities` 解析 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES` 独立字幕轨，返回 `subtitles`（无字幕轨时为 `[]`），供 Popup 作为可下载的「字幕」选项。
 - `dash-strategy`: handle `DASH_DOWNLOAD_DELEGATE` in content; parse MPD manifest, fetch video and audio segments, and merge them using BilibiliMuxer into a single MP4.
 
 Additional content helpers:
@@ -511,6 +540,7 @@ Responsibilities:
 - `fetchMediaStreamsAndWait(videoUrls, audioUrls, headers, transferPrefix, timeoutMessage, taskMeta)` 的第 6 个参数为任务身份（`sourceId`/`strategyId`/`taskKey`/`title`/`traceId`/`videoUrl`，经 `normalizeTaskMeta` 过滤，不含 `videoInfo`），随 `FETCH_MEDIA_STREAMS` 交给 background，使抓取阶段进度能落到同一任务上。
 - 媒体流分片按 `seq` 落位而非 `push`：后台回传已改为**有界流水线**（`MEDIA_STREAM_PIPELINE_DEPTH`），到达顺序不再保证。
 - `finishMediaStreamTransfer` 会校验分片连续性（`compactOrderedChunks`），出现空洞抛 `MEDIA_STREAM_CHUNK_MISSING`，绝不产出缺片/错序文件。
+- 「仅音频」下载复用同一通道：`fetchMediaStreamsAndWait([], audioUrls, ...)` 只请求音频侧，background 会跳过空的视频侧（见 `FETCH_MEDIA_STREAMS`）。
 
 Owned state:
 
@@ -581,6 +611,7 @@ Responsibilities:
 - YouTube download mode (录制/解析) is configured in the settings view; only the resolution selector appears inline for parse mode.
 - Lazily request Bilibili quality options from the active tab only when the quality selector is focused or clicked.
 - Persist the last selected Bilibili quality so later downloads default to the same preference.
+- 字幕控件：条目存在字幕轨时渲染「字幕」开关 + 语言下拉（默认「自动（推荐）」），`resolveSubtitleTrack` 按偏好挑轨，`triggerSubtitleDownload` 以 `DOWNLOAD_SUBTITLE` 与媒体下载并行发出（失败只提示）；YouTube 字幕轨来自检测结果，Bilibili / HLS 来自画质响应。
 - Reflect background broadcast progress for HLS, YouTube, and Bilibili workflows in a unified popup progress bar.
 - Own the visible video list, per-item progress, global progress, and source workflow status messages.
 - Support batch download: multi-select checkboxes, select-all toggle, and concurrent download dispatch.
@@ -605,6 +636,17 @@ Responsibilities:
 - Pass shared execution context such as `filenameBase`, `tabId`, and `hlsFetcher`.
 
 `Downloader` intentionally no longer owns the concrete direct/HLS/DASH/YouTube download implementations.
+
+### Subtitle Downloader
+
+File: [background/subtitle-downloader.js](D:/github/OnlineVideoDownload/background/subtitle-downloader.js)
+
+Responsibilities:
+
+- 在 Service Worker 内取回一条字幕轨并统一转成 `.srt` 侧车文件：页面只负责提供轨道地址（YouTube 来自检测阶段的 `captionTracks`，Bilibili 来自需要页面 Cookie 的 `player/v2`，HLS 来自 Master Playlist），取流/转换/保存都在后台完成，既绕开页面 CORS 限制，也不受用户切走标签页影响。
+- `fetchSubtitleCues(track)` 用 `lib/subtitle-utils.js#buildSubtitleFetchAttempts` 的尝试序列取流：YouTube 按 `fmt=json3 → vtt → srv3` 逐个重试（HTTP 报错或空内容换下一种），其它来源单次请求 + 自动识别格式；响应体积上限 `MAX_SUBTITLE_BYTES`（8 MB）。
+- `downloadSubtitle(track, options)` 转 SRT 后经 `submitBlobDownloadFromOffscreen` 保存（与媒体同源文件名），返回 `{ ok, filename, downloadId, cues, format, size }`。
+- 由 `background/service-worker.js` 的 `DOWNLOAD_SUBTITLE` 分支调用，并以 `strategyId: 'subtitle'` 登记到下载任务表，因此侧车字幕与媒体文件一样出现在任务列表 / 完成通知里。
 
 ### Video Registry
 
@@ -633,6 +675,7 @@ Responsibilities:
 - Match `videoInfo` to the correct background execution path.
 - Keep each download implementation local to the strategy that owns it.
 - Reuse `submitDirectDownload()` for direct video, audio files, DASH fallback, and YouTube adaptive downloads where possible.
+- YouTube 「仅音频」（`downloadOptions.audioOnly`）由 `youtube-adaptive-download-strategy` 处理（无论 capture/parse 模式：`supports()` 对 `audioOnly` 一律为真，由 `lib/video-source-utils.js#getExecutionMode` 路由到后台）：`selectTarget` 走 `pickBestAudioStream`，`downloadAudioOnlyInBackground` 先探测直链 MIME，可信则交给下载管理器、否则自取回按音轨 MIME 保存。`submitDirectDownload` 新增显式 `ext` 覆盖（googlevideo 路径无扩展名时按音轨容器命名，不再落到 `.mp3`）。
 - `hls-download-strategy` 先尝试把 HLS 下载委托给 content（页面上下文），委托失败或无 tab 上下文时再调用 `HlsFetcher`；委托期间通过 `injectHeaders` 注册 DNR 规则，并把 CORS 响应头回显为页面来源（`access-control-allow-credentials: true`），使带 Cookie 的跨域响应能被浏览器接受。
 
 ### HLS Fetcher
@@ -784,6 +827,7 @@ Notes:
 - 检测结果新增可选字段 `thumbnail`（页面采集的封面 URL 或 base64 data URL）与 `thumbnailScope: 'frame'`（仅当页面本 frame 只有一个 `<video>` 时出现在带封面的通用上报上，表示该封面可代表同 frame 的其它条目）。
 - `lib/page-message-guard.js#sanitizeThumbnail` 把 `thumbnail` / `poster` / `cover` 当不可信数据清洗：只保留 http(s) / 协议相对图片地址与 base64 图片、限长 256KB，其余清空（不丢弃整条检测结果）。
 - YouTube stream payloads now include `itag` for combined/video/audio candidates.
+- YouTube 检测结果新增可选 `captionTracks`（`baseUrl` / `isAsr` / `languageCode` / `languageName`），来自 player response 的 `captions.playerCaptionsTrackListRenderer`；`background/video-registry.js#mergeVideoInfo` 保护该字段不被后续网络拦截上报（不带字幕轨）清空。Bilibili 的字幕轨不走这条消息，而是随 Popup 的 `BILIBILI_FETCH_QUALITIES` 一起返回。
 - The injected page runtime may issue an additional Android-style YouTube player request when adaptive video/audio entries exist but usable direct URLs are missing, or when the initial payload only exposes low-quality direct URLs while higher qualities remain inaccessible.
 - The page-context YouTube parser suppresses repeated identical source-hit/debug summaries and records explicit fallback trigger / response / no-improvement logs once per video.
 - The YouTube parse strategy uses stream `contentLength` when available to estimate adaptive fetch size and fail fast on oversized in-browser merge jobs.
@@ -795,6 +839,7 @@ Examples:
 
 - `VIDEO_DETECTED`
 - `DOWNLOAD_VIDEO`
+- `DOWNLOAD_SUBTITLE`
 - `DOWNLOAD_BLOB_DATA`
 - `FETCH_MEDIA_STREAMS`
 - `SET_TAB_MUTED`
@@ -811,11 +856,13 @@ Notes:
 
 - Source-download lifecycle payloads now include both `traceId` and `taskKey` so popup UI can keep the correct item in a pending/completed state across async content-side workflows.
 - `FETCH_MEDIA_STREAMS` 增加可选 `taskMeta`（内容侧任务身份：`sourceId`/`strategyId`/`taskKey`/`title`/`traceId`/`videoUrl`），background 据此把抓取阶段进度写进同一个任务，而不是只做广播。缺 `taskMeta` 的旧消息仍可工作（只广播、不更新任务表）。
+- `FETCH_MEDIA_STREAMS` 允许**只抓单侧**（`videoUrls` 或 `audioUrls` 之一为空数组，例如「仅音频」下载只传音频）；只有两侧都为空时才报错，抓取进度按实际存在的一侧计算。
 - `BILIBILI_STREAM_PROGRESS` 改由 background 发起（抓取阶段进度），见下方 Background -> Content / Popup；内容侧不再自行转发合并进度（合并阶段走 `SOURCE_DOWNLOAD_PROGRESS`，background 已能更新任务并广播）。background 保留对内容侧同名消息的透传分支以兼容旧版内容脚本。
 - Download completion now passes `downloadId` (browser download ID) through the history record so the store can deduplicate entries and the options page can open the download folder.
 - `INJECT_PAGE_SCRIPTS` 字段为 `files`（`injected/*` 与 `lib/message-types.js` 的有序列表）；background 用 `sender.frameId` 定向到发起注入的 frame，CSP 严格站点不再依赖 `<script src>`（DOM 注入保留为回退）。
 - `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
 - `VIDEO_DETECTED` 可选携带封面字段 `thumbnail` / `poster` / `cover`（页面侧采集，进入注册表前由 `lib/page-message-guard.js#sanitizeThumbnail` 清洗：仅 http(s) / 协议相对图片与 base64 图片，≤256KB）；`thumbnailScope: 'frame'` 表示该封面取自「本 frame 唯一的 `<video>`」，background 据此补全同 frame 的 hls / dash / direct / blob 条目。
+- `DOWNLOAD_SUBTITLE` 由 Popup 发出，字段为 `track`（`{ url, languageCode, languageName, isAsr, format }`）/ `sourceId` / `title` / `videoUrl`；background 的 `subtitle-downloader` 取流、转 `.srt` 并保存，返回 `{ ok, filename, downloadId, cues, format, size }`。它与媒体下载**并行**发出且为最佳努力：失败只提示，不回滚媒体文件。
 
 ### Background -> Content / Popup
 
@@ -859,6 +906,7 @@ Notes:
 - The popup requests Bilibili quality options lazily from the content runtime using the current video's `bvid` and `cid`.
 - The content router delegates that request to `bilibili-strategy.fetchQualities()` so popup UI does not need to duplicate Bilibili API logic.
 - HLS 画质同理：popup 用 `{ m3u8Url, headers }` 请求 `HLS_FETCH_QUALITIES`，content 复用 `hlsDelegateHandler.fetchQualities()`（内部 `parseHlsMasterPlaylist`）返回 `{ isMaster, qualities: [{ url, label, detail, bandwidth, height }] }`；选中项以 `downloadOptions.variantUrl`（精确变体 URL）随下载请求回传。
+- 两处画质响应都带上 `subtitles` 数组（Bilibili 来自 `player/v2`，HLS 来自 `EXT-X-MEDIA TYPE=SUBTITLES`；无字幕轨时为 `[]`），Popup 据此渲染条目的「字幕」开关与语言下拉。
 
 ### Background -> Content (媒体流回传)
 
@@ -904,16 +952,17 @@ Manifest content-script order is now:
 17. `lib/ovd-logger.js`
 18. `lib/youtube-download-mode-store.js`
 19. `lib/youtube-stream-utils.js`
-20. `content/source-handlers.js`
-21. `content/progress-reporter.js`
-22. `content/youtube-download-options.js`
-23. `content/youtube-download-errors.js`
-24. `content/strategies/*` (includes `dash-strategy.js`)
-25. `content/stream-transfer-manager.js`
-26. `content/download-coordinator.js`
-27. `content/float-button.js`
-28. `content/message-router.js`
-29. `content/content-main.js`
+20. `lib/subtitle-utils.js`
+21. `content/source-handlers.js`
+22. `content/progress-reporter.js`
+23. `content/youtube-download-options.js`
+24. `content/youtube-download-errors.js`
+25. `content/strategies/*` (includes `dash-strategy.js`)
+26. `content/stream-transfer-manager.js`
+27. `content/download-coordinator.js`
+28. `content/float-button.js`
+29. `content/message-router.js`
+30. `content/content-main.js`
 
 This order is required because content modules communicate through `globalThis` factories.
 
@@ -974,6 +1023,8 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.19.0 | 2026-09-27 | Subtitle sidecar download (VDH parity). Popup gains a 「字幕」 toggle plus language dropdown on YouTube, Bilibili and HLS items (default 「自动（推荐）」: preferred language → manual zh → manual en → any manual → first track; persisted in `youtubeDownloadPrefs.subtitles`/`subtitleLang` and `bilibiliQualityPrefs.subtitles`/`subtitleLang`). New `lib/subtitle-utils.js` parses WebVTT / YouTube `json3` / `srv3`·`srv1` XML / Bilibili JSON / SRT into cues (`parseSubtitleText` auto-detects when `format:'auto'`), emits SRT (`cuesToSrt`), normalizes tracks from both YouTube `captionTracks` and Bilibili `player/v2` shapes, picks a track (`selectSubtitleTrack`), builds `<title>.<lang>[.auto].srt` names, and builds YouTube fetch attempts (`fmt=json3 → vtt → srv3`; the `fmt` swap uses string replace so signed `sparams` commas survive). New `background/subtitle-downloader.js` fetches (`fetchSubtitleCues`, 8MB cap), converts and saves via offscreen (`downloadSubtitle`); `background/service-worker.js` adds the `DOWNLOAD_SUBTITLE` branch and registers the task with `strategyId:'subtitle'`. Track URLs come from the page: `injected/page-youtube-parser.js` reports YouTube `captionTracks` (`mergeVideoInfo` keeps later network hits from clearing them), `content/strategies/bilibili-strategy.js#fetchSubtitleTracks` fetches the page-cookie `player/v2` subtitle list alongside qualities, and `content/strategies/hls-strategy.js#fetchQualities` exposes Master Playlist `EXT-X-MEDIA TYPE=SUBTITLES` tracks; all three surfaces return `subtitles`. Popup fires the subtitle download in parallel with the media download (best-effort: a failure only toasts and never rolls back the media file). `lib/download-artifact-utils.js#isBrokenTextStubDownload` now allows subtitle extensions so small `.srt` files are not misread as error-page stubs. 26 new test cases, 770 total passing. |
+| 1.18.0 | 2026-09-27 | Audio-only download (VDH parity). Popup gains a 「仅音频」 toggle on YouTube and Bilibili items (persisted in `youtubeDownloadPrefs.audioOnly` / `bilibiliQualityPrefs.audioOnly`; the clarity dropdown is disabled while it is on). YouTube: `lib/youtube-stream-utils.js` adds `isAudioStream` and `pickBestAudioStream` (original track → MP4 container → highest bitrate, WebM/Opus fallback) and `estimateYouTubeDownloadSize` returns `kind:'audio'` when `options.audioOnly`; `lib/video-source-utils.js#getExecutionMode` routes YouTube audio-only to the background in both capture and parse modes; `background/download-strategies/youtube-adaptive-download-strategy.js` gains `resolveAudioContainer`/`buildAudioFilename`/`downloadAudioOnlyInBackground` and `supports()` now also matches `audioOnly`; `submitDirectDownload` accepts an explicit `ext` override so extension-less googlevideo URLs are saved as `.m4a`/`.webm` instead of `.mp3`. Bilibili: `content/strategies/bilibili-strategy.js` adds `downloadBilibiliAudioOnly` and a `resolveBilibiliAudioContainer` helper, saving the DASH audio track as `.m4a`/`.webm`/`.mp3` without muxing. `background/service-worker.js#fetchMediaStreams` now accepts a single-sided request (empty `videoUrls` or `audioUrls`), so audio-only reuses the existing progress/retry/backup-CDN fetch pipeline. `lib/bilibili-quality-utils.js#estimateBilibiliDownloadSize` honours `options.audioOnly`. 14 new test cases, 738 total passing. |
 | 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图」。①页面侧封面采集（`injected/page-interceptor.js`）：新增 `sanitizeThumbnailValue` / `resolvePosterThumbnail` / `captureFrameThumbnail` / `extractMediaThumbnail` / `takeThumbnailPayload`，扫描 `<video>` 时优先取 `poster`、没有 poster 才 canvas 截帧（JPEG，宽 ≤320px），同一元素 + 同一 src 只截/只上报一次，元素级封面都拿不到且本 frame 只有一个 `<video>` 时 `resolvePageThumbnail` 退回页面 `og:image`；`scanVideoElements` 不再跳过 `blob:` 源，并在本 frame 只有一个 `<video>` 时附 `thumbnailScope: 'frame'`；MSE 的 `addSourceBuffer` 上报同样带封面。`page-context-script.js` 的媒体事件补 `loadeddata`（此时才有可绘制画面）。②`background/video-registry.js`：`mergeVideoInfo` 保留 `thumbnail`/`poster`/`cover`；新增 `_syncFrameThumbnail` 把 frame 内唯一 `<video>` 的封面补到同 tab + 同 frameId 的 hls/dash/direct/blob 条目（按 `${tabId}:${frameId}` 缓存，`clearTab`/`clearFrame` 清理，只补空缺、不覆盖自带封面、audio 与结构化来源不参与）。③新增 `lib/preview-utils.js`（纯函数 + 单测）：`shouldMaterializePreview` / `readPrefixBlob`（限长读取、到上限即 `cancel()`）/ `resolvePreviewMimeType` / `resolvePreviewSourceType` / `isSafeThumbnail` / `escapeCssUrl`（`encodeURIComponent` 不转义 `'`、`(`、`)`，改为自算 `%XX`）。④`popup/popup.js`：`canUseInlinePreview(video)` 不再因「有封面」而放弃 `<video>`；有封面时静止显示封面、悬停加 `preview-playing` 切动态画面（`popup.css` 用 `.has-thumb` / `.preview-ready` / `.preview-playing` 控制图层）；直连预览失败后走 `materializePreviewForItem`（`INJECT_DOWNLOAD_HEADERS` → Popup fetch → 2.5MB 前缀 blob → `capturePreviewThumbnail` 截帧 → `RELEASE_DOWNLOAD_HEADERS`），同一 URL 只做一次、单项 2.5MB / 单次会话累计 12MB、请求排队并发 2（超预算的排队项返回 skipped，不判定为失败），blob URL 在 Popup 卸载时统一 revoke；`<source type>` 为浏览器不支持的 MIME 时移除 type 交给嗅探（HLS 清单保留）。⑤`lib/page-message-guard.js` 新增 `sanitizeThumbnail`：`thumbnail`/`poster`/`cover` 只保留 http(s)/协议相对图片与 base64 图片、限长 256KB，其余清空而不是丢弃整条检测结果。⑥后续修正「同页 HLS 条目缩略图 / 时长不正常、列表出现 HLS + Blob 两行却只有一行有图有时长」：`canUseInlinePreview` 只保留 `direct`（桌面 Chrome 不能原生播放 m3u8，HLS 条目进 `<video>` 只会闪一下再落进 `preview-failed`），`popup.css` 把预览失败态限定为 `.preview-failed:not(.has-thumb)`，有封面时保持封面可见；`lib/video-filter.js` 新增 `backfillFrameMetadata`，在 `getVisibleVideosForTab` 读取时把同页 `<video>` 元素量出的封面（`thumbnailScope: "frame"`）与时长借给同 tab 缺字段的 hls / dash / direct / blob 条目（只补空缺、不覆盖、按标题匹配、音频时长不作来源、结构化来源封面不参与），HLS 清单条目的 `--:--` 由此消除。新增用例 28 条（另含 `test/video-filter.test.js`），全量 724 项通过。 |
 | 1.17.39 | 2026-09-26 | 修复「检测列表多行同名 Blob、标题是播放器名、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 由 `frameId + 标题` 改为按标题跨 frame 去重（新增 `blobDedupeKey`：有标题按标题、无标题退回 frame），多 iframe 场景下同一个播放器只留最新一条；②`injected/page-interceptor.js` 新增 `frameDisplayTitle()`，子框架的通用 / blob 检测不再带 iframe 自己的 `document.title`，留空由 `service-worker.js#enrichTitles` 用标签页标题补全（标题与下载文件名都变成视频名）；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），background 按 `sender.frameId > 0` 只清该 frame 的条目；④`popup/popup.js` 抽出 `buildThumbPlaceholderHtml()`，blob / dash 等无封面且无法内联预览的条目、以及内联预览失败的条目改用媒体占位图标，`popup.css` 增加 `.thumb-placeholder` 样式。新增用例 3 条，全量 696 项通过。 |
 | 1.17.38 | 2026-09-26 | 修复「打开 Popup 只见空列表且一直不更新」。①检测结果实时化：`notifyVisibleVideoCount` 在原有 `safeTabMessage` 之外新增 `safeRuntimeMessage`，把带 `tabId` 的 `UPDATE_BUTTON` 广播给 Popup，`popup/popup.js` 按当前 tab 过滤后自动 `loadVideos`。②新增扫描态：打开 Popup 先显示「正在检测页面视频…」（`scanState` + 旋转指示），在检测窗口内每 1.2s 轮询 `GET_VIDEOS_FOR_TAB`（上限 15s，`chrome.tabs.onUpdated` 上报 `complete` 后宽限 8s），窗口结束才回落到空状态；`chrome.tabs.onUpdated` 的 URL 变化（含 SPA）会重开检测窗口。③新增手动重试链路：空状态「重新检测」按钮发送 `RESCAN_TAB_VIDEOS`（Popup → SW `safeTabMessage` 广播全 frame → `content/message-router.js` 经 `postMessageToPage` 转 `RESCAN_PAGE_VIDEOS` → `injected/page-context-script.js` 重扫 `<video>`/`<audio>` 并重跑 YouTube/Bilibili 解析）。④空状态文案按上下文区分（页面仍在加载 / 视频可能未加载 / 页面类型不支持）。`lib/message-types.js` 新增 `RESCAN_TAB_VIDEOS` / `RESCAN_PAGE_VIDEOS`。新增用例 1 条，全量 693 项通过。 |

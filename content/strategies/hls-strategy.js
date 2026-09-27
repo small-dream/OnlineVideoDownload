@@ -338,7 +338,7 @@
       const master = hlsPipeline.parseHlsMasterPlaylist?.(text, m3u8Url) || null;
 
       if (!master?.isMaster) {
-        return { isMaster: false, qualities: [] };
+        return { isMaster: false, qualities: [], subtitles: [] };
       }
 
       return {
@@ -350,6 +350,16 @@
           label: variant.label,
           url: variant.url,
         })),
+        // 独立字幕轨（EXT-X-MEDIA TYPE=SUBTITLES）：地址已在解析时解析成绝对 URL，
+        // 交给 popup 展示可选语言，下载时由 SW 取回并转成 .srt 侧车文件
+        subtitles: (master.media || [])
+          .filter((item) => item.type === 'SUBTITLES' && item.uri)
+          .map((item) => ({
+            isAsr: false,
+            languageCode: item.language || '',
+            languageName: item.name || item.language || '',
+            url: item.uri,
+          })),
       };
     }
 

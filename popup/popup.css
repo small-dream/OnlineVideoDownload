@@ -424,6 +424,49 @@ body {
   gap: 5px;
 }
 
+/* 「仅音频」开关：与画质下拉同一行 */
+.control-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  color: #3b3e46;
+  font-size: 12px;
+  background: #f7f7f8;
+  border: 2px solid #d4d5d8;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.control-toggle:has(input:checked) {
+  color: #158bd0;
+  background: #eaf5fc;
+  border-color: #158bd0;
+}
+
+.control-toggle input[type='checkbox'] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.control-toggle-text {
+  white-space: nowrap;
+}
+
+/* 字幕开关 / 语言下拉：没有可用字幕轨（或未勾选）时整体隐藏。
+   父容器是 display: contents，hidden 属性会被这里的 display: inline-flex 覆盖，
+   所以必须显式补一条 display: none。 */
+.control-toggle[hidden],
+.control-group[hidden] {
+  display: none;
+}
+
+.subtitle-lang-select {
+  width: 118px;
+}
+
 .control-label {
   display: none;
 }

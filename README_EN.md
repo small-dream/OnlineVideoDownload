@@ -25,6 +25,8 @@
 - 🔔 **Completion Notifications** — System notifications on download completion/failure; click a notification to open its folder
 - ⬇️ **One-Click Download** — Save videos with a single click, dead simple
 - 🔀 **In-Browser Merging** — YouTube 1080p+ and Bilibili DASH audio/video streams are merged in the browser — **no ffmpeg or local tools required**
+- 🎵 **Audio-Only Download** — Save just the audio track (M4A, falling back to WebM) from YouTube / Bilibili items without the video — great for music
+- 📝 **Subtitle Download** — Save YouTube / Bilibili / HLS subtitles as `.srt` sidecar files (same name as the video, so players match them automatically); auto-generated tracks are tagged `.auto`
 - 🌐 **Broad Compatibility** — Specialized support for YouTube and Bilibili, plus HLS / DASH / MP4 / Blob videos from any website
 - 🔒 **Privacy First** — All processing happens locally, no data is ever sent to third-party servers
 - 🛡️ **DRM Respect** — Encrypted content is flagged but never bypassed
@@ -76,6 +78,8 @@ Or download and extract the ZIP.
 - Open a YouTube video → click the extension icon → choose resolution → download
 - Supports **Capture mode** (grab browser-loaded streams) and **Parse mode** (fetch stream info independently)
 - In Parse mode you can select resolution: 1080p, 720p, 480p, etc.
+- Tick **Audio only** to save just the original audio track (`.m4a`, or `.webm` when no MP4 track exists) — available in both Capture and Parse modes
+- Videos with captions expose a **Subtitle** toggle and language dropdown (auto-picks manual Chinese first); the result is a `.srt` file named after the video
 
 ### Bilibili downloads
 
@@ -83,6 +87,8 @@ Or download and extract the ZIP.
 - Open a Bilibili video → click the extension icon → choose quality → download
 - **Auto-selects highest available quality**, or manually choose a specific quality
 - Your quality preference is saved for future downloads
+- Tick **Audio only** to save just the DASH audio track (`.m4a`) without the video and without merging
+- Videos with captions can save a `.srt` sidecar (Bilibili subtitles require login; auto-generated tracks are tagged `.auto`)
 - Premium content requires a premium account
 
 ### HLS streams / .m3u8 videos
@@ -91,6 +97,7 @@ Or download and extract the ZIP.
 - Segments are merged in the browser into a single `.ts` file
 - Multi-bitrate masters expose a **quality dropdown** (pick any variant; defaults to the highest)
 - Supports automatic decryption of **AES-128 encrypted streams** (including key rotation), `EXT-X-BYTERANGE` segments, and `EXT-X-MEDIA` separate audio tracks (muxed into the video)
+- When the master playlist carries subtitle renditions (`EXT-X-MEDIA TYPE=SUBTITLES`), tick **Subtitle** to convert the WebVTT into a `.srt` saved alongside the video
 - Live playlists without `ENDLIST` warn that only the current playback window is saved, instead of silently writing a truncated file
 - Streams over 1.5 GB abort with a clear message instead of risking an out-of-memory merge
 - Shows segment progress during download: `Downloaded 45/120 segments`

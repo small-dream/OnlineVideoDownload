@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.17.40
+> **版本**：1.19.0
 > **最后更新**：2026-09-27
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -39,6 +39,20 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 - YouTube、Bilibili、blob 主要走 content / page 侧能力。
 - 直链、部分 DASH 主要走 background。
 - HLS 优先在 content（页面上下文）抓取：请求继承页面 Origin / Sec-Fetch / Referer / Cookie，规避 CDN 对扩展后台裸请求的 403 拦截；content 不可用或失败时回退到 service worker 抓取。
+
+「仅音频」下载：
+
+- YouTube（`youtube-adaptive`）与 Bilibili（`bilibili-meta`）条目可勾选「仅音频」，只保存音轨、不下载视频画面，也不做音视频合并。
+- 容器按音轨 MIME 决定：`audio/mp4` → `.m4a`、`audio/webm` → `.webm`、`audio/mpeg` → `.mp3`；YouTube 优先 MP4/AAC（兼容性最好），无 MP4 音轨时退回 WebM/Opus。
+- YouTube 的仅音频在 Service Worker 内完成（音轨直链带 Range 并行抓取），因此在「录制」与「解析下载」两种模式下都可用；Bilibili 的仅音频在页面上下文完成（需要页面 Cookie 调 WBI 签名的 playurl）。
+- 勾选状态作为偏好记住（YouTube 存 `youtubeDownloadPrefs.audioOnly`、Bilibili 存 `bilibiliQualityPrefs.audioOnly`），下次下载沿用。
+
+「字幕」下载（侧车文件）：
+
+- YouTube（`youtube-adaptive`）、Bilibili（`bilibili-meta`）与 HLS 条目在检测到字幕轨时显示「字幕」开关与语言下拉；语言默认「自动（推荐）」，按「人工中文 → 人工英文 → 任意人工 → 首条」挑选。
+- 统一输出 `.srt`：文件名与媒体同源 `<媒体标题>.<语言>.srt`，自动生成（ASR）字幕额外标注 `.auto`（如 `My Video.en.auto.srt`），播放器可直接按同名匹配。
+- 轨道地址由页面侧提供：YouTube 在检测阶段随 player response 上报 `captionTracks`；Bilibili 的 `player/v2` 需要页面 Cookie，随画质请求一起取回；HLS 读 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES`。取流、格式转换（YouTube json3/srv3/vtt、Bilibili JSON、WebVTT → SRT）与保存都在 Service Worker 完成，不受用户切走标签页影响。
+- 字幕与媒体并行下载且为最佳努力：字幕失败只提示，不回滚媒体文件；勾选状态记入来源偏好（YouTube `youtubeDownloadPrefs.subtitles` / Bilibili `bilibiliQualityPrefs.subtitles`；HLS 逐条选择）。
 
 ---
 
@@ -112,6 +126,7 @@ UI 要求：
 - 合并分片后触发单文件下载
 - 运行时优先委托 content（页面上下文）抓取，携带页面 Cookie 与来源信息；content 无响应或失败时自动回退到 service worker 抓取
 - 携带 Cookie 的跨域请求若被目标站 CORS 拒绝，自动退化为默认凭证模式重试
+- Master Playlist 的独立字幕轨（`EXT-X-MEDIA TYPE=SUBTITLES`，WebVTT）在条目内作为「字幕」可选项列出，下载时转成 `.srt` 侧车文件
 - HLS 解析、解密、URL 处理逻辑必须复用统一的共享 pipeline
 
 ### 4.3 DASH 下载
@@ -144,6 +159,8 @@ UI 要求：
 - 下载过程中可临时静音当前标签页，完成后恢复
 - 录制与页面内抓流都属于 content / page 侧能力，不应混入 background 大型条件分支
 - 默认行为仍保持录制模式，避免影响现有页面内下载链路
+- 条目支持「仅音频」：只抓取原声轨并直接保存为 `.m4a`（无 MP4 音轨时退回 WebM/Opus），不再下载视频流；该模式在录制/解析两种模式下都走后台直链路径
+- 条目支持「字幕」：检测阶段从 player response 的 `captionTracks` 取字幕轨列表（语言 + 是否自动生成），下载时由后台按 `fmt=json3 → vtt → srv3` 逐个取回并转成 `.srt` 侧车文件
 
 ### 4.5 Bilibili 下载
 
@@ -154,6 +171,8 @@ UI 要求：
 - 视音频合计超过浏览器内合并上限（默认 2 GB）时不直接失败，改为保存 `<名称>-video.mp4` 与 `<名称>-audio.mp4` 两个文件并提示需要本地工具合并
 - FLV / MP4 直链可退化为 background 直链下载
 - 合并后的文件优先通过浏览器下载 API 保存，若保存失败则降级为页面内 blob 触发下载
+- 条目支持「仅音频」：只抓取 DASH 音轨（`FETCH_MEDIA_STREAMS` 单侧抓取，不再下载视频流）并保存为 `.m4a`，不触发音视频合并
+- 条目支持「字幕」：画质请求同时调 `player/v2` 取字幕轨（接口要页面 Cookie），下载时由后台取回 `subtitle_url` 的 JSON 并转成 `.srt` 侧车文件；拿不到字幕不影响画质列表与媒体下载
 
 ### 4.6 Blob 下载
 
@@ -250,6 +269,7 @@ UI 要求：
 - 浏览器内合并仍有 2 GB 上限：后台 HLS 走了 OPFS 流式落盘（上限改为磁盘空间，默认 8 GB），但 DASH / Bilibili 以及内容侧 HLS 合并仍需整体持有数据；超过上限时降级为分离文件而不是失败
 - OPFS 临时文件约占用与文件等量的磁盘空间，下载结束/中断后由 service worker 删除；异常退出遗留的临时文件在下次启动时清理（保留 6 小时内的文件）
 - 域名黑名单在读取检测列表时生效，不会阻止仍在页面内发起的请求
+- 字幕只输出 `.srt`（不保留 VTT 样式与 karaoke 标记）；upstream 若对字幕接口做额外校验（如 YouTube timedtext 返回 403），会提示「字幕下载失败」而媒体下载照常完成
 
 ---
 
@@ -257,6 +277,8 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.19.0 | 2026-09-27 | 新增「字幕」侧车下载（对标 VDH 的字幕能力）：①新增 `lib/subtitle-utils.js` —— 统一解析 WebVTT / YouTube json3 / YouTube srv3-srv1 XML / Bilibili JSON / SRT 并输出 SRT（`parseSubtitleText` → `cuesToSrt`），含轨道归一化（兼容 YouTube `captionTracks` 与 Bilibili `player/v2` 两种形状）、语言选择、`<标题>.<语言>[.auto].srt` 命名与时间戳格式化。②YouTube 在检测阶段把 `captions.playerCaptionsTrackListRenderer.captionTracks` 随 videoInfo 上报（`injected/page-youtube-parser.js`），`mergeVideoInfo` 保护该字段不被后续网络拦截上报冲掉。③Bilibili 的 `fetchQualities` 并行调 `player/v2`（需页面 Cookie）返回字幕轨；HLS 的 `fetchQualities` 返回 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES` 轨道。④新增 `background/subtitle-downloader.js`：YouTube 按 `fmt=json3 → vtt → srv3` 逐个重试（HTTP 报错/空响应换下一种），Bilibili/HLS 单次取回后自动识别格式，统一转 `.srt` 经 offscreen 保存并登记到下载任务表；`DOWNLOAD_SUBTITLE` 消息由 Popup 在勾选字幕时与媒体下载并行发出（失败只提示不回滚媒体）。⑤Popup 新增「字幕」开关 + 语言下拉（默认「自动（推荐）」），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。⑥`lib/download-artifact-utils.js#isBrokenTextStubDownload` 放行字幕扩展名，避免把正常的小体积字幕误判为服务器错误页残片。新增用例 26 条，全量 770 项通过。 |
+| 1.18.0 | 2026-09-27 | 新增「仅音频」下载（对标 VDH 的音频下载能力）：YouTube 与 Bilibili 条目新增「仅音频」开关，勾选后只保存音轨、不下载视频画面也不做合并。①YouTube 走后台直链路径（`background/download-strategies/youtube-adaptive-download-strategy.js#downloadAudioOnlyInBackground`）：`pickBestAudioStream`（新增于 `lib/youtube-stream-utils.js`）优先原声轨、优先 MP4 容器、同容器取最高码率，无 MP4 音轨时退回 WebM/Opus；媒体 MIME 可信时交给下载管理器（可续传），MIME 不可信/探测失败时自行取回并按正确 MIME 保存（避免 `.txt`）。②Bilibili 走页面上下文（需页面 Cookie 调 WBI 签名 playurl）：只抓 DASH 音轨后保存为 `.m4a`。③`background/service-worker.js#fetchMediaStreams` 支持单侧抓取（视频/音频任一为空即只抓另一侧），供仅音频复用整条带进度/重试/备用 CDN 回退的抓取通道。④`lib/video-source-utils.js#getExecutionMode` 让 YouTube 仅音频始终走后台；`submitDirectDownload` 新增显式 `ext` 覆盖（googlevideo 路径无扩展名时按音轨 MIME 命名）。⑤Popup 在两个平台的条目控件里新增「仅音频」开关（勾选后禁用清晰度下拉），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。新增用例 14 条，全量 738 项通过。 |
 | 1.17.40 | 2026-09-27 | 修复「检测列表有些在线视频显示不出缩略图（同类插件能显示，鼠标移过去还能变成动态视频）」。①页面侧封面采集：扫描 `<video>` 时优先取 `poster`，没有 poster 才用 canvas 截当前帧（JPEG，宽 ≤320px），blob: / MSE 播放流也参与扫描并带上封面；元素级封面都拿不到、且本 frame 只有一个 `<video>` 时再退回页面 `og:image`（`injected/page-interceptor.js`）；②单 `<video>` 的 frame 内封面共享：同 frame 的 m3u8 / mpd / 直链 / MSE blob 条目共用该封面（`background/video-registry.js`，页面只在「本 frame 只有一个 `<video>`」时以 `thumbnailScope:'frame'` 授权）；③Popup 补全链路：直连预览被 CDN 拒绝（缺 Referer/Origin）时申请临时请求头规则并按需读取媒体前缀（单项 ≤2.5MB、单次会话累计 ≤12MB、排队并发 2 条）生成同源 blob，取一帧当静态封面、悬停时播放（新增 `lib/preview-utils.js`）；④有封面时静止显示封面、悬停切换动态画面，`<source type>` 声明为浏览器不支持的 MIME 时改为交给浏览器嗅探。⑤后续修正「HLS 条目缩略图 / 时长不正常」：内联预览只对渐进式直链开启（桌面 Chrome 播不了 m3u8，HLS 条目进 `<video>` 只会闪一下再变成暗色占位图），预览失败但有封面时保留封面（占位渐变只对无封面条目生效）；读取时把同页 `<video>` 元素量出的封面与时长借给清单条目（`lib/video-filter.js#backfillFrameMetadata`），解决「一个播放器同时登记 HLS 清单 + MSE blob 两条，后者有图有时长、前者既无图也是 `--:--`」。新增用例 28 条，全量 724 项通过。 |
 | 1.17.39 | 2026-09-26 | 修复「检测列表出现多行同名 Blob 条目、标题是播放器名字、缩略图空白」。①`lib/video-filter.js#collapseDuplicateBlobEntries` 改为按标题跨 frame 去重（此前按 `frameId + 标题`，同一播放器被嵌在多份 iframe 时每个 frame 各留一行），无标题时才退回按 frame 去重；②`injected/page-interceptor.js` 里子框架上报的通用 / blob 检测不再带 iframe 自己的 `document.title`（「弹幕播放器」这类播放器名），留空由 background 用标签页标题补全，下载文件名随之变成视频名；③`content/content-main.js` 新增子框架 `pagehide`/`unload` 清理（跳过 bfcache），避免播放器 iframe 反复重建后注册表残留失效条目；④`popup/popup.js` + `popup.css` 为无封面且无法内联预览的条目（blob / dash / 内联预览失败）增加媒体占位图标。新增用例 3 条，全量 696 项通过。 |
 | 1.17.38 | 2026-09-26 | 修复「打开 Popup 只看到空列表、一直等也不更新」。检测列表不再只在打开时读取一次：background 每次检测到视频都经 `safeRuntimeMessage` 广播 `UPDATE_BUTTON`（带 `tabId`），Popup 据此自动刷新；Popup 打开后先显示「正在检测页面视频…」并每 1.2s 轮询结果（总窗口 15s，页面 load 完成后再宽限 8s），窗口内不再提前显示「未检测到视频」；空状态按上下文给出提示并新增「重新检测」按钮，经新增的 `RESCAN_TAB_VIDEOS`（Popup → SW → Content → 页面上下文 `RESCAN_PAGE_VIDEOS`）重扫媒体元素并重跑 YouTube/Bilibili 解析。 |

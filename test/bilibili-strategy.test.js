@@ -4,6 +4,27 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 
+function jsonResponse(payload) {
+  return {
+    json: async () => payload,
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+  };
+}
+
+function playlistDashPayload() {
+  return {
+    code: 0,
+    data: {
+      dash: {
+        audio: [{ baseUrl: 'https://cdn.example/a.m4s', id: 30280, mimeType: 'audio/mp4' }],
+        video: [{ baseUrl: 'https://cdn.example/v.m4s', id: 80, mimeType: 'video/mp4' }],
+      },
+    },
+  };
+}
+
 function loadStrategyFactory() {
   const key = '__OVD_BILIBILI_STRATEGY__';
   const filePath = path.resolve(__dirname, '../content/strategies/bilibili-strategy.js');
@@ -130,5 +151,90 @@ test('体积超限降级为分离文件时，三个展示位置同样落到 100%
     assert.deepEqual(floatCalls, progressMessages.map((message) => message.percent));
   } finally {
     delete globalThis.__OVD_CONSTANTS__;
+  }
+});
+
+// --- fetchQualities 附带字幕轨 ---
+
+function stubBilibiliApi({ subtitleFail = false } = {}) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes('/x/web-interface/nav')) {
+      return jsonResponse({
+        code: 0,
+        data: { wbi_img: { img_url: 'https://i0.hdslb.com/bfs/wbi/abc.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/def.png' } },
+      });
+    }
+    if (target.includes('/x/player/playurl')) {
+      return jsonResponse(playlistDashPayload());
+    }
+    if (target.includes('/x/player/v2')) {
+      if (subtitleFail) {
+        throw new Error('network down');
+      }
+      return jsonResponse({
+        code: 0,
+        data: {
+          subtitle: {
+            subtitles: [
+              { ai_status: 0, id_str: 'zh-Hans', lan: 'zh-Hans', lan_doc: '简体中文', subtitle_url: '//aisubtitle.hdslb.com/bfs/subtitle/s1.json' },
+              { ai_status: 1, id_str: 'ai-en', lan: 'en', lan_doc: 'English', subtitle_url: 'https://aisubtitle.hdslb.com/bfs/subtitle/s2.json' },
+              { lan: 'fr', lan_doc: 'Français' },
+            ],
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected request: ${target}`);
+  };
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+function createQualitiesStrategy() {
+  // 内容脚本真实加载顺序里画质工具先于策略（策略通过全局对象取用它）
+  const qualityUtilsPath = path.resolve(__dirname, '../lib/bilibili-quality-utils.js');
+  delete globalThis.__OVD_BILIBILI_QUALITY_UTILS__;
+  delete require.cache[require.resolve(qualityUtilsPath)];
+  require(qualityUtilsPath);
+
+  return loadStrategyFactory().createBilibiliStrategy({
+    calcWrid: async () => 'wrid',
+    fetchMediaStreamsAndWait: async () => ({}),
+    getFloatButton: () => null,
+    sendMessageAsync: async () => ({ ok: true }),
+    triggerBlobDownload: () => {},
+    videoUtils: {},
+  });
+}
+
+test('Bilibili fetchQualities 同时返回字幕轨（协议相对地址补成 https，无地址的过滤掉）', async () => {
+  const restore = stubBilibiliApi();
+  try {
+    const strategy = createQualitiesStrategy();
+    const result = await strategy.fetchQualities({ bvid: 'BV1', cid: 2 });
+
+    assert.deepEqual(result.qualities, [{ id: 80, label: '1080P' }]);
+    assert.deepEqual(result.subtitles, [
+      { isAsr: false, languageCode: 'zh-Hans', languageName: '简体中文', url: 'https://aisubtitle.hdslb.com/bfs/subtitle/s1.json' },
+      { isAsr: true, languageCode: 'en', languageName: 'English', url: 'https://aisubtitle.hdslb.com/bfs/subtitle/s2.json' },
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('Bilibili 字幕接口失败时仍返回画质列表（字幕是可选增强）', async () => {
+  const restore = stubBilibiliApi({ subtitleFail: true });
+  try {
+    const strategy = createQualitiesStrategy();
+    const result = await strategy.fetchQualities({ bvid: 'BV1', cid: 2 });
+
+    assert.equal(result.qualities.length, 1);
+    assert.deepEqual(result.subtitles, []);
+  } finally {
+    restore();
   }
 });

@@ -91,7 +91,9 @@ function mergeVideoInfo(existing = {}, info = {}) {
 
   // thumbnail 一族必须一起保留：页面封面是一次性上报的，后续同 URL 的网络拦截
   // 上报（不带 thumbnail）如果直接覆盖，列表里的封面就会闪一下又变回占位图。
-  for (const key of ['title', 'mimeType', 'filename', 'thumbnail', 'poster', 'cover']) {
+    // captionTracks 只在 player response 解析时上报一次，网络拦截类上报不带它，
+    // 直接覆盖会让 popup 的字幕语言列表闪一下又消失。
+    for (const key of ['title', 'mimeType', 'filename', 'thumbnail', 'poster', 'cover', 'captionTracks']) {
     if ((info[key] == null || info[key] === '') && existing[key]) {
       merged[key] = existing[key];
     }

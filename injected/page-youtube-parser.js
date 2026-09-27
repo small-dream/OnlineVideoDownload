@@ -1127,12 +1127,27 @@
     state.lastReportedVideoId = currentVideoId;
     state.lastReportedMetrics = metrics;
     clearCurrentVideoFallbackTimer();
+
+    // 字幕轨：popup 用它列出可选语言，下载时按 baseUrl 取 timedtext 转 .srt 侧车文件。
+    // 只带下游真正要用的字段（URL 很长，列表页每条视频都会存一份）。
+    const captionTracks = (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [])
+      .filter((track) => track?.baseUrl)
+      .map((track) => ({
+        baseUrl: track.baseUrl,
+        isAsr: track.kind === 'asr',
+        languageCode: track.languageCode || '',
+        languageName: track.name?.simpleText
+          || (Array.isArray(track.name?.runs) ? track.name.runs.map((run) => run?.text || '').join('') : '')
+          || track.languageCode
+          || '',
+      }));
     console.log(
       `[OVD][YT-DEBUG] reporting videoId=${currentVideoId} combined=${combined.length} videoStreams=${videoStreams.length} audioStreams=${audioStreams.length} source=${sourceTag}`
     );
 
     sendToExtension({
       audioStreams,
+      ...(captionTracks.length > 0 ? { captionTracks } : {}),
       combined,
       duration: videoDetails.lengthSeconds ? parseInt(videoDetails.lengthSeconds, 10) : null,
       fileSize: totalSize,

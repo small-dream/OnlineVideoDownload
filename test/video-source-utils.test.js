@@ -82,6 +82,30 @@ test('getExecutionMode: youtube capture mode returns "content"', () => {
   assert.equal(getExecutionMode({ type: 'youtube-adaptive', downloadOptions: { mode: 'capture' } }), 'content');
 });
 
+test('getExecutionMode: youtube audio-only returns "background"', () => {
+  const { getExecutionMode } = mod();
+  assert.equal(
+    getExecutionMode({ type: 'youtube-adaptive', downloadOptions: { audioOnly: true, mode: 'parse' } }),
+    'background',
+  );
+});
+
+test('getExecutionMode: youtube audio-only in capture mode also returns "background"', () => {
+  const { getExecutionMode } = mod();
+  assert.equal(
+    getExecutionMode({ type: 'youtube-adaptive', downloadOptions: { audioOnly: true, mode: 'capture' } }),
+    'background',
+  );
+});
+
+test('getExecutionMode: bilibili audio-only stays "content" (needs page cookies)', () => {
+  const { getExecutionMode } = mod();
+  assert.equal(
+    getExecutionMode({ type: 'bilibili-meta', downloadOptions: { audioOnly: true } }),
+    'content',
+  );
+});
+
 test('getExecutionMode: bilibili returns "content"', () => {
   const { getExecutionMode } = mod();
   assert.equal(getExecutionMode({ type: 'bilibili-meta' }), 'content');
