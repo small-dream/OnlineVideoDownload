@@ -107,6 +107,7 @@ function loadModule(globalKey, filePath) {
 | lib/byte-utils.js | test/byte-utils.test.js |
 | lib/http-utils.js | test/http-utils.test.js |
 | lib/message-types.js | test/message-types.test.js |
+| lib/telegram-utils.js | test/telegram-utils.test.js |
 | lib/page-message-guard.js | test/page-message-guard.test.js |
 | lib/video-utils.js | test/video-utils.test.js |
 | lib/video-source-utils.js | test/video-source-utils.test.js |
@@ -124,9 +125,11 @@ function loadModule(globalKey, filePath) {
 | content/progress-reporter.js | test/progress-reporter.test.js |
 | content/source-handlers.js | test/source-handlers.test.js |
 | content/strategies/bilibili-strategy.js | test/bilibili-strategy.test.js |
+| content/strategies/telegram-strategy.js | test/telegram-strategy.test.js |
 | background/download-history-store.js | test/download-history-store.test.js |
 | background/download-state-store.js | test/download-state-store.test.js |
 | background/video-registry.js | test/video-registry.test.js |
+| background/page-stream-download.js | test/page-stream-download.test.js |
 
 ---
 

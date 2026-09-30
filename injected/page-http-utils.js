@@ -733,6 +733,171 @@
     handleYouTubeMediaStreamsRequest
   );
 
+  // ---- Telegram Web 页面侧抓流（PAGE_STREAM_FETCH_*） ----
+  // WebK 的 `/stream/` 端点由页面自己的 Service Worker 生成，而该 SW 只服务带 clientId 的
+  // 页面请求（`self.clients.get(e.clientId)`）；内容脚本的 fetch 没有 clientId，SW 不接管，
+  // 请求会落到真实服务器并拿到 302。因此字节必须在页面上下文抓，再分块回传内容侧。
+  const telegramUtils = window.__OVD_TELEGRAM_UTILS__ || {};
+  const PAGE_STREAM_RANGE_CHUNK_BYTES = 2 * 1024 * 1024;
+  const PAGE_STREAM_RELAY_CHUNK_BYTES = 512 * 1024;
+  const PAGE_STREAM_ACK_TIMEOUT = 60000;
+
+  const pageStreamFetches = new Map();
+  const pageStreamAcks = new Map();
+
+  function ackKey(transferId, seq) {
+    return `${transferId}:${seq}`;
+  }
+
+  function waitPageStreamAck(transferId, seq) {
+    return new Promise((resolve, reject) => {
+      const key = ackKey(transferId, seq);
+      const timer = setTimeout(() => {
+        pageStreamAcks.delete(key);
+        reject(new Error('等待下载确认超时'));
+      }, PAGE_STREAM_ACK_TIMEOUT);
+      pageStreamAcks.set(key, { reject, resolve, timer });
+    });
+  }
+
+  /** 内容侧已把该分片写进后台临时文件，放行下一块 */
+  function resolvePageStreamAck(payload) {
+    const key = ackKey(payload?.transferId, payload?.seq);
+    const entry = pageStreamAcks.get(key);
+    if (!entry) {
+      return;
+    }
+    pageStreamAcks.delete(key);
+    clearTimeout(entry.timer);
+    entry.resolve();
+  }
+
+  /** 取消：置位标记、中止页面 fetch，并唤醒所有等待中的 ack 让循环尽快退出 */
+  function handlePageStreamFetchAbort(payload) {
+    const transferId = payload?.transferId;
+    const state = pageStreamFetches.get(transferId);
+    if (state) {
+      state.aborted = true;
+      try {
+        state.controller?.abort();
+      } catch (_err) {
+        // ignore
+      }
+    }
+    for (const [key, entry] of [...pageStreamAcks]) {
+      if (!key.startsWith(`${transferId}:`)) {
+        continue;
+      }
+      pageStreamAcks.delete(key);
+      clearTimeout(entry.timer);
+      entry.resolve();
+    }
+  }
+
+  async function handlePageStreamFetchRequest(payload) {
+    const transferId = payload?.transferId;
+    const url = payload?.url;
+    if (!transferId || !url) {
+      sendToExtension({
+        type: MSG.PAGE_STREAM_FETCH_ERROR || 'PAGE_STREAM_FETCH_ERROR',
+        transferId,
+        error: '缺少页面流抓取参数',
+      });
+      return;
+    }
+    if (pageStreamFetches.has(transferId)) {
+      return;
+    }
+
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const state = { aborted: false, controller };
+    pageStreamFetches.set(transferId, state);
+    sendToExtension({ type: MSG.PAGE_STREAM_FETCH_START || 'PAGE_STREAM_FETCH_START', transferId });
+
+    let lastSentBytes = 0;
+    let lastSentPercent = -1;
+
+    try {
+      const result = await telegramUtils.readTelegramStream({
+        fetchImpl: originalFetch,
+        onChunk: async (bytes, seq) => {
+          sendToExtension({
+            type: MSG.PAGE_STREAM_FETCH_CHUNK || 'PAGE_STREAM_FETCH_CHUNK',
+            chunkBase64: uint8ArrayToBase64(bytes),
+            seq,
+            transferId,
+          });
+          await waitPageStreamAck(transferId, seq);
+        },
+        onProgress: (loadedBytes, totalBytes) => {
+          const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : -1;
+          if (loadedBytes - lastSentBytes < 4 * 1024 * 1024 && percent === lastSentPercent) {
+            return;
+          }
+          lastSentBytes = loadedBytes;
+          lastSentPercent = percent;
+          sendToExtension({
+            type: MSG.PAGE_STREAM_FETCH_PROGRESS || 'PAGE_STREAM_FETCH_PROGRESS',
+            loadedBytes,
+            totalBytes,
+            transferId,
+          });
+        },
+        rangeChunkBytes: PAGE_STREAM_RANGE_CHUNK_BYTES,
+        signal: controller ? controller.signal : null,
+        totalHint: Number(payload.totalBytesHint) || 0,
+        transferChunkBytes: PAGE_STREAM_RELAY_CHUNK_BYTES,
+        url,
+      });
+
+      if (!result?.bytes) {
+        sendToExtension({
+          type: MSG.PAGE_STREAM_FETCH_ERROR || 'PAGE_STREAM_FETCH_ERROR',
+          code: 'EMPTY_MEDIA_STREAM',
+          error: 'empty media stream',
+          transferId,
+        });
+        return;
+      }
+
+      // Content-Range 给了权威总长却没读满：宁可报错也不要静默保存残缺视频
+      if (result.ranged && result.totalBytes > result.bytes) {
+        sendToExtension({
+          type: MSG.PAGE_STREAM_FETCH_ERROR || 'PAGE_STREAM_FETCH_ERROR',
+          error: `视频数据不完整（${result.bytes}/${result.totalBytes} 字节）`,
+          transferId,
+        });
+        return;
+      }
+
+      sendToExtension({
+        type: MSG.PAGE_STREAM_FETCH_FINISH || 'PAGE_STREAM_FETCH_FINISH',
+        bytes: result.bytes,
+        totalBytes: result.totalBytes,
+        transferId,
+      });
+      console.log(`[OVD][PAGE] telegram stream fetched transferId=${transferId} bytes=${result.bytes}`);
+    } catch (error) {
+      if (state.aborted) {
+        console.log(`[OVD][PAGE] telegram stream aborted transferId=${transferId}`);
+      } else {
+        console.error(`[OVD][PAGE] telegram stream failed transferId=${transferId}: ${error.message}`);
+      }
+      sendToExtension({
+        type: MSG.PAGE_STREAM_FETCH_ERROR || 'PAGE_STREAM_FETCH_ERROR',
+        aborted: !!state.aborted,
+        error: error?.message || String(error),
+        transferId,
+      });
+    } finally {
+      pageStreamFetches.delete(transferId);
+    }
+  }
+
+  registerMessageHandler(MSG.PAGE_STREAM_FETCH_REQUEST || 'PAGE_STREAM_FETCH_REQUEST', handlePageStreamFetchRequest);
+  registerMessageHandler(MSG.PAGE_STREAM_FETCH_ABORT || 'PAGE_STREAM_FETCH_ABORT', handlePageStreamFetchAbort);
+  registerMessageHandler(MSG.PAGE_STREAM_FETCH_ACK || 'PAGE_STREAM_FETCH_ACK', resolvePageStreamAck);
+
   window.__OVD_PAGE_HTTP_UTILS__ = {
     buildPageRequestHeaders,
     buildResumablePageRequestHeaders,

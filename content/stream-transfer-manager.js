@@ -19,6 +19,7 @@
     const hlsBlobTransfers = new Map();
     const mediaStreamTransfers = new Map();
     const pageDirectDownloadTransfers = new Map();
+    const pageStreamTransfers = new Map();
     const constants = globalThis.__OVD_CONSTANTS__ || {};
     const MEDIA_STREAM_TIMEOUT = constants.MEDIA_STREAM_TIMEOUT || 120000;
     const PAGE_DIRECT_DOWNLOAD_TIMEOUT = constants.PAGE_DIRECT_DOWNLOAD_TIMEOUT || 600000;
@@ -428,19 +429,199 @@
       }
     }
 
+    /**
+     * Telegram Web 页面侧抓流的落盘中继。
+     *
+     * 字节必须在页面上下文（MAIN world）抓：WebK 的 `/stream/` 端点由页面自己的
+     * Service Worker 生成，而该 SW 用 `self.clients.get(e.clientId)` 找页面客户端，
+     * 内容脚本的 fetch 没有 clientId、不被接管（会落到真实服务器拿到 302）。
+     * 这里只做中继：页面分块 → 后台 OPFS。每块写完后回 ack，页面才继续发下一块，
+     * 因此内存里始终只有一块。
+     */
+    function buildPageStreamError(payload = {}) {
+      const error = new Error(payload.error || '页面抓流失败');
+      if (payload.code) {
+        error.code = payload.code;
+      } else if (payload.aborted) {
+        error.code = 'DOWNLOAD_ABORTED';
+      }
+      return error;
+    }
+
+    function failPageStreamTransfer(payload = {}) {
+      const transferId = payload.transferId;
+      const transfer = pageStreamTransfers.get(transferId);
+      if (!transfer) {
+        return;
+      }
+      pageStreamTransfers.delete(transferId);
+      postMessageToPage({ type: MSG.PAGE_STREAM_FETCH_ABORT || 'PAGE_STREAM_FETCH_ABORT', transferId });
+      void sendMessageAsync({
+        error: payload.error || '',
+        transferId,
+        type: MSG.PAGE_STREAM_ABORT || 'PAGE_STREAM_ABORT',
+      }).catch(() => {});
+      transfer.reject(buildPageStreamError(payload));
+    }
+
+    function handlePageStreamProgress(payload = {}) {
+      const transfer = pageStreamTransfers.get(payload.transferId);
+      if (!transfer) {
+        return;
+      }
+      transfer.onProgress?.(Number(payload.loadedBytes) || 0, Number(payload.totalBytes) || 0);
+    }
+
+    function appendPageStreamChunk(payload = {}) {
+      const transfer = pageStreamTransfers.get(payload.transferId);
+      if (!transfer) {
+        return;
+      }
+      transfer.writes = transfer.writes
+        .then(() => sendMessageAsync({
+          chunkBase64: payload.chunkBase64,
+          seq: payload.seq,
+          transferId: payload.transferId,
+          type: MSG.PAGE_STREAM_CHUNK || 'PAGE_STREAM_CHUNK',
+        }))
+        .then((response) => {
+          if (!response?.ok) {
+            throw new Error(response?.error || '视频数据写入失败');
+          }
+          // 只有写入成功才确认；页面据此继续发下一块（背压）
+          postMessageToPage({
+            seq: payload.seq,
+            transferId: payload.transferId,
+            type: MSG.PAGE_STREAM_FETCH_ACK || 'PAGE_STREAM_FETCH_ACK',
+          });
+        })
+        .catch((error) => {
+          failPageStreamTransfer({ error: error.message, transferId: payload.transferId });
+        });
+    }
+
+    function finishPageStreamTransfer(payload = {}) {
+      const transfer = pageStreamTransfers.get(payload.transferId);
+      if (!transfer) {
+        return;
+      }
+      pageStreamTransfers.delete(payload.transferId);
+      Promise.resolve(transfer.writes)
+        .then(() => sendMessageAsync({
+          taskMeta: transfer.taskMeta,
+          transferId: payload.transferId,
+          type: MSG.PAGE_STREAM_FINISH || 'PAGE_STREAM_FINISH',
+        }))
+        .then((response) => {
+          if (!response?.ok) {
+            throw new Error(response?.error || '页面抓取的视频保存失败');
+          }
+          transfer.resolve(response);
+        })
+        .catch((error) => {
+          void sendMessageAsync({
+            error: error.message,
+            transferId: payload.transferId,
+            type: MSG.PAGE_STREAM_ABORT || 'PAGE_STREAM_ABORT',
+          }).catch(() => {});
+          transfer.reject(error);
+        });
+    }
+
+    async function fetchPageStreamInPage(options = {}) {
+      const {
+        fileSize = 0,
+        filename = 'telegram-video.mp4',
+        mimeType = 'video/mp4',
+        onProgress = null,
+        signal = null,
+        taskMeta = {},
+        timeoutMessage = '等待页面抓取视频超时',
+        url,
+      } = options;
+      if (!url) {
+        throw new Error('缺少视频地址');
+      }
+      if (signal?.aborted) {
+        throw buildPageStreamError({ aborted: true, error: '下载已取消' });
+      }
+
+      const transferId = `page-stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const normalizedMeta = normalizeTaskMeta(taskMeta);
+      const normalizedSize = Number(fileSize) > 0 ? Number(fileSize) : 0;
+      const completion = new Promise((resolve, reject) => {
+        pageStreamTransfers.set(transferId, {
+          onProgress,
+          reject,
+          resolve,
+          taskMeta: normalizedMeta,
+          writes: Promise.resolve(),
+        });
+      });
+
+      const onAbort = () => {
+        failPageStreamTransfer({ aborted: true, error: '下载已取消', transferId });
+      };
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+
+      try {
+        const startResponse = await sendMessageAsync({
+          fileSize: normalizedSize,
+          filename,
+          mimeType: mimeType || 'video/mp4',
+          taskMeta: normalizedMeta,
+          transferId,
+          type: MSG.PAGE_STREAM_START || 'PAGE_STREAM_START',
+        });
+        if (!startResponse?.ok) {
+          throw new Error(startResponse?.error || '无法初始化页面抓流下载');
+        }
+        // 申请后台传输期间可能已被取消（onAbort 已删除条目并中止后台传输）：
+        // 这时不要再让页面开始抓取，否则会留下没人收尾的传输
+        if (!pageStreamTransfers.has(transferId)) {
+          throw buildPageStreamError({ aborted: true, error: '下载已取消' });
+        }
+      } catch (error) {
+        pageStreamTransfers.delete(transferId);
+        signal?.removeEventListener?.('abort', onAbort);
+        throw error;
+      }
+
+      postMessageToPage({
+        totalBytesHint: normalizedSize,
+        transferId,
+        type: MSG.PAGE_STREAM_FETCH_REQUEST || 'PAGE_STREAM_FETCH_REQUEST',
+        url,
+      });
+
+      try {
+        return await withTimeout(completion, PAGE_DIRECT_DOWNLOAD_TIMEOUT, timeoutMessage);
+      } catch (error) {
+        failPageStreamTransfer({ error: error.message, transferId });
+        throw error;
+      } finally {
+        signal?.removeEventListener?.('abort', onAbort);
+      }
+    }
+
     return {
       _concatUint8Arrays,
+      appendPageStreamChunk,
       appendHlsBlobChunk,
       appendMediaStreamChunk,
       base64ToUint8Array,
       createPageDirectDownloadTransfer,
+      failPageStreamTransfer,
       failMediaStreamTransfer,
       fetchMediaStreamsAndWait,
+      fetchPageStreamInPage,
       fetchYouTubeMediaStreamsInPage,
       finishHlsBlobTransfer,
       finishMediaStreamTransfer,
       finishPageDirectDownloadTransfer,
+      finishPageStreamTransfer,
       getMediaStreamTaskMeta,
+      handlePageStreamProgress,
       hlsDownloadBlob,
       normalizeBinaryPayload,
       normalizeDownloadFilename,

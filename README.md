@@ -3,7 +3,7 @@
   <h1 align="center">Online Video Downloader</h1>
   <p align="center">
     一键检测并下载网页中的在线视频<br>
-    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
+    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>Telegram</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
@@ -28,7 +28,7 @@
 - 🎚️ **HLS 清晰度可选** — Master Playlist 的全部码率档位（360p/720p/1080p…）直接在下拉框里选，默认自动最高
 - 🎵 **仅音频下载** — YouTube / Bilibili 条目可只保存音轨（M4A，无 MP4 音轨时退回 WebM），不下载视频画面，适合存音乐
 - 📝 **字幕下载** — YouTube / Bilibili / HLS 条目可把字幕存成 `.srt` 侧车文件（与视频同名，播放器自动匹配），自动生成的字幕会标注 `.auto`
-- 🌐 **全平台支持** — YouTube、Bilibili 专项适配，同时支持任意网站的 HLS / DASH / MP4 / Blob 视频
+- 🌐 **全平台支持** — YouTube、Bilibili、Telegram Web 专项适配，同时支持任意网站的 HLS / DASH / MP4 / Blob 视频
 - 🧹 **噪声过滤** — 可按域名黑名单、最小时长、最小体积过滤广告片段与音效条目
 - ⏹️ **任务可取消** — 任务视图里可取消进行中的下载，并统一遵守并发下载数设置
 - 🧵 **统一并发队列** — 所有下载（含 Bilibili / YouTube 页面内下载）共用同一并发上限，超出自动排队并显示「排队中（第 N 位）」，可随时取消排队
@@ -96,6 +96,14 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 - 有字幕的视频可勾选「字幕」下载 `.srt` 侧车文件（B 站字幕需登录，自动生成的字幕会标注 `.auto`）
 - 大会员内容需要大会员账号
 
+### Telegram Web 下载
+
+- 支持 `web.telegram.org`（WebK，如 `https://web.telegram.org/k/#@频道`）内嵌播放的视频与音频
+- Telegram 的媒体地址由页面自己的 Service Worker 提供（同源 `…/stream/…`），扩展在页面上下文按 Range 逐段抓取，边抓边写入 OPFS 临时文件，完成后交给浏览器下载 API 保存——大文件也不会撑爆页面内存
+- 文件名从页面拼装：`<会话名> #<消息ID>`；拿不到时退回标签页标题
+- 容器按媒体 MIME 决定（`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3` 等）
+- 需保持标签页打开直到抓取完成；下载可随时取消，取消会清理临时文件
+
 ### HLS 直播流 / .m3u8 视频
 
 - 对于使用 HLS 协议的直播或点播视频，扩展会自动下载所有 TS 分片
@@ -126,6 +134,7 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 | 🟡 **DASH** | MPD 流 | 下载 MPD 或合并视音频流 |
 | 🔴 **YouTube** | YouTube 视频 | ≤720p 直接下载；1080p+ 自动合并 |
 | 🔵 **B站** | Bilibili 视频 | 调用 API 获取流并自动合并 |
+| 🔷 **Telegram** | Telegram Web 视频 | 页面上下文按 Range 抓取后保存 |
 | 🟣 **Blob** | MSE 内存视频 | Content Script 中转下载 |
 | ⬛ 🔒 **DRM** | 加密保护内容 | 不可下载，仅标记提示 |
 
@@ -148,6 +157,7 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 |------|----------|
 | **YouTube** | 合并流 + 自适应流；SPA 路由感知；多分辨率选择 |
 | **Bilibili** | WBI 签名；DASH/FLV 双格式；分P视频；清晰度选择；CDN Referer 注入 |
+| **Telegram Web** | 识别页面 Service Worker 的流式媒体端点；页面上下文 Range 抓取；`<会话名> #<消息ID>` 命名 |
 
 ### 已知不支持
 
@@ -166,6 +176,7 @@ Chrome Extension (Manifest V3)
 │   ├── video-registry.js          已检测视频内存注册表
 │   ├── request-interceptor.js     webRequest 网络请求监听
 │   ├── downloader.js              下载调度器（MP4/HLS/DASH/YouTube/B站）
+│   ├── page-stream-download.js    页面侧抓流落盘（OPFS → 下载管理器）
 │   ├── hls-fetcher.js             HLS 分片下载、AES 解密、内存合并
 │   └── header-injector.js         请求头注入
 │
@@ -185,6 +196,7 @@ Chrome Extension (Manifest V3)
 ├── lib/                           共享工具库
 │   ├── hls-pipeline.js            HLS 解析与处理管线
 │   ├── mpd-parser.js              DASH MPD 解析器
+│   ├── telegram-utils.js          Telegram 流地址识别与标题拼装
 │   ├── wbi-signer.js              Bilibili WBI 签名算法
 │   ├── bilibili-muxer.js          Bilibili FLV 封装
 │   ├── mp4-muxer.js               MP4 封装

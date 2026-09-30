@@ -3,7 +3,7 @@
   <h1 align="center">Online Video Downloader</h1>
   <p align="center">
     ウェブページ内のオンライン動画を自動検出＆ワンクリックダウンロード<br>
-    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
+    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>Telegram</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
@@ -25,7 +25,7 @@
 - 🔔 **完了通知** — ダウンロード完了 / 失敗時にシステム通知を表示。通知をクリックすると保存先フォルダが開きます
 - ⬇️ **ワンクリックダウンロード** — ボタン一つで動画を保存、操作はシンプル
 - 🔀 **ブラウザ内マージ** — YouTube 1080p+、Bilibili DASH の音声・映像ストリームをブラウザ内で自動結合。**ffmpeg やローカルツールのインストール不要**
-- 🌐 **幅広い対応** — YouTube・Bilibili の専用サポートに加え、任意のサイトの HLS / DASH / MP4 / Blob 動画に対応
+- 🌐 **幅広い対応** — YouTube・Bilibili・Telegram Web の専用サポートに加え、任意のサイトの HLS / DASH / MP4 / Blob 動画に対応
 - 🔒 **プライバシー保護** — すべての処理はローカルで完結、サードパーティサーバーへのデータ送信なし
 - 🛡️ **DRM 尊重** — 暗号化コンテンツは検出してフラグを表示するのみ、保護のバイパスは行いません
 
@@ -85,6 +85,14 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 - 画質設定は保存され、次回のダウンロードでも適用されます
 - プレミアムコンテンツにはプレミアムアカウントが必要です
 
+### Telegram Web ダウンロード
+
+- `web.telegram.org`（WebK、例：`https://web.telegram.org/k/#@チャンネル`）内で再生される動画・音声に対応
+- Telegram のメディアはページ自身の Service Worker が提供する同源 `…/stream/…` エンドポイントのため、拡張機能はページコンテキストで `Range` リクエストにより取得し、OPFS の一時ファイルへ順次書き込み、完了後にブラウザのダウンロード API へ渡します——大きなファイルでもページのメモリを圧迫しません
+- ファイル名はページから組み立てます：`<チャット名> #<メッセージID>`（取得できない場合はタブタイトル）
+- コンテナはメディアの MIME タイプに従います（`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3` など）
+- 取得完了までタブを開いたままにしてください。キャンセルすると一時ファイルが削除されます
+
 ### HLS ストリーム / .m3u8 動画
 
 - HLS プロトコルを使用したライブ配信やVODの場合、すべての TS セグメントを自動ダウンロード
@@ -111,6 +119,7 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 | 🟡 **DASH** | MPD ストリーム | MPD をダウンロードまたは音声/映像を結合 |
 | 🔴 **YouTube** | YouTube 動画 | ≤720p は直接、1080p+ は自動結合 |
 | 🔵 **B站** | Bilibili 動画 | API 経由で取得 + 自動結合 |
+| 🔷 **Telegram** | Telegram Web 動画 | ページ内で Range 取得して保存 |
 | 🟣 **Blob** | MSE メモリ | Content Script リレーダウンロード |
 | ⬛ 🔒 **DRM** | 暗号化コンテンツ | ダウンロード不可、フラグ表示のみ |
 
@@ -133,6 +142,7 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 |--------|----------|
 | **YouTube** | 結合 + アダプティブストリーム、SPA ルーティング対応、解像度選択 |
 | **Bilibili** | WBI 署名、DASH/FLV デュアルフォーマット、多パート動画、画質選択、CDN Referer インジェクション |
+| **Telegram Web** | ページ Service Worker のストリーミングエンドポイントを検出、ページコンテキストで Range 取得、`<チャット名> #<メッセージID>` 命名 |
 
 ### 既知の制限
 
@@ -151,6 +161,7 @@ Chrome Extension (Manifest V3)
 │   ├── video-registry.js          検出済み動画のメモリレジストリ
 │   ├── request-interceptor.js     webRequest ネットワークリスナー
 │   ├── downloader.js              ダウンロードスケジューラ（MP4/HLS/DASH/YouTube/Bilibili）
+│   ├── page-stream-download.js    ページ側ストリーム書き込み（OPFS → ダウンロードマネージャー）
 │   ├── hls-fetcher.js             HLS セグメントダウンロード、AES 復号、メモリ内マージ
 │   └── header-injector.js         リクエストヘッダーインジェクション
 │
@@ -170,6 +181,7 @@ Chrome Extension (Manifest V3)
 ├── lib/                           共通ユーティリティライブラリ
 │   ├── hls-pipeline.js            HLS パース＆処理パイプライン
 │   ├── mpd-parser.js              DASH MPD パーサー
+│   ├── telegram-utils.js          Telegram ストリーム URL 検出 + タイトル組み立て
 │   ├── wbi-signer.js              Bilibili WBI 署名アルゴリズム
 │   ├── bilibili-muxer.js          Bilibili FLV ミュキサー
 │   ├── mp4-muxer.js               MP4 ミュキサー

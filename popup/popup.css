@@ -381,6 +381,12 @@ body {
   border-color: #ecd09a;
 }
 
+.type-badge.type-telegram {
+  color: #0f6b9c;
+  background: #e6f3fb;
+  border-color: #a8d3ea;
+}
+
 .type-badge.type-youtube-adaptive {
   color: #b3271e;
   background: #ffeceb;

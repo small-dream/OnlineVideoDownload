@@ -26,7 +26,9 @@
   function sendToExtension(payload) {
     if (
       payload?.type === (MSG.YOUTUBE_MEDIA_STREAM_CHUNK || 'YOUTUBE_MEDIA_STREAM_CHUNK') ||
-      payload?.type === (MSG.YOUTUBE_MEDIA_STREAM_PROGRESS || 'YOUTUBE_MEDIA_STREAM_PROGRESS')
+      payload?.type === (MSG.YOUTUBE_MEDIA_STREAM_PROGRESS || 'YOUTUBE_MEDIA_STREAM_PROGRESS') ||
+      payload?.type === (MSG.PAGE_STREAM_FETCH_CHUNK || 'PAGE_STREAM_FETCH_CHUNK') ||
+      payload?.type === (MSG.PAGE_STREAM_FETCH_PROGRESS || 'PAGE_STREAM_FETCH_PROGRESS')
     ) {
       window.postMessage({ from: MSG_FROM, payload }, '*');
       return;

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "109",
   "name": "Online Video Downloader",
-  "version": "1.20.0",
+  "version": "1.21.0",
   "description": "Detect and download online videos from YouTube, Bilibili, HLS streams and more",
   "default_locale": "zh_CN",
   "permissions": [
@@ -36,6 +36,7 @@
         "lib/constants.js",
         "lib/progress-scale.js",
         "lib/message-types.js",
+        "lib/telegram-utils.js",
         "lib/i18n.js",
         "lib/page-message-guard.js",
         "lib/video-utils.js",
@@ -64,6 +65,7 @@
         "content/strategies/hls-strategy.js",
         "content/strategies/dash-strategy.js",
         "content/strategies/generic-strategy.js",
+        "content/strategies/telegram-strategy.js",
         "content/stream-transfer-manager.js",
         "content/download-coordinator.js",
         "content/float-button.js",
@@ -79,6 +81,7 @@
       "resources": [
         "injected/*.js",
         "lib/message-types.js",
+        "lib/telegram-utils.js",
         "lib/youtube-innertube-clients.js",
         "icons/*"
       ],

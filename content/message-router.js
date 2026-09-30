@@ -190,6 +190,27 @@
           streamTransferManager?.failMediaStreamTransfer(payload.transferId, payload.error);
           return;
 
+        // Telegram Web 页面侧抓流：页面按 Range 取到分片后逐块回传，这里转交后台落盘
+        case MSG.PAGE_STREAM_FETCH_START || 'PAGE_STREAM_FETCH_START':
+          // 仅表示页面已开始抓取，进度由后续 PROGRESS 消息承载
+          return;
+
+        case MSG.PAGE_STREAM_FETCH_PROGRESS || 'PAGE_STREAM_FETCH_PROGRESS':
+          streamTransferManager?.handlePageStreamProgress(payload);
+          return;
+
+        case MSG.PAGE_STREAM_FETCH_CHUNK || 'PAGE_STREAM_FETCH_CHUNK':
+          streamTransferManager?.appendPageStreamChunk(payload);
+          return;
+
+        case MSG.PAGE_STREAM_FETCH_FINISH || 'PAGE_STREAM_FETCH_FINISH':
+          streamTransferManager?.finishPageStreamTransfer(payload);
+          return;
+
+        case MSG.PAGE_STREAM_FETCH_ERROR || 'PAGE_STREAM_FETCH_ERROR':
+          streamTransferManager?.failPageStreamTransfer(payload);
+          return;
+
         default:
           break;
       }

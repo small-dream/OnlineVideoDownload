@@ -408,6 +408,9 @@
   "note_hls": {
     "message": "HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。"
   },
+  "note_telegram": {
+    "message": "Telegram 视频由页面 Service Worker 提供，下载期间请保持标签页打开。"
+  },
   "note_youtube": {
     "message": "YouTube 下载模式可在设置中切换。"
   },
@@ -699,6 +702,18 @@
   },
   "title_unknownVideo": {
     "message": "未知视频"
+  },
+  "telegram_fetching": {
+    "message": "正在从 Telegram 拉取视频数据..."
+  },
+  "telegram_fetchingBytes": {
+    "message": "正在拉取视频数据...（已获取 $1）"
+  },
+  "telegram_noData": {
+    "message": "未取到任何视频数据（视频可能已被页面回收，请刷新页面后重试）"
+  },
+  "telegram_started": {
+    "message": "Telegram 视频下载已开始"
   },
   "yt_capturePreparing": {
     "message": "正在准备 YouTube 页面录制下载..."

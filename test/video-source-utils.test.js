@@ -40,6 +40,11 @@ test('getSourceId: dash returns "dash"', () => {
   assert.equal(getSourceId({ type: 'dash' }), 'dash');
 });
 
+test('getSourceId: telegram returns "telegram"', () => {
+  const { getSourceId } = mod();
+  assert.equal(getSourceId({ type: 'telegram' }), 'telegram');
+});
+
 test('getSourceId: direct returns "generic"', () => {
   const { getSourceId } = mod();
   assert.equal(getSourceId({ type: 'direct' }), 'generic');
@@ -119,6 +124,11 @@ test('getExecutionMode: blob returns "content"', () => {
 test('getExecutionMode: dash returns "content"', () => {
   const { getExecutionMode } = mod();
   assert.equal(getExecutionMode({ type: 'dash' }), 'content');
+});
+
+test('getExecutionMode: telegram returns "content" (needs the page service worker)', () => {
+  const { getExecutionMode } = mod();
+  assert.equal(getExecutionMode({ type: 'telegram' }), 'content');
 });
 
 test('getExecutionMode: generic returns "background"', () => {

@@ -3,7 +3,7 @@
   <h1 align="center">Online Video Downloader</h1>
   <p align="center">
     Detect and download online videos from any webpage with one click<br>
-    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
+    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>Telegram</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
@@ -29,7 +29,7 @@
 - 📝 **Subtitle Download** — Save YouTube / Bilibili / HLS subtitles as `.srt` sidecar files (same name as the video, so players match them automatically); auto-generated tracks are tagged `.auto`
 - 🧵 **Unified Download Queue** — Every download (including Bilibili / YouTube in-page downloads) shares one concurrency limit; extra jobs queue up as "Queued (position N)" and can be removed from the queue
 - ⏸️ **Pause / Resume** — Resumable downloads can be paused and continued; interrupted downloads retry automatically and resume from where they left off instead of restarting
-- 🌐 **Broad Compatibility** — Specialized support for YouTube and Bilibili, plus HLS / DASH / MP4 / Blob videos from any website
+- 🌐 **Broad Compatibility** — Specialized support for YouTube, Bilibili and Telegram Web, plus HLS / DASH / MP4 / Blob videos from any website
 - 🔒 **Privacy First** — All processing happens locally, no data is ever sent to third-party servers
 - 🛡️ **DRM Respect** — Encrypted content is flagged but never bypassed
 
@@ -93,6 +93,14 @@ Or download and extract the ZIP.
 - Videos with captions can save a `.srt` sidecar (Bilibili subtitles require login; auto-generated tracks are tagged `.auto`)
 - Premium content requires a premium account
 
+### Telegram Web downloads
+
+- Supports videos and audio played inside `web.telegram.org` (WebK, e.g. `https://web.telegram.org/k/#@channel`)
+- Telegram serves media from its own page Service Worker (a same-origin `…/stream/…` endpoint), so the extension pulls it in the page with `Range` requests, streams the bytes into an OPFS temp file, and hands the finished file to the browser download API — large files never blow up page memory
+- The filename is assembled from the page: `<chat> #<messageId>`, falling back to the tab title
+- The container follows the media MIME type (`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3`, …)
+- Keep the tab open until fetching finishes; cancelling at any time cleans up the temp file
+
 ### HLS streams / .m3u8 videos
 
 - For live streams or VOD using HLS, the extension automatically downloads all TS segments
@@ -123,6 +131,7 @@ The popup panel uses color-coded labels for quick identification:
 | 🟡 **DASH** | MPD stream | Download MPD or merge audio/video |
 | 🔴 **YouTube** | YouTube video | ≤720p direct; 1080p+ auto-merge |
 | 🔵 **B站** | Bilibili video | API fetch + auto-merge |
+| 🔷 **Telegram** | Telegram Web video | Ranged fetch in the page, then save |
 | 🟣 **Blob** | MSE in-memory | Content Script relay download |
 | ⬛ 🔒 **DRM** | Encrypted content | Cannot download, flagged only |
 
@@ -145,6 +154,7 @@ The popup panel uses color-coded labels for quick identification:
 |------|-------------|
 | **YouTube** | Combined + adaptive streams; SPA routing awareness; multi-resolution selection |
 | **Bilibili** | WBI signing; DASH/FLV dual format; multi-part videos; quality selection; CDN Referer injection |
+| **Telegram Web** | Detects the page Service Worker's streaming media endpoint; ranged fetch in the page; `<chat> #<messageId>` naming |
 
 ### Known limitations
 
@@ -163,6 +173,7 @@ Chrome Extension (Manifest V3)
 │   ├── video-registry.js          Detected videos in-memory registry
 │   ├── request-interceptor.js     webRequest network listener
 │   ├── downloader.js              Download scheduler (MP4/HLS/DASH/YouTube/Bilibili)
+│   ├── page-stream-download.js    Page-side stream sink (OPFS → download manager)
 │   ├── hls-fetcher.js             HLS segment download, AES decryption, in-memory merge
 │   └── header-injector.js         Request header injection
 │
@@ -182,6 +193,7 @@ Chrome Extension (Manifest V3)
 ├── lib/                           Shared utility library
 │   ├── hls-pipeline.js            HLS parsing and processing pipeline
 │   ├── mpd-parser.js              DASH MPD parser
+│   ├── telegram-utils.js          Telegram stream URL detection + title assembly
 │   ├── wbi-signer.js              Bilibili WBI signing algorithm
 │   ├── bilibili-muxer.js          Bilibili FLV muxer
 │   ├── mp4-muxer.js               MP4 muxer

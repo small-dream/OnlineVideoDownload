@@ -14,9 +14,10 @@ import { resolveClearVideoScope } from './clear-video-scope.js';
 import { DownloadQueue } from './download-queue.js';
 import { handleDownloadSlotMessage } from './download-slot-port.js';
 import { resolveSaveAs } from './save-location.js';
-import { releaseOpfsDownload } from './offscreen-download.js';
+import { releaseOpfsDownload, submitOpfsDownloadFromOffscreen } from './offscreen-download.js';
 import { downloadSubtitle } from './subtitle-downloader.js';
-import { takeOpfsTempFile } from './opfs-temp-registry.js';
+import { registerOpfsTempFile, takeOpfsTempFile } from './opfs-temp-registry.js';
+import { PageStreamDownloadManager } from './page-stream-download.js';
 import { cleanupAllRules, injectHeaders } from './header-injector.js';
 import {
   browserInfo,
@@ -183,6 +184,15 @@ try {
 
 // OPFS 落盘能力（临时文件登记见 background/opfs-temp-registry.js）
 const opfsSink = globalThis.__OVD_OPFS_SINK__ || {};
+
+// 页面侧抓流落盘：Telegram Web 的 stream 端点只认页面上下文发起的请求，
+// 内容脚本按 Range 取到分片后经消息通道送到这里，落 OPFS 再交给下载管理器。
+const pageStreamDownloads = new PageStreamDownloadManager({
+  broadcastTaskUpdate: (task) => broadcastTaskUpdate(task),
+  downloadStore,
+  registerTempFile: registerOpfsTempFile,
+  submitOpfsDownload: submitOpfsDownloadFromOffscreen,
+});
 const pageMessageGuard = globalThis.__OVD_PAGE_MESSAGE_GUARD__ || {};
 downloadNotifications.attach();
 const tabBadge = createTabBadgeManager();
@@ -472,6 +482,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void pageStreamDownloads.abortForTab(tabId);
   registry.clearTab(tabId);
   tabBadge.clear(tabId);
   const interruptedTasks = downloadStore.markTabInterrupted(tabId);
@@ -877,6 +888,26 @@ async function handleMessage(msg, sender) {
       return {};
     }
 
+    // 页面侧抓流：字节来自内容脚本（页面上下文），后台只负责落盘与交给下载管理器
+    case MSG.PAGE_STREAM_START || 'PAGE_STREAM_START':
+      return pageStreamDownloads.start({ ...msg, tabId });
+
+    case MSG.PAGE_STREAM_CHUNK || 'PAGE_STREAM_CHUNK':
+      return pageStreamDownloads.append(msg);
+
+    case MSG.PAGE_STREAM_FINISH || 'PAGE_STREAM_FINISH': {
+      if (!tabId) {
+        throw new Error('无法解析 tabId，无法保存页面侧抓取的视频流');
+      }
+      return pageStreamDownloads.finish({
+        ...msg,
+        taskMeta: { ...(msg.taskMeta || {}), tabId },
+      });
+    }
+
+    case MSG.PAGE_STREAM_ABORT || 'PAGE_STREAM_ABORT':
+      return pageStreamDownloads.abort(msg);
+
     case MSG.SET_TAB_MUTED || 'SET_TAB_MUTED':
       return setTabMuted(tabId, !!msg.muted);
 
@@ -1211,6 +1242,8 @@ function isTabContextRequiredForVideo(videoInfo = {}) {
   const type = String(videoInfo?.type || '').trim();
   if (type === 'blob') return true;
   if (type === 'bilibili-dash') return true;
+  // Telegram Web 的媒体流必须经页面上下文（页面 Service Worker）抓取
+  if (type === 'telegram') return true;
   return false;
 }
 

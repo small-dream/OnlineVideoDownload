@@ -1,6 +1,6 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.20.0
+> **版本**：1.21.0
 > **最后更新**：2026-09-27
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
@@ -31,14 +31,16 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 | `dash` | DASH 流，完整 MPD 解析与页面内音视频合并 |
 | `youtube-adaptive` | YouTube 自适应流与页面录制下载 |
 | `bilibili-meta` | Bilibili 元数据入口，通过页面 API 获取真实流 |
+| `telegram` | Telegram Web（web.telegram.org/k）内嵌视频/音频，经页面 Service Worker 按 Range 抓取 |
 | `blob` | 由页面创建的 blob URL 视频 |
 | `drm-detected` | 仅提示，不下载 |
 
 来源归属：
 
-- YouTube、Bilibili、blob 主要走 content / page 侧能力。
+- YouTube、Bilibili、Telegram、blob 主要走 content / page 侧能力。
 - 直链、部分 DASH 主要走 background。
 - HLS 优先在 content（页面上下文）抓取：请求继承页面 Origin / Sec-Fetch / Referer / Cookie，规避 CDN 对扩展后台裸请求的 403 拦截；content 不可用或失败时回退到 service worker 抓取。
+- Telegram Web 的媒体地址是同源的 `…/stream/<URL 编码的 DownloadOptions>`，由页面自己的 Service Worker 生成；该 SW 只服务带 clientId 的页面请求，扩展后台/内容脚本直接请求会落到真实服务器并返回 302，因此字节必须在页面上下文按 Range 抓取。
 
 「仅音频」下载：
 
@@ -174,12 +176,23 @@ UI 要求：
 - 条目支持「仅音频」：只抓取 DASH 音轨（`FETCH_MEDIA_STREAMS` 单侧抓取，不再下载视频流）并保存为 `.m4a`，不触发音视频合并
 - 条目支持「字幕」：画质请求同时调 `player/v2` 取字幕轨（接口要页面 Cookie），下载时由后台取回 `subtitle_url` 的 JSON 并转成 `.srt` 侧车文件；拿不到字幕不影响画质列表与媒体下载
 
-### 4.6 Blob 下载
+### 4.6 Telegram Web 下载
+
+- 支持 web.telegram.org（WebK：`/k/#@频道`）内嵌播放的视频与音频
+- WebK 的媒体地址是同源 `…/k/stream/<URL 编码的 DownloadOptions JSON>`，由页面自己的 Service Worker 把 MTProto 分块伪装成 HTTP 响应；该 SW 只服务带 clientId 的页面请求（`self.clients.get(e.clientId)`），内容脚本/扩展后台的 fetch 不被接管、会落到真实服务器并拿到 302，因此字节必须回到页面上下文（注入脚本）按 Range 逐段抓取
+- 页面脚本按 `Range` 循环拉取（单次 2 MB），每 512 KB 分块回传内容脚本、再转交后台顺序写入 OPFS 临时文件；每块写完内容脚本才回 ack，页面才继续读下一块（背压），因此内存里始终只有一块，GB 级文件也不会撑爆页面。完成后由 offscreen 生成对象 URL 交给浏览器下载 API 保存
+- 完整性校验：以 `Content-Range` 的总长为准，读到一半就断（截断）或一个字节都没取到都会明确报错并清理临时文件，不会静默保存残缺/空文件
+- 标题从页面 DOM 拼装：`<会话名> #<消息ID>`（会话名取当前聊天标题，消息 ID 取视频气泡的 `data-mid`）；两者都拿不到时退回标签页标题
+- 容器按流的 MIME 决定：`video/mp4` → `.mp4`、`video/webm` → `.webm`、`video/quicktime` → `.mov`、`audio/*` → `.m4a`/`.mp3` 等；MIME 未知时回退 `.mp4`
+- 进度上报到条目与页面浮动反馈条（`正在从 Telegram 拉取视频数据…`）；取消会中止 Range 循环并删除未完成的 OPFS 临时文件
+- 只处理页面 Service Worker 提供的 `stream/` 端点；若页面已把文件完整下载并改用 `blob:` 播放，则走通用 Blob 路径
+
+### 4.7 Blob 下载
 
 - content script 读取 blob URL
 - 在页面内重新创建可下载对象并触发浏览器保存
 
-### 4.7 批量下载
+### 4.8 批量下载
 
 - Popup 视频列表支持多选复选框
 - 提供"全选"与"取消全选"操作
@@ -191,7 +204,7 @@ UI 要求：
 - DRM 保护的条目不可勾选，不参与批量下载
 - 列表头部提供「全选/取消全选」与「下载所选 (N)」按钮，N 为当前已选数量
 
-### 4.8 设置页面
+### 4.9 设置页面
 
 - 设置界面内置在 Popup 中
 - 设置界面包含所有可配置选项（并发下载数、下载目录、历史保留天数等）
@@ -200,7 +213,7 @@ UI 要求：
 - 使用 `lib/settings-store.js` 统一读写设置，所有运行时通过共享 store 保持一致
 - 支持 `chrome.storage.local` 持久化
 
-### 4.9 下载历史
+### 4.10 下载历史
 
 - 使用 `chrome.storage.local` 持久化下载记录
 - 最多保留 100 条历史记录
@@ -238,6 +251,7 @@ UI 要求：
 | 页面内合并 | 全局进度与状态文案 | muxer 回调 |
 | 来源下载生命周期 | Popup 状态提示 | `SOURCE_DOWNLOAD_STARTED` / `SOURCE_DOWNLOAD_RESULT` |
 | 页面内抓流 / 录制 | Popup 全局进度与状态文案 | `SOURCE_DOWNLOAD_PROGRESS` / `SOURCE_DOWNLOAD_STATUS` |
+| Telegram 流式抓取 | 条目进度 + 页面浮动反馈条 | 内容脚本 Range 循环上报（`SOURCE_DOWNLOAD_PROGRESS` / `SOURCE_DOWNLOAD_STATUS`） |
 | 下载中任务 | 条目按钮百分比（「下载中 N%」） | background 广播进度 |
 | 解析下载的两阶段进度 | 条目按钮 / 任务列表 / 页面浮条三处显示同一数字 | `lib/progress-scale.js`（抓取 0..90、合并 90..99、完成 100） |
 | 直播流 | 全局状态文案（「检测到直播流，仅能下载当前播放窗口的 N 个分片」） | `SOURCE_DOWNLOAD_STATUS` |
@@ -284,6 +298,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.21.0 | 2026-09-30 | 新增 Telegram Web（web.telegram.org/k）视频下载。①新增 `lib/telegram-utils.js`：识别 `stream/` 流式媒体地址与 Telegram blob（`isTelegramStreamUrl` / `isTelegramMediaUrl`）、解析 DownloadOptions JSON 取 `docId`/`mimeType`/`size`（`parseTelegramStreamInfo`）、按 MIME 猜扩展名（`guessMediaExtension`）、从 DOM 信息拼标题（`buildTelegramTitle` → `<会话名> #<消息ID>`），并提供共享的 Range 读取器 `readTelegramStream`。②新增页面↔内容侧抓流协议 `PAGE_STREAM_FETCH_REQUEST/START/PROGRESS/CHUNK/FINISH/ERROR/ABORT/ACK`：WebK 的 `/stream/` 端点由页面自己的 Service Worker 提供，而该 SW 用 `self.clients.get(e.clientId)` 找页面客户端——内容脚本/后台的 fetch 没有 clientId、不被接管，会落到真实服务器拿到 302（实测），所以字节必须在**页面上下文**抓取。`injected/page-http-utils.js` 按 2 MB Range 循环取数、每 512 KB 分块回传并等待逐块 ack（背压，内存里始终只有一块），读完以 `Content-Range` 总长校验完整性，截断/空流都报错而不是保存残片。③内容侧 `content/stream-transfer-manager.js#fetchPageStreamInPage` 把分片转交后台落盘；`content/strategies/telegram-strategy.js` 只负责文件名/taskMeta/进度/结果。④新增 `background/page-stream-download.js`（`PageStreamDownloadManager`）：顺序写 OPFS → offscreen 生成对象 URL → 浏览器下载 API 保存，并把 `downloadId` 挂回内容侧同一条任务；标签页关闭时清理残留传输，零字节流直接拒绝。⑤探测链路单列 `telegram` 类型：`injected/page-interceptor.js` 扫描 `<video src=…/stream/…>` 时采集标题/消息 ID/MIME/体积并跳过无意义的 HEAD 体积探测，`background/request-interceptor.js` 同样识别，`lib/video-source-utils.js` / `lib/video-utils.js` / `lib/page-message-guard.js` 增加类型与执行模式（content）。新增用例 34 条，全量 816 项通过。 |
 | 1.20.0 | 2026-09-27 | 下载队列统一并发 + 断点续传（暂停/继续）。①`background/download-queue.js` 改为「按条目管理」：每个等待/进行中的下载是一个带 `id`/`label`/`owner`/`videoUrl` 的条目，新增 `snapshot()`（含排队位次）、`cancelQueued()`、`releaseOwner()` 与 `onChange()`；队列变化即时广播 `DOWNLOAD_QUEUE_UPDATE`。②内容侧下载（Bilibili / YouTube 页面内）不再绕过并发上限：Popup 通过新增的长连接端口 `ovd-download-slots` 申请槽位（`background/download-slot-port.js`，协议 ACQUIRE/RELEASE/CANCEL/PING），Popup 关闭时端口断开、后台按 owner 回收槽位，不会泄漏也不会让无人接收结果的任务偷偷开始；批量下载不再自带信号量，全部条目统一入队。③`DOWNLOAD_VIDEO` 与「重试」也改为条目化入队，任务视图把排队条目渲染成「排队中（第 N 位）」并支持「取消排队」。④断点续传：新增 `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`（`chrome.downloads.pause` / `resume`，仅对 `canResume` 的下载生效），任务状态新增 `paused`，`onChanged` 的 `paused` 增量同步任务状态；手动「重试」优先走 `resume` 从断点继续而不是从头重下；SW 重启核对任务时把 `paused` 一并纳入。⑤并发上限设置上限从 5 提到 10，与队列上限一致。新增用例 10 条，全量 780 项通过。 |
 | 1.19.0 | 2026-09-27 | 新增「字幕」侧车下载（对标 VDH 的字幕能力）：①新增 `lib/subtitle-utils.js` —— 统一解析 WebVTT / YouTube json3 / YouTube srv3-srv1 XML / Bilibili JSON / SRT 并输出 SRT（`parseSubtitleText` → `cuesToSrt`），含轨道归一化（兼容 YouTube `captionTracks` 与 Bilibili `player/v2` 两种形状）、语言选择、`<标题>.<语言>[.auto].srt` 命名与时间戳格式化。②YouTube 在检测阶段把 `captions.playerCaptionsTrackListRenderer.captionTracks` 随 videoInfo 上报（`injected/page-youtube-parser.js`），`mergeVideoInfo` 保护该字段不被后续网络拦截上报冲掉。③Bilibili 的 `fetchQualities` 并行调 `player/v2`（需页面 Cookie）返回字幕轨；HLS 的 `fetchQualities` 返回 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES` 轨道。④新增 `background/subtitle-downloader.js`：YouTube 按 `fmt=json3 → vtt → srv3` 逐个重试（HTTP 报错/空响应换下一种），Bilibili/HLS 单次取回后自动识别格式，统一转 `.srt` 经 offscreen 保存并登记到下载任务表；`DOWNLOAD_SUBTITLE` 消息由 Popup 在勾选字幕时与媒体下载并行发出（失败只提示不回滚媒体）。⑤Popup 新增「字幕」开关 + 语言下拉（默认「自动（推荐）」），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。⑥`lib/download-artifact-utils.js#isBrokenTextStubDownload` 放行字幕扩展名，避免把正常的小体积字幕误判为服务器错误页残片。新增用例 26 条，全量 770 项通过。 |
 | 1.18.0 | 2026-09-27 | 新增「仅音频」下载（对标 VDH 的音频下载能力）：YouTube 与 Bilibili 条目新增「仅音频」开关，勾选后只保存音轨、不下载视频画面也不做合并。①YouTube 走后台直链路径（`background/download-strategies/youtube-adaptive-download-strategy.js#downloadAudioOnlyInBackground`）：`pickBestAudioStream`（新增于 `lib/youtube-stream-utils.js`）优先原声轨、优先 MP4 容器、同容器取最高码率，无 MP4 音轨时退回 WebM/Opus；媒体 MIME 可信时交给下载管理器（可续传），MIME 不可信/探测失败时自行取回并按正确 MIME 保存（避免 `.txt`）。②Bilibili 走页面上下文（需页面 Cookie 调 WBI 签名 playurl）：只抓 DASH 音轨后保存为 `.m4a`。③`background/service-worker.js#fetchMediaStreams` 支持单侧抓取（视频/音频任一为空即只抓另一侧），供仅音频复用整条带进度/重试/备用 CDN 回退的抓取通道。④`lib/video-source-utils.js#getExecutionMode` 让 YouTube 仅音频始终走后台；`submitDirectDownload` 新增显式 `ext` 覆盖（googlevideo 路径无扩展名时按音轨 MIME 命名）。⑤Popup 在两个平台的条目控件里新增「仅音频」开关（勾选后禁用清晰度下拉），偏好记入 `youtubeDownloadPrefs` / `bilibiliQualityPrefs`。新增用例 14 条，全量 738 项通过。 |
