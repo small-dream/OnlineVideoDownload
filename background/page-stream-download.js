@@ -1,9 +1,10 @@
 // background/page-stream-download.js
 // 内容侧抓流落盘（PAGE_STREAM_* 消息的处理端）。
 //
-// 背景：Telegram Web（web.telegram.org/k）的视频由页面自己的 Service Worker 提供，
-// 地址形如 `…/k/stream/<JSON>`，只有页面上下文发起的请求才会被那个 SW 接管
-// （扩展后台直接 fetch 会打真实网络 → 404）。因此字节必须在内容脚本里抓，
+// 背景：Telegram Web 的视频由页面自己的 Service Worker 提供，地址形如
+// `…/k/stream/<JSON>`（WebK）或 `…/a/progressive/document<id>?…`（WebA），
+// 只有页面上下文发起的请求才会被那个 SW 接管（扩展后台直接 fetch 会打真实网络 → 302）。
+// 因此字节必须在页面上下文里抓，
 // 但内容脚本又不该把整个视频攒在内存里，于是：
 //   内容脚本 Range 分块抓取 → base64 逐块送后台 → 后台顺序写 OPFS → offscreen 生成
 //   对象 URL 交给下载管理器。全程只有单个分片在内存里，GB 级文件也不会撑爆页面。

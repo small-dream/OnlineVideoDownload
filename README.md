@@ -98,9 +98,11 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 
 ### Telegram Web 下载
 
-- 支持 `web.telegram.org`（WebK，如 `https://web.telegram.org/k/#@频道`）内嵌播放的视频与音频
-- Telegram 的媒体地址由页面自己的 Service Worker 提供（同源 `…/stream/…`），扩展在页面上下文按 Range 逐段抓取，边抓边写入 OPFS 临时文件，完成后交给浏览器下载 API 保存——大文件也不会撑爆页面内存
+- 支持 `web.telegram.org` 内嵌播放的视频与音频：WebK（`https://web.telegram.org/k/#@频道`）与 WebA（`https://web.telegram.org/a/#-100…`）
+- Telegram 的媒体地址由页面自己的 Service Worker 提供（同源 `…/stream/…` 或 `…/progressive/…`），扩展在页面上下文按 Range 逐段抓取，边抓边写入 OPFS 临时文件，完成后交给浏览器下载 API 保存——大文件也不会撑爆页面内存
 - 文件名从页面拼装：`<会话名> #<消息ID>`；拿不到时退回标签页标题
+- 只列出完整媒体：WebA 的封面图与视频预览小片（`?size=…`）不会被误列成视频
+- 检测范围是已渲染到页面上的视频气泡：滚出视野的消息会被 Telegram 回收，下载前先滚动到目标视频
 - 容器按媒体 MIME 决定（`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3` 等）
 - 需保持标签页打开直到抓取完成；下载可随时取消，取消会清理临时文件
 

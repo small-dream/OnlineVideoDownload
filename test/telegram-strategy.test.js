@@ -160,3 +160,27 @@ test('telegram strategy exposes support detection for the registry', () => {
   assert.equal(strategy.supports({ type: 'direct', url: STREAM_URL }), true);
   assert.equal(strategy.supports({ type: 'direct', url: 'https://example.com/a.mp4' }), false);
 });
+
+test('telegram strategy 支持 WebA 的 progressive 地址并解析其元信息', async () => {
+  const webAUrl = 'https://web.telegram.org/a/progressive/document987654321'
+    + '?account=1&fileSize=354611815&mimeType=video%2Fmp4';
+  const calls = [];
+  const { context } = createContext();
+  const strategy = createStrategy(async (options) => {
+    calls.push(options);
+    return { downloadId: 7, filename: options.filename, ok: true, size: options.fileSize };
+  });
+
+  assert.equal(strategy.supports({ type: 'direct', url: webAUrl }), true);
+  assert.equal(
+    strategy.supports({ type: 'direct', url: 'https://web.telegram.org/a/progressive/document1?size=x' }),
+    false
+  );
+
+  // 不传 fileSize / mimeType：体积与扩展名都要从 progressive 地址里解析出来
+  await strategy.download({ title: '酒vip群 #4200', type: 'telegram', url: webAUrl }, context);
+
+  assert.equal(calls[0].fileSize, 354611815);
+  assert.equal(calls[0].mimeType, 'video/mp4');
+  assert.equal(calls[0].filename, '酒vip群 #4200.mp4');
+});

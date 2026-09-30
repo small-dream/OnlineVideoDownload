@@ -432,9 +432,9 @@
     /**
      * Telegram Web 页面侧抓流的落盘中继。
      *
-     * 字节必须在页面上下文（MAIN world）抓：WebK 的 `/stream/` 端点由页面自己的
-     * Service Worker 生成，而该 SW 用 `self.clients.get(e.clientId)` 找页面客户端，
-     * 内容脚本的 fetch 没有 clientId、不被接管（会落到真实服务器拿到 302）。
+     * 字节必须在页面上下文（MAIN world）抓：Telegram 的 `/stream/`、`/progressive/`
+     * 端点由页面自己的 Service Worker 生成，而该 SW 用 `self.clients.get(e.clientId)`
+     * 找页面客户端，内容脚本/扩展后台的 fetch 没有 clientId、不被接管（会落到真实服务器拿到 302）。
      * 这里只做中继：页面分块 → 后台 OPFS。每块写完后回 ack，页面才继续发下一块，
      * 因此内存里始终只有一块。
      */
