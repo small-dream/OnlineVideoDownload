@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.20.0
-> Last Updated: 2026-09-27
+> Version: 1.21.0
+> Last Updated: 2026-09-30
 
 ## Goals
 
@@ -14,6 +14,8 @@
 
 ```text
 Page Context
+  lib/telegram-utils.js
+  lib/message-types.js
   injected/page-context-script.js
     -> injected/page-core.js
     -> injected/page-http-utils.js
@@ -24,6 +26,7 @@ Page Context
 
 Content Script
   lib/ovd-logger.js
+  lib/telegram-utils.js
   lib/bilibili-quality-utils.js
   lib/bilibili-quality-store.js
   lib/settings-store.js
@@ -49,6 +52,7 @@ Service Worker
   background/service-worker.js
   background/downloader.js
   background/subtitle-downloader.js
+  background/page-stream-download.js
   background/download-queue.js
   background/download-slot-port.js
   background/hls-fetcher.js
@@ -308,6 +312,33 @@ Notes:
 - 无 `DOMParser` 的环境（Node 单元测试）自动退回内置最小 XML 解析器，因此 `test/mpd-parser.test.js` 在 Node 下真实执行而非 skip。
 - 返回结构新增 `periods: [{ id, index, start, duration, adaptations }]` 与 `isMultiPeriod`；`adaptations` 仍为扁平列表，且每项附带 `periodIndex` / `periodId` / `start`。
 - `SegmentTimeline` 支持 `r="-1"`（重复到 Period 结束，依赖 `Period@duration`）；`SegmentURL@mediaRange`/`indexRange`、`Initialization@range`、`SegmentBase@indexRange` 解析为 `{ start, end, length }`，开放区间生成 `bytes=start-`。
+
+### `lib/telegram-utils.js`
+
+File: [lib/telegram-utils.js](D:/github/OnlineVideoDownload/lib/telegram-utils.js)
+
+Responsibilities:
+
+- 识别 Telegram Web 的媒体地址。WebK 播放文档时不走普通直链，而是由页面自己的 Service Worker 把 MTProto 分块伪装成同源 `…/k/stream/<URL 编码的 DownloadOptions JSON>`，再按 Range 逐段吐字节。
+- 这类地址**只有页面上下文能读**：SW 用 `self.clients.get(e.clientId)` 找发起请求的页面客户端（tweb `progressive.ts#requestPart`），内容脚本/扩展后台的 fetch 没有 clientId，SW 不接管，请求会落到真实服务器并拿到 `302 Found`（实测 `web.telegram.org/k/stream/…` 与任意未知 `/k/` 路径都返回无 Location 的 302）。因此抓取必须放在 MAIN world。
+- 同时识别页面自己 `createObjectURL` 出来的 `blob:https://web.telegram.org/…`（完整文件被页面下载后用于播放）。
+
+Public surface:
+
+- `TELEGRAM_WEB_HOSTS` / `STREAM_PATH_SEGMENT`
+- `isTelegramWebHost(hostname)` / `isTelegramWebPageUrl(url)`
+- `isTelegramStreamUrl(url)`（只看 pathname，容忍 `?_crbug1250841` 之类的修复参数）/ `isTelegramBlobUrl(url)` / `isTelegramMediaUrl(url)`
+- `parseTelegramStreamInfo(url)` → `{ docId, mimeType, size, accountNumber? }`（解析失败返回空字段，调用方回退用响应头）
+- `guessMediaExtension(mimeType, fallback)`（MIME → `.mp4`/`.webm`/`.mov`/`.m4a`/`.mp3` 等）
+- `buildTelegramTitle({ chatTitle, messageId })` → `"<会话名> #<消息ID>"`，两者都缺失时返回空串
+- `readTelegramStream({ url, fetchImpl, signal, totalHint, rangeChunkBytes, transferChunkBytes, onChunk, onProgress })` → `{ bytes, ranged, totalBytes }`：按 Range 循环读取并**逐块 await `onChunk`**（调用方据此做背压），`Content-Range` 的总长会覆盖 URL 里猜的体积；`ranged` 表示是否见过权威总长，供调用方判断截断。
+- `totalBytesFromContentRange(header)` / `createStreamAbortError(message)`（`code: 'DOWNLOAD_ABORTED'`）
+
+Notes:
+
+- 该文件以 IIFE 挂到 `globalThis.__OVD_TELEGRAM_UTILS__`，同时出现在 content_scripts 与 MAIN world 脚本里（见 `pageScripts`），因此内容脚本与页面上下文用同一套判定；`readTelegramStream` 只在页面上下文调用（`injected/page-http-utils.js`）。
+- 解析 DownloadOptions JSON 时兼容 `location.id` / `docId` / `doc_id` 三种取值；`size` 用于列表体积与抓取进度分母。
+
 ### `lib/settings-store.js`
 
 Responsibilities:
@@ -436,13 +467,14 @@ Files:
 Responsibilities:
 
 - `page-core`: own page-context constants, `postMessage` bridging, content-to-page message routing, and shared reset hooks.
-- `page-http-utils`: own page-side binary fetch helpers, resumable/ranged media fetches, direct-download handling, and YouTube stream chunk transfer.
+- `page-http-utils`: own page-side binary fetch helpers, resumable/ranged media fetches, direct-download handling, YouTube stream chunk transfer, and the Telegram page-side ranged transfer (`PAGE_STREAM_FETCH_REQUEST` → `readTelegramStream` → `PAGE_STREAM_FETCH_CHUNK` with per-chunk acks).
 - `page-youtube-parser`: own YouTube player-response extraction, dedupe state, watch-page validation, and Android fallback logic.
 - `page-bilibili-parser`: own Bilibili page metadata extraction and validation across `__INITIAL_STATE__`, `__playinfo__`, and player APIs. Extracts thumbnail from `videoData.pic`, `videoData.cover`, `initialState.pic`, and DOM `<meta>` / `<img>` elements.
 - `page-interceptor`: own XHR/fetch interception, `MediaSource` / blob detection, DRM detection, history hooks, and generic audio/video element scans.
 - `page-interceptor` 上报通用 / blob 检测时用 `frameDisplayTitle()`：顶层 frame 取 `document.title`，子框架留空（iframe 标题通常是播放器名，如「弹幕播放器」，交由 background 用标签页标题补全）。
 - `page-interceptor` 的通用扫描同时采集封面：`extractMediaThumbnail(mediaElement, src)` 优先取 `poster`，没有 poster 才 `captureFrameThumbnail` 用 canvas 截当前帧（JPEG，宽 ≤320px）。跨域未声明 CORS 的媒体会污染 canvas，`drawImage`/`toDataURL` 抛错时返回空串（`<video>` 元素与 src 组合各缓存一次，避免每次重扫都重新编码）。元素级封面都拿不到、且本 frame 只有一个 `<video>` 时，`resolvePageThumbnail()` 退回页面 `og:image` / `twitter:image` / `itemprop="thumbnailUrl"`，取得的结果按页面缓存（未命中不缓存，允许脚本稍后注入）。
 - `scanVideoElements` 现在也登记 `blob:` 源的 `<video>`（MSE 播放流与 `createObjectURL` 自建播放器），并在「本 frame 只有一个 `<video>`」时给带封面的上报加 `thumbnailScope: 'frame'`，授权 background 把该封面共享给同 frame 的其它条目。`takeThumbnailPayload()` 保证同一元素 + 同一 src 只上报一次 data URL（注册表合并时会保留已捕获的封面）。
+- `page-interceptor`（Telegram）：`scanVideoElements` 遇到同源 `…/stream/…` 的 `<video>` 时上报类型 `telegram`，并用 `lib/telegram-utils.js` 从 DownloadOptions 取 `mimeType` / `fileSize` / `docId`、从视频气泡的 `data-mid` 与当前会话标题拼标题（`buildTelegramTitle`）；这类地址不带 Range 时只回吐第一段，因此跳过通用 HEAD 体积探测（体积改由 Range 响应头 / DownloadOptions 提供）。
 
 Notes:
 
@@ -484,6 +516,7 @@ Current source IDs:
 - `youtube`
 - `bilibili`
 - `dash`
+- `telegram`
 - `generic`
 
 ### Strategies
@@ -497,6 +530,7 @@ Files:
 - [content/strategies/generic-strategy.js](D:/github/OnlineVideoDownload/content/strategies/generic-strategy.js)
 - [content/strategies/hls-strategy.js](D:/github/OnlineVideoDownload/content/strategies/hls-strategy.js)
 - [content/strategies/dash-strategy.js](D:/github/OnlineVideoDownload/content/strategies/dash-strategy.js)
+- [content/strategies/telegram-strategy.js](D:/github/OnlineVideoDownload/content/strategies/telegram-strategy.js)
 
 Responsibilities:
 
@@ -510,6 +544,7 @@ Responsibilities:
 - `hls-strategy`: handle `HLS_DOWNLOAD_DELEGATE` in content using the shared HLS pipeline; page requests carry site cookies and page origin so CDN bot protection (Cloudflare WAF etc.) does not see an extension-context fetch.
 - `hls-strategy`（字幕）：`fetchQualities` 解析 Master Playlist 的 `EXT-X-MEDIA TYPE=SUBTITLES` 独立字幕轨，返回 `subtitles`（无字幕轨时为 `[]`），供 Popup 作为可下载的「字幕」选项。
 - `dash-strategy`: handle `DASH_DOWNLOAD_DELEGATE` in content; parse MPD manifest, fetch video and audio segments, and merge them using BilibiliMuxer into a single MP4.
+- `telegram-strategy`（`id: 'page-stream'`）：Telegram WebK 的媒体字节只能由页面上下文（页面 Service Worker）提供，且内容脚本的 fetch 没有 clientId、不会被该 SW 接管（实测拿到 302），所以策略本身不抓字节——它只负责文件名（`lib/telegram-utils.js` 的标题 + MIME 推导扩展名）、taskMeta、进度与结果，实际抓取交给注入的 `streamTransferManager.fetchPageStreamInPage`（页面抓 → 内容中继 → 后台 OPFS）。
 
 Additional content helpers:
 
@@ -724,6 +759,22 @@ Responsibilities:
 - 纯函数 `handleDownloadSlotMessage(queue, owner, message)`，只依赖队列接口，因此可单测（`test/download-slot-port.test.js`）。
 - SW 侧胶水（`attachDownloadSlotPort`）负责端口生命周期：连接时握手并广播快照，断开时 `releaseOwner(owner)` 回收该 Popup 持有的全部槽位（含仍在排队的条目）。
 
+### Page Stream Download
+
+File: [background/page-stream-download.js](D:/github/OnlineVideoDownload/background/page-stream-download.js)
+
+Responsibilities:
+
+- `PAGE_STREAM_*` 消息的处理端，把「页面脚本按 Range 抓取、内容脚本逐块转交的媒体分片」顺序写盘并交给浏览器下载：`start` 建 OPFS sink（`lib/opfs-sink.js#createOpfsSink`，前缀 `ovd-page-stream`）、`append` 逐块 `base64ToUint8Array` 后 `sink.write()`、`finish` 调 `finalize()` 再经 `submitOpfsDownloadFromOffscreen`（`background/offscreen-download.js`）保存（零字节直接拒绝）、`abort` 直接 `sink.remove()` 清理。
+- 传输状态集中在模块级 `Map<transferId, { sink, filename, mimeType, bytes, tabId, taskMeta, … }>`（`transferCount` getter 供调试/测试）；内容脚本只按 `transferId` 引用，后台不缓存整个文件。
+- `_attachDownloadToTask(downloadId, …)` 把浏览器 `downloadId` 挂回内容侧已在跟踪的同一条任务：`DownloadStateStore#registerDownload`（`requiresTabContext: true`、`strategyId: 'page-stream'`、`sourceId: 'telegram'`）＋ `updateTaskByVideoUrl(..., { status: 'complete', percent: 100 })`，因此任务列表不会出现重复条目。
+- `abortForTab(tabId)` 由 `chrome.tabs.onRemoved` 调用，清理该标签页未完成的传输，避免 OPFS 临时文件残留。
+
+Notes:
+
+- 只做落盘与任务登记，不解析 Telegram 协议；识别与抓取分别由 `lib/telegram-utils.js` 和 `content/strategies/telegram-strategy.js` 负责。
+- 构造依赖注入（`createSink` / `downloadStore` / `registerTempFile` / `submitOpfsDownload` / `broadcastTaskUpdate`），因此可用内存 sink 单测（`test/page-stream-download.test.js`）。
+
 ### Save Location
 
 File: [background/save-location.js](D:/github/OnlineVideoDownload/background/save-location.js)
@@ -840,9 +891,11 @@ Examples:
 - `YOUTUBE_MEDIA_STREAM_CHUNK`
 - `YOUTUBE_MEDIA_STREAM_FINISH`
 - `YOUTUBE_MEDIA_STREAM_ERROR`
+- `PAGE_STREAM_FETCH_START` / `PAGE_STREAM_FETCH_PROGRESS` / `PAGE_STREAM_FETCH_CHUNK` / `PAGE_STREAM_FETCH_FINISH` / `PAGE_STREAM_FETCH_ERROR`
 
 Notes:
 
+- `PAGE_STREAM_FETCH_*` 是 Telegram Web 的页面侧抓流协议：内容脚本用 `PAGE_STREAM_FETCH_REQUEST { transferId, url, totalBytesHint }` 让页面开始，页面用 `readTelegramStream`（`lib/telegram-utils.js`）按 Range 逐段取字节，**每 512 KB** 发一条 `PAGE_STREAM_FETCH_CHUNK { transferId, seq, chunkBase64 }`，发完一块必须等到内容脚本回 `PAGE_STREAM_FETCH_ACK { transferId, seq }` 才发下一块（背压，页面内存里始终只有一块）；`PAGE_STREAM_FETCH_PROGRESS` 带 `loadedBytes` / `totalBytes`；结尾发 `FINISH { bytes, totalBytes }` 或 `ERROR { error, code?, aborted? }`。内容脚本可随时用 `PAGE_STREAM_FETCH_ABORT { transferId }` 中止（会唤醒等待中的 ack 并中止页面 fetch）。必须走页面上下文的原因见 `lib/telegram-utils.js` 一节：WebK 的 SW 不服务没有 clientId 的请求。
 - `lib/message-types.js` now centralizes shared message names and page-context source identifiers across background, content, popup, and injected page runtime.
 - `YOUTUBE_DIRECT_DOWNLOAD` and `YOUTUBE_MEDIA_STREAMS_REQUEST` from content to page now include optional `traceId`.
 - `RESCAN_PAGE_VIDEOS`（content → page）由 `content/message-router.js` 在收到 background 的 `RESCAN_TAB_VIDEOS` 时发出，页面上下文据此重扫 `<video>`/`<audio>` 并重跑 YouTube / Bilibili 解析；无 payload 字段。
@@ -872,6 +925,7 @@ Examples:
 - `GET_DOWNLOAD_HISTORY`
 - `CLEAR_DOWNLOAD_HISTORY`
 - `GET_DOWNLOAD_QUEUE` / `CANCEL_QUEUED_DOWNLOAD`
+- `PAGE_STREAM_START` / `PAGE_STREAM_CHUNK` / `PAGE_STREAM_FINISH` / `PAGE_STREAM_ABORT`
 - `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`
 - `RETRY_DOWNLOAD_TASK` / `DELETE_DOWNLOAD_TASK`
 - `OPEN_DOWNLOAD_FOLDER`
@@ -889,6 +943,7 @@ Notes:
 - `VIDEO_DETECTED` 可选携带封面字段 `thumbnail` / `poster` / `cover`（页面侧采集，进入注册表前由 `lib/page-message-guard.js#sanitizeThumbnail` 清洗：仅 http(s) / 协议相对图片与 base64 图片，≤256KB）；`thumbnailScope: 'frame'` 表示该封面取自「本 frame 唯一的 `<video>`」，background 据此补全同 frame 的 hls / dash / direct / blob 条目。
 - `DOWNLOAD_SUBTITLE` 由 Popup 发出，字段为 `track`（`{ url, languageCode, languageName, isAsr, format }`）/ `sourceId` / `title` / `videoUrl`；background 的 `subtitle-downloader` 取流、转 `.srt` 并保存，返回 `{ ok, filename, downloadId, cues, format, size }`。它与媒体下载**并行**发出且为最佳努力：失败只提示，不回滚媒体文件。
 - `GET_DOWNLOAD_QUEUE` 返回 `{ queue: { limit, active, pending, entries } }`；`CANCEL_QUEUED_DOWNLOAD { queueId }` 只取消尚未开始的条目（返回 `{ cancelled }`）。`PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK { taskId }` 走 `chrome.downloads.pause` / `resume`：仅对 `canResume` 的下载生效，暂停后任务状态为 `paused`，继续时清空自动重试计数并从断点续传（返回 `{ ok, task }`，失败时 `{ ok:false, error }`）。`RETRY_DOWNLOAD_TASK` 现在优先 `resume` 续传，续传不可用才回退为重新发起下载。
+- `PAGE_STREAM_*` 是页面侧抓流的落盘协议（Telegram Web）：`START { transferId, filename, mimeType, fileSize, taskMeta }` 建传输，`CHUNK { transferId, seq, chunkBase64 }` 追加分片（页面每 512 KB 一块，内容脚本转交），`FINISH { transferId, taskMeta }` 落盘并保存（返回 `{ ok, downloadId, filename, size }`，零字节直接拒绝而不是保存空文件），`ABORT { transferId, error }` 清理半成品。传输按 `tabId`（取自 `sender`）隔离，标签页关闭时由 `tabs.onRemoved` 统一清理。字节由页面上下文取得（WebK 的 SW 不服务没有 clientId 的内容脚本/后台请求），后台只负责落盘与任务登记。
 
 ### Background -> Content / Popup
 
@@ -981,32 +1036,43 @@ Manifest content-script order is now:
 2. `lib/byte-utils.js`
 3. `lib/http-utils.js`
 4. `lib/constants.js`
-5. `lib/message-types.js`
-6. `lib/video-utils.js`
-7. `lib/ui-dom-utils.js`
-8. `lib/video-source-utils.js`
-9. `lib/mp4-muxer.js`
-10. `lib/bilibili-muxer.js`
-11. `lib/wbi-signer.js`
-12. `lib/bilibili-quality-utils.js`
-13. `lib/bilibili-quality-store.js`
-14. `lib/settings-store.js`
-15. `lib/hls-pipeline.js`
-16. `lib/mpd-parser.js`
-17. `lib/ovd-logger.js`
-18. `lib/youtube-download-mode-store.js`
-19. `lib/youtube-stream-utils.js`
-20. `lib/subtitle-utils.js`
-21. `content/source-handlers.js`
-22. `content/progress-reporter.js`
-23. `content/youtube-download-options.js`
-24. `content/youtube-download-errors.js`
-25. `content/strategies/*` (includes `dash-strategy.js`)
-26. `content/stream-transfer-manager.js`
-27. `content/download-coordinator.js`
-28. `content/float-button.js`
-29. `content/message-router.js`
-30. `content/content-main.js`
+5. `lib/progress-scale.js`
+6. `lib/message-types.js`
+7. `lib/telegram-utils.js`
+8. `lib/i18n.js`
+9. `lib/page-message-guard.js`
+10. `lib/video-utils.js`
+11. `lib/ui-dom-utils.js`
+12. `lib/video-source-utils.js`
+13. `lib/mp4-muxer.js`
+14. `lib/bilibili-muxer.js`
+15. `lib/wbi-signer.js`
+16. `lib/bilibili-quality-utils.js`
+17. `lib/bilibili-quality-store.js`
+18. `lib/settings-store.js`
+19. `lib/hls-pipeline.js`
+20. `lib/mpd-parser.js`
+21. `lib/ovd-logger.js`
+22. `lib/youtube-download-mode-store.js`
+23. `lib/youtube-stream-utils.js`
+24. `lib/subtitle-utils.js`
+25. `content/source-handlers.js`
+26. `content/progress-reporter.js`
+27. `content/youtube-download-options.js`
+28. `content/youtube-download-errors.js`
+29. `content/strategies/blob-strategy.js`
+30. `content/strategies/youtube-capture-strategy.js`
+31. `content/strategies/youtube-parse-download-strategy.js`
+32. `content/strategies/bilibili-strategy.js`
+33. `content/strategies/hls-strategy.js`
+34. `content/strategies/dash-strategy.js`
+35. `content/strategies/generic-strategy.js`
+36. `content/strategies/telegram-strategy.js`
+37. `content/stream-transfer-manager.js`
+38. `content/download-coordinator.js`
+39. `content/float-button.js`
+40. `content/message-router.js`
+41. `content/content-main.js`
 
 This order is required because content modules communicate through `globalThis` factories.
 
@@ -1022,12 +1088,15 @@ Content scripts 以 `all_frames: true` 注入所有子框架，用于检测第�
 
 The page-context loader injects child scripts in this order:
 
-1. `injected/page-core.js`
-2. `injected/page-http-utils.js`
-3. `injected/page-youtube-parser.js`
-4. `injected/page-bilibili-parser.js`
-5. `injected/page-interceptor.js`
-6. Boot page-context runtime from `injected/page-context-script.js`
+1. `lib/message-types.js`
+2. `lib/telegram-utils.js`
+3. `lib/youtube-innertube-clients.js`
+4. `injected/page-core.js`
+5. `injected/page-http-utils.js`
+6. `injected/page-youtube-parser.js`
+7. `injected/page-bilibili-parser.js`
+8. `injected/page-interceptor.js`
+9. Boot page-context runtime from `injected/page-context-script.js`
 
 This order is required because the page runtime uses `window.__OVD_PAGE_*__` namespaces for dependency wiring.
 
@@ -1067,6 +1136,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.21.0 | 2026-09-30 | Telegram Web (web.telegram.org/k) video downloads. WebK serves media from its own Service Worker as a same-origin `…/k/stream/<URL-encoded DownloadOptions JSON>` endpoint that answers Range requests. Critically, that SW resolves the requesting client with `self.clients.get(e.clientId)`, so a content-script (or background) fetch has no clientId and is never intercepted — it hits the real server, which 302s unknown `/k/` paths (verified live). The bytes therefore must be pulled in the **page context (MAIN world)**. New `lib/telegram-utils.js` (`isTelegramStreamUrl` / `isTelegramMediaUrl` / `isTelegramBlobUrl`, `parseTelegramStreamInfo` → `{ docId, mimeType, size }`, `guessMediaExtension`, `buildTelegramTitle` → `"<chat> #<messageId>"`, plus the shared ranged reader `readTelegramStream` → `{ bytes, ranged, totalBytes }`, `totalBytesFromContentRange`, `createStreamAbortError`). New page↔content protocol `PAGE_STREAM_FETCH_REQUEST` / `_START` / `_PROGRESS` / `_CHUNK` / `_FINISH` / `_ERROR` / `_ABORT` / `_ACK`: `injected/page-http-utils.js` handles `REQUEST` by looping 2 MB Range requests over `readTelegramStream` (which caps a single SW response at its own part size and follows `Content-Range` to the true total), base64-chunks every 512 KB and waits for a per-chunk `ACK` before reading on, so only one chunk is ever in flight; it also refuses to finish a truncated (`ranged && bytes < totalBytes`) or empty stream. `content/stream-transfer-manager.js#fetchPageStreamInPage` relays each chunk to the background and acks it, `content/message-router.js` routes the page messages, and `content/strategies/telegram-strategy.js` (`id: 'page-stream'`, source `telegram`, execution mode `content`) owns only filename/taskMeta/progress/result. `background/page-stream-download.js` (`PageStreamDownloadManager`) writes chunks sequentially to an OPFS sink (`ovd-page-stream`), finalizes via `submitOpfsDownloadFromOffscreen`, attaches the resulting `downloadId` back onto the content-side task (`registerDownload` + `updateTaskByVideoUrl`, no duplicate row), cleans up unfinished transfers with `abortForTab` on tab close, and rejects a zero-byte stream instead of saving an empty file. Detection is a first-class `telegram` type: `injected/page-interceptor.js` reports `<video src=…/stream/…>` with DOM-derived title/message id (`data-mid`) and skips the meaningless HEAD size probe, `background/request-interceptor.js` maps stream URLs to it, and `lib/video-source-utils.js` / `lib/video-utils.js` / `lib/page-message-guard.js` add the type, the `content` execution mode and the popup badge label. 34 new test cases, 816 total passing. |
 | 1.20.0 | 2026-09-27 | Unified download concurrency and resumable downloads. `background/download-queue.js` is now entry-based: every waiting/running download is a record (`id`/`label`/`owner`/`sourceId`/`tabId`/`videoUrl`/`enqueuedAt`) with `snapshot()` (1-based queue positions), `cancelQueued()`, `releaseOwner()` and `onChange()`; queue changes broadcast `DOWNLOAD_QUEUE_UPDATE`. Content-side downloads (Bilibili / YouTube in-page) no longer bypass the limit: the popup acquires a slot over a long-lived port (`ovd-download-slots`, protocol in new `background/download-slot-port.js`; ACQUIRE/RELEASE/CANCEL/PING → SLOT_ADMITTED/SLOT_ABORTED/SLOT_RELEASED/SLOT_CANCELLED/SLOT_READY) before sending `SOURCE_DOWNLOAD`, and the service worker releases everything the port owned on disconnect, so closing the popup can neither leak slots nor start a queued job nobody can receive. `DOWNLOAD_VIDEO` and `RETRY_DOWNLOAD_TASK` also enqueue entry-based; the popup renders queued entries as 「排队中（第 N 位）」 rows with a 「取消排队」 action (and 「排队中 #N」 on the item button) and drops its own batch semaphore. Resumable downloads: new `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK` (`chrome.downloads.pause` / `resume`, gated on `canResume`, plus `pauseDownloadAsync`/`supportsDownloadPause` in `lib/browser-compat.js`), a new `paused` task state kept in sync from `onChanged.paused`, retry that prefers `resume` over restarting, and SW-restart reconciliation that also verifies paused tasks. The concurrency setting ceiling moved from 5 to 10 to match the queue. 10 new test cases, 780 total passing. |
 | 1.19.0 | 2026-09-27 | Subtitle sidecar download (VDH parity). Popup gains a 「字幕」 toggle plus language dropdown on YouTube, Bilibili and HLS items (default 「自动（推荐）」: preferred language → manual zh → manual en → any manual → first track; persisted in `youtubeDownloadPrefs.subtitles`/`subtitleLang` and `bilibiliQualityPrefs.subtitles`/`subtitleLang`). New `lib/subtitle-utils.js` parses WebVTT / YouTube `json3` / `srv3`·`srv1` XML / Bilibili JSON / SRT into cues (`parseSubtitleText` auto-detects when `format:'auto'`), emits SRT (`cuesToSrt`), normalizes tracks from both YouTube `captionTracks` and Bilibili `player/v2` shapes, picks a track (`selectSubtitleTrack`), builds `<title>.<lang>[.auto].srt` names, and builds YouTube fetch attempts (`fmt=json3 → vtt → srv3`; the `fmt` swap uses string replace so signed `sparams` commas survive). New `background/subtitle-downloader.js` fetches (`fetchSubtitleCues`, 8MB cap), converts and saves via offscreen (`downloadSubtitle`); `background/service-worker.js` adds the `DOWNLOAD_SUBTITLE` branch and registers the task with `strategyId:'subtitle'`. Track URLs come from the page: `injected/page-youtube-parser.js` reports YouTube `captionTracks` (`mergeVideoInfo` keeps later network hits from clearing them), `content/strategies/bilibili-strategy.js#fetchSubtitleTracks` fetches the page-cookie `player/v2` subtitle list alongside qualities, and `content/strategies/hls-strategy.js#fetchQualities` exposes Master Playlist `EXT-X-MEDIA TYPE=SUBTITLES` tracks; all three surfaces return `subtitles`. Popup fires the subtitle download in parallel with the media download (best-effort: a failure only toasts and never rolls back the media file). `lib/download-artifact-utils.js#isBrokenTextStubDownload` now allows subtitle extensions so small `.srt` files are not misread as error-page stubs. 26 new test cases, 770 total passing. |
 | 1.18.0 | 2026-09-27 | Audio-only download (VDH parity). Popup gains a 「仅音频」 toggle on YouTube and Bilibili items (persisted in `youtubeDownloadPrefs.audioOnly` / `bilibiliQualityPrefs.audioOnly`; the clarity dropdown is disabled while it is on). YouTube: `lib/youtube-stream-utils.js` adds `isAudioStream` and `pickBestAudioStream` (original track → MP4 container → highest bitrate, WebM/Opus fallback) and `estimateYouTubeDownloadSize` returns `kind:'audio'` when `options.audioOnly`; `lib/video-source-utils.js#getExecutionMode` routes YouTube audio-only to the background in both capture and parse modes; `background/download-strategies/youtube-adaptive-download-strategy.js` gains `resolveAudioContainer`/`buildAudioFilename`/`downloadAudioOnlyInBackground` and `supports()` now also matches `audioOnly`; `submitDirectDownload` accepts an explicit `ext` override so extension-less googlevideo URLs are saved as `.m4a`/`.webm` instead of `.mp3`. Bilibili: `content/strategies/bilibili-strategy.js` adds `downloadBilibiliAudioOnly` and a `resolveBilibiliAudioContainer` helper, saving the DASH audio track as `.m4a`/`.webm`/`.mp3` without muxing. `background/service-worker.js#fetchMediaStreams` now accepts a single-sided request (empty `videoUrls` or `audioUrls`), so audio-only reuses the existing progress/retry/backup-CDN fetch pipeline. `lib/bilibili-quality-utils.js#estimateBilibiliDownloadSize` honours `options.audioOnly`. 14 new test cases, 738 total passing. |

@@ -1,6 +1,9 @@
 // background/request-interceptor.js
+import '../lib/telegram-utils.js';
 // Observe network requests with the webRequest API and register media candidates.
 // MV3 only allows observation here; requests cannot be blocked.
+
+const telegramUtils = globalThis.__OVD_TELEGRAM_UTILS__ || {};
 
 export class RequestInterceptor {
   constructor(registry, onDetected) {
@@ -144,6 +147,10 @@ export class RequestInterceptor {
   }
 
   _detectTypeByUrl(url) {
+    // Telegram Web 的流式媒体端点（同源 stream/ 地址）：字节由页面自己的 Service Worker
+    // 生成，直链下载会落到 404，必须交给内容侧按 Range 抓取，因此单列一类。
+    if (telegramUtils.isTelegramStreamUrl?.(url)) return 'telegram';
+
     try {
       const pathname = new URL(url).pathname.toLowerCase();
       if (pathname.includes('.m3u8')) return 'hls';
@@ -166,6 +173,9 @@ export class RequestInterceptor {
   }
 
   _detectTypeByMime(contentType, details = {}) {
+    // stream 端点的响应头就是 video/*，但同上：这里不能用直链策略
+    if (telegramUtils.isTelegramStreamUrl?.(details.url)) return 'telegram';
+
     const ct = contentType.toLowerCase();
     if (ct.includes('application/vnd.apple.mpegurl') || ct.includes('application/x-mpegurl')) return 'hls';
     if (ct.includes('application/dash+xml')) return 'dash';

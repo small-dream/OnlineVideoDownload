@@ -15,6 +15,7 @@
 
   const pageScripts = [
     'lib/message-types.js',
+    'lib/telegram-utils.js',
     'lib/youtube-innertube-clients.js',
     'injected/page-core.js',
     'injected/page-http-utils.js',
@@ -194,6 +195,7 @@
   const bilibiliStrategyFactory = globalThis.__OVD_BILIBILI_STRATEGY__ || {};
   const hlsStrategyFactory = globalThis.__OVD_HLS_STRATEGY__ || {};
   const genericStrategyFactory = globalThis.__OVD_GENERIC_STRATEGY__ || {};
+  const telegramStrategyFactory = globalThis.__OVD_TELEGRAM_STRATEGY__ || {};
   const dashStrategyFactory = globalThis.__OVD_DASH_STRATEGY__ || {};
   const mpdParser = globalThis.__OVD_MPD_PARSER__ || {};
   const streamTransferManagerFactory = globalThis.__OVD_STREAM_TRANSFER_MANAGER__ || {};
@@ -269,6 +271,12 @@
     getFloatButton,
     sendMessageAsync,
   });
+  // Telegram Web：媒体流由页面自己的 Service Worker 提供，必须回到页面上下文抓取
+  const telegramStrategy = telegramStrategyFactory.createTelegramStrategy({
+    fetchPageStreamInPage: streamTransferManager.fetchPageStreamInPage,
+    getFloatButton,
+    videoUtils,
+  });
   const dashStrategy = dashStrategyFactory.createDashStrategy({
     getFloatButton,
     hlsPipeline,
@@ -292,6 +300,7 @@
       blob: [blobStrategy],
       dash: [dashStrategy],
       generic: [genericStrategy],
+      telegram: [telegramStrategy],
       youtube: [youtubeParseStrategy, youtubeCaptureStrategy],
     },
   }) || null;

@@ -46,6 +46,7 @@ test('validateDetectedPayload 校验类型与 URL', () => {
   assert.equal(guard.validateDetectedPayload({ type: 'hls', url: 'https://cdn.example.com/i.m3u8' }).ok, true);
   assert.equal(guard.validateDetectedPayload({ type: 'blob', url: 'blob:https://site.example/u' }).ok, true);
   assert.equal(guard.validateDetectedPayload({ type: 'drm-detected', url: 'https://site.example/w' }).ok, true);
+  assert.equal(guard.validateDetectedPayload({ type: 'telegram', url: 'https://web.telegram.org/k/stream/%7B%7D' }).ok, true);
 });
 
 test('validateDetectedPayload 拒绝伪造类型、危险协议与异常字段', () => {

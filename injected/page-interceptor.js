@@ -9,6 +9,7 @@
   const httpUtils = window.__OVD_PAGE_HTTP_UTILS__;
   const youtubeParser = window.__OVD_PAGE_YOUTUBE_PARSER__;
   const bilibiliParser = window.__OVD_PAGE_BILIBILI_PARSER__;
+  const telegramUtils = window.__OVD_TELEGRAM_UTILS__ || {};
 
   if (!core || !httpUtils || !youtubeParser || !bilibiliParser) {
     console.error('[OVD][PAGE] page-interceptor loaded before its dependencies');
@@ -269,6 +270,69 @@
     return soleVideoElement ? { thumbnail, thumbnailScope: 'frame' } : { thumbnail };
   }
 
+  /**
+   * Telegram Web 的视频气泡没有文件名：标题只能从 DOM 里凑（会话名 + 消息 ID）。
+   * 选择器全部 best-effort，认不出时返回空对象，由 reportVideo 的标签页标题兜底。
+   */
+  function collectTelegramMetadata(videoElement, url) {
+    const extra = {};
+    try {
+      const info = telegramUtils.parseTelegramStreamInfo?.(url) || {};
+      if (info.mimeType) {
+        extra.mimeType = info.mimeType;
+      }
+      if (Number(info.size) > 0) {
+        extra.fileSize = Number(info.size);
+      }
+      if (info.docId) {
+        extra.telegramDocId = String(info.docId);
+      }
+
+      const title = telegramUtils.buildTelegramTitle?.({
+        chatTitle: readTelegramChatTitle(),
+        messageId: readTelegramMessageId(videoElement),
+      });
+      if (title) {
+        extra.title = title;
+      }
+    } catch (err) {
+      console.warn(`[OVD][PAGE] failed to collect Telegram metadata: ${err.message}`);
+    }
+    return extra;
+  }
+
+  /** 气泡上的 data-mid 就是消息 ID（WebK 用它做高亮/定位） */
+  function readTelegramMessageId(videoElement) {
+    try {
+      const bubble = videoElement?.closest?.('[data-mid]');
+      return bubble?.getAttribute?.('data-mid') || '';
+    } catch (_err) {
+      return '';
+    }
+  }
+
+  /** 当前会话标题：WebK 各版本的容器类名不同，按优先级依次尝试 */
+  function readTelegramChatTitle() {
+    const selectors = [
+      '.chat .peer-title',
+      '.chat-info .peer-title',
+      '#column-center .peer-title',
+      '.sidebar-header .peer-title',
+    ];
+
+    for (const selector of selectors) {
+      try {
+        const text = document.querySelector(selector)?.textContent?.trim();
+        if (text) {
+          return text;
+        }
+      } catch (_err) {
+        // 选择器不合法/元素不存在都直接跳过
+      }
+    }
+    return '';
+  }
+
   function scanVideoElements() {
     if (isYouTubePage()) {
       return;
@@ -294,7 +358,10 @@
           continue;
         }
 
-        const type = isBlobSource ? 'blob' : detectVideoType(fullUrl, '');
+        // Telegram Web 的流式媒体（页面 Service Worker 提供的同源 stream/ 地址）：
+        // 没有扩展名、也没有可直连的直链，单列一类交给内容侧按 Range 抓取。
+        const isTelegramStream = !isBlobSource && telegramUtils.isTelegramStreamUrl?.(fullUrl) === true;
+        const type = isBlobSource ? 'blob' : (isTelegramStream ? 'telegram' : detectVideoType(fullUrl, ''));
         if (!type) {
           continue;
         }
@@ -305,11 +372,14 @@
         const extra = {
           duration,
           source: 'video-element',
+          ...(isTelegramStream ? collectTelegramMetadata(videoElement, fullUrl) : {}),
           ...takeThumbnailPayload(videoElement, fullUrl, soleVideoElement),
         };
 
         reportVideo(fullUrl, type, extra);
-        if (!isBlobSource) {
+        // Telegram 的 stream 端点只按 Range 分块回吐（不带 Range 时只给第一段），
+        // HEAD 探测到的体积没有意义，跳过
+        if (!isBlobSource && !isTelegramStream) {
           fetchMediaElementSize(fullUrl, type, duration, 'video-element');
         }
       } catch (err) {

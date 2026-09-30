@@ -408,6 +408,9 @@
   "note_hls": {
     "message": "HLS quality can be picked in the dropdown; live streams only save the current window."
   },
+  "note_telegram": {
+    "message": "Telegram media is served by the page Service Worker; keep this tab open while it downloads."
+  },
   "note_youtube": {
     "message": "YouTube download mode can be changed in settings."
   },
@@ -699,6 +702,18 @@
   },
   "title_unknownVideo": {
     "message": "Unknown video"
+  },
+  "telegram_fetching": {
+    "message": "Fetching video data from Telegram..."
+  },
+  "telegram_fetchingBytes": {
+    "message": "Fetching video data... ($1 received)"
+  },
+  "telegram_noData": {
+    "message": "No video data received (the video may have been released by the page - refresh and retry)"
+  },
+  "telegram_started": {
+    "message": "Telegram video download started"
   },
   "yt_capturePreparing": {
     "message": "Preparing YouTube in-page capture..."

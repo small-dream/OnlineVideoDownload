@@ -2276,6 +2276,10 @@ function buildNoteHtml(video) {
     return `<div class="note-text">${t('note_blob', 'Blob 资源会先提取真实数据，再触发保存。')}</div>`;
   }
 
+  if (video.type === 'telegram') {
+    return `<div class="note-text">${t('note_telegram', 'Telegram 视频由页面 Service Worker 提供，下载期间请保持标签页打开。')}</div>`;
+  }
+
   if (video.type === 'hls') {
     return `<div class="note-text">${t('note_hls', 'HLS 可在清晰度下拉中选择具体码率；直播流只能保存当前播放窗口。')}</div>`;
   }

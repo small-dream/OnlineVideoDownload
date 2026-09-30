@@ -117,6 +117,7 @@
       .registerHandler(createSourceHandler('youtube'))
       .registerHandler(createSourceHandler('bilibili'))
       .registerHandler(createSourceHandler('dash'))
+      .registerHandler(createSourceHandler('telegram'))
       .registerHandler({
         id: 'generic',
         supports() {

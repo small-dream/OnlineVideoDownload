@@ -3,7 +3,7 @@
   <h1 align="center">Online Video Downloader</h1>
   <p align="center">
     Détectez et téléchargez les vidéos en ligne de n'importe quelle page en un clic<br>
-    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
+    <strong>YouTube</strong> · <strong>Bilibili</strong> · <strong>Telegram</strong> · <strong>HLS</strong> · <strong>DASH</strong> · <strong>Blob</strong> · <strong>MP4</strong>
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
@@ -25,7 +25,7 @@
 - 🔔 **Notifications de fin** — Notifications système en cas de réussite/échec du téléchargement ; cliquez sur une notification pour ouvrir son dossier
 - ⬇️ **Téléchargement en un clic** — Enregistrez les vidéos d'un seul clic, ultra simple
 - 🔀 **Fusion dans le navigateur** — Les flux audio/vidéo YouTube 1080p+ et Bilibili DASH sont fusionnés dans le navigateur — **pas besoin d'installer ffmpeg ou d'autres outils locaux**
-- 🌐 **Compatibilité étendue** — Support spécialisé pour YouTube et Bilibili, plus les vidéos HLS / DASH / MP4 / Blob de n'importe quel site
+- 🌐 **Compatibilité étendue** — Support spécialisé pour YouTube, Bilibili et Telegram Web, plus les vidéos HLS / DASH / MP4 / Blob de n'importe quel site
 - 🔒 **Confidentialité** — Tout le traitement se fait localement, aucune donnée n'est envoyée à des serveurs tiers
 - 🛡️ **Respect des DRM** — Le contenu chiffré est signalé mais jamais contourné
 
@@ -85,6 +85,14 @@ Ou téléchargez et extrayez le ZIP.
 - Votre préférence de qualité est sauvegardée pour les prochains téléchargements
 - Le contenu premium nécessite un compte premium
 
+### Téléchargements Telegram Web
+
+- Prend en charge les vidéos et l'audio lus dans `web.telegram.org` (WebK, ex. `https://web.telegram.org/k/#@canal`)
+- Telegram sert les médias depuis le Service Worker de la page (un point de terminaison same-origin `…/stream/…`) : l'extension les récupère donc dans la page via des requêtes `Range`, écrit les octets dans un fichier temporaire OPFS, puis confie le fichier final à l'API de téléchargement du navigateur — les gros fichiers ne saturent jamais la mémoire de la page
+- Le nom du fichier est assemblé depuis la page : `<nom du chat> #<id du message>`, avec repli sur le titre de l'onglet
+- Le conteneur suit le type MIME du média (`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3`, …)
+- Gardez l'onglet ouvert jusqu'à la fin de la récupération ; une annulation nettoie le fichier temporaire
+
 ### Flux HLS / vidéos .m3u8
 
 - Pour le live streaming ou la VOD en HLS, l'extension télécharge automatiquement tous les segments TS
@@ -111,6 +119,7 @@ Le panneau popup utilise des étiquettes colorées pour une identification rapid
 | 🟡 **DASH** | Flux MPD | Téléchargement du MPD ou fusion audio/vidéo |
 | 🔴 **YouTube** | Vidéo YouTube | ≤720p direct ; 1080p+ fusion automatique |
 | 🔵 **B站** | Vidéo Bilibili | Récupération via API + fusion automatique |
+| 🔷 **Telegram** | Vidéo Telegram Web | Récupération par requêtes Range dans la page, puis sauvegarde |
 | 🟣 **Blob** | MSE en mémoire | Téléchargement via relais Content Script |
 | ⬛ 🔒 **DRM** | Contenu chiffré | Téléchargement impossible, signalé uniquement |
 
@@ -133,6 +142,7 @@ Le panneau popup utilise des étiquettes colorées pour une identification rapid
 |------|----------------|
 | **YouTube** | Flux combinés + adaptatifs ; détection du routage SPA ; sélection multi-résolution |
 | **Bilibili** | Signature WBI ; double format DASH/FLV ; vidéos multi-parties ; sélection de qualité ; injection CDN Referer |
+| **Telegram Web** | Détection du point de terminaison de streaming du Service Worker ; récupération par Range dans la page ; nommage `<nom du chat> #<id du message>` |
 
 ### Limitations connues
 
@@ -151,6 +161,7 @@ Chrome Extension (Manifest V3)
 │   ├── video-registry.js          Registre en mémoire des vidéos détectées
 │   ├── request-interceptor.js     Écouteur réseau webRequest
 │   ├── downloader.js              Ordonnanceur de téléchargement (MP4/HLS/DASH/YouTube/Bilibili)
+│   ├── page-stream-download.js    Écriture du flux côté page (OPFS → gestionnaire de téléchargement)
 │   ├── hls-fetcher.js             Téléchargement des segments HLS, déchiffrement AES, fusion en mémoire
 │   └── header-injector.js         Injection d'en-têtes de requête
 │
@@ -170,6 +181,7 @@ Chrome Extension (Manifest V3)
 ├── lib/                           Bibliothèque d'utilitaires partagés
 │   ├── hls-pipeline.js            Pipeline d'analyse et de traitement HLS
 │   ├── mpd-parser.js              Analyseur DASH MPD
+│   ├── telegram-utils.js          Détection des URL de flux Telegram + assemblage du titre
 │   ├── wbi-signer.js              Algorithme de signature Bilibili WBI
 │   ├── bilibili-muxer.js          Muxer FLV Bilibili
 │   ├── mp4-muxer.js               Muxer MP4

@@ -243,7 +243,7 @@ test('createDefaultSourceRegistry: creates with blob/youtube/bilibili/dash/gener
   const { createDefaultSourceRegistry } = loadSourceHandlers();
   const registry = createDefaultSourceRegistry();
 
-  assert.equal(registry.handlers.length, 5);
+  assert.equal(registry.handlers.length, 6);
 
   // Test handler matching for each source type
   assert.equal(registry.getHandler({ type: 'blob' })?.id, 'blob');
@@ -251,6 +251,7 @@ test('createDefaultSourceRegistry: creates with blob/youtube/bilibili/dash/gener
   assert.equal(registry.getHandler({ type: 'bilibili-meta' })?.id, 'bilibili');
   assert.equal(registry.getHandler({ type: 'bilibili-dash' })?.id, 'bilibili');
   assert.equal(registry.getHandler({ type: 'dash' })?.id, 'dash');
+  assert.equal(registry.getHandler({ type: 'telegram' })?.id, 'telegram');
   assert.equal(registry.getHandler({ type: 'unknown' })?.id, 'generic');
 });
 
