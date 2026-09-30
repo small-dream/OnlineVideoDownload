@@ -43,9 +43,10 @@
 
     /**
      * 实际抓取在**页面上下文**完成（见 injected/page-http-utils.js 的 PAGE_STREAM_FETCH_*）。
-     * WebK 的 `/stream/` 端点由页面自己的 Service Worker 生成，而该 SW 用
-     * `self.clients.get(e.clientId)` 找页面客户端——内容脚本的 fetch 没有 clientId，
-     * 不被接管，会落到真实服务器并拿到 302。这里只负责文件名、进度与结果。
+     * Telegram 的 `/stream/`（WebK）与 `/progressive/`（WebA）端点由页面自己的
+     * Service Worker 生成，而该 SW 用 `self.clients.get(e.clientId)` 找页面客户端——
+     * 内容脚本/扩展后台的 fetch 没有 clientId，不被接管，会落到真实服务器并拿到 302。
+     * 这里只负责文件名、进度与结果。
      */
     async function handleTelegramDownload(meta, context = {}) {
       const url = meta?.url || '';

@@ -87,9 +87,11 @@ git clone https://github.com/small-dream/OnlineVideoDownload.git
 
 ### Telegram Web ダウンロード
 
-- `web.telegram.org`（WebK、例：`https://web.telegram.org/k/#@チャンネル`）内で再生される動画・音声に対応
-- Telegram のメディアはページ自身の Service Worker が提供する同源 `…/stream/…` エンドポイントのため、拡張機能はページコンテキストで `Range` リクエストにより取得し、OPFS の一時ファイルへ順次書き込み、完了後にブラウザのダウンロード API へ渡します——大きなファイルでもページのメモリを圧迫しません
+- `web.telegram.org` 内で再生される動画・音声に対応：WebK（`https://web.telegram.org/k/#@チャンネル`）と WebA（`https://web.telegram.org/a/#-100…`）
+- Telegram のメディアはページ自身の Service Worker が提供する同源 `…/stream/…` / `…/progressive/…` エンドポイントのため、拡張機能はページコンテキストで `Range` リクエストにより取得し、OPFS の一時ファイルへ順次書き込み、完了後にブラウザのダウンロード API へ渡します——大きなファイルでもページのメモリを圧迫しません
 - ファイル名はページから組み立てます：`<チャット名> #<メッセージID>`（取得できない場合はタブタイトル）
+- 完全なメディアのみを一覧します：WebA のカバー画像やプレビュー映像（`?size=…`）は動画として誤検出されません
+- 検出対象は画面に描画済みの動画バブルです：表示外へスクロールしたメッセージは Telegram が破棄するため、ダウンロード前に目的の動画までスクロールしてください
 - コンテナはメディアの MIME タイプに従います（`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3` など）
 - 取得完了までタブを開いたままにしてください。キャンセルすると一時ファイルが削除されます
 

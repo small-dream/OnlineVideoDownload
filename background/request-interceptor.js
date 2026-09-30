@@ -147,8 +147,9 @@ export class RequestInterceptor {
   }
 
   _detectTypeByUrl(url) {
-    // Telegram Web 的流式媒体端点（同源 stream/ 地址）：字节由页面自己的 Service Worker
-    // 生成，直链下载会落到 404，必须交给内容侧按 Range 抓取，因此单列一类。
+    // Telegram Web 的流式媒体端点（同源 `…/stream/…` 或 `…/progressive/…`）：字节由页面
+    // 自己的 Service Worker 生成，直链下载会落到 302，必须交给页面上下文按 Range 抓取，
+    // 因此单列一类。
     if (telegramUtils.isTelegramStreamUrl?.(url)) return 'telegram';
 
     try {
@@ -173,7 +174,7 @@ export class RequestInterceptor {
   }
 
   _detectTypeByMime(contentType, details = {}) {
-    // stream 端点的响应头就是 video/*，但同上：这里不能用直链策略
+    // Telegram 流式端点（stream / progressive）的响应头就是 video/*，但同上：不能用直链策略
     if (telegramUtils.isTelegramStreamUrl?.(details.url)) return 'telegram';
 
     const ct = contentType.toLowerCase();

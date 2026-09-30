@@ -42,6 +42,64 @@ test('isTelegramStreamUrl: ignores other origins serving a stream/ path', () => 
   assert.equal(isTelegramStreamUrl('https://example.com/stream/abc'), false);
 });
 
+// --- WebA（web.telegram.org/a）：同源 `/progressive/` 端点 ---
+
+const PROGRESSIVE_VIDEO_URL = 'https://web.telegram.org/a/progressive/document1234567890'
+  + '?fileSize=354611815&mimeType=video%2Fmp4&account=1';
+
+test('isTelegramStreamUrl: detects the WebA progressive endpoint', () => {
+  const { isTelegramStreamUrl } = loadModule();
+  assert.equal(isTelegramStreamUrl(PROGRESSIVE_VIDEO_URL), true);
+  // 纯 document<id>（未带 fileSize/mimeType，页面无需下载即可流播的视频文件）
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/document1234567890?account=1'), true);
+});
+
+test('isTelegramStreamUrl: keeps WebA thumbnails and previews out of the list', () => {
+  const { isTelegramStreamUrl } = loadModule();
+  // 封面图（size=x）、微缩略图（size=m）、预览小片（size=v）与页面自带「下载」入口
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/document1234567890?size=x'), false);
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/document1234567890?size=m&account=1'), false);
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/document1234567890?size=v'), false);
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/document1234567890?download'), false);
+  assert.equal(isTelegramStreamUrl('https://web.telegram.org/a/progressive/photo9876543210'), false);
+});
+
+test('isTelegramStreamUrl: the progressive endpoint is Telegram-Web-only', () => {
+  const { isTelegramStreamUrl } = loadModule();
+  assert.equal(isTelegramStreamUrl('https://example.com/a/progressive/document1'), false);
+});
+
+test('parseTelegramStreamInfo: reads docId / mime / size from WebA query params', () => {
+  const { parseTelegramStreamInfo } = loadModule();
+  assert.deepEqual(parseTelegramStreamInfo(PROGRESSIVE_VIDEO_URL), {
+    accountNumber: '1',
+    docId: '1234567890',
+    mimeType: 'video/mp4',
+    size: 354611815,
+  });
+});
+
+test('parseTelegramStreamInfo: WebA hash without fileSize still yields the docId', () => {
+  const { parseTelegramStreamInfo } = loadModule();
+  assert.deepEqual(parseTelegramStreamInfo('https://web.telegram.org/a/progressive/document42'), {
+    docId: '42',
+    mimeType: '',
+    size: 0,
+  });
+});
+
+test('parseTelegramStreamInfo: WebA thumbnails are not media', () => {
+  const { parseTelegramStreamInfo } = loadModule();
+  assert.equal(parseTelegramStreamInfo('https://web.telegram.org/a/progressive/document42?size=x'), null);
+});
+
+test('matchTelegramStreamSegment: reports which endpoint matched', () => {
+  const { matchTelegramStreamSegment } = loadModule();
+  assert.equal(matchTelegramStreamSegment(STREAM_URL), '/stream/');
+  assert.equal(matchTelegramStreamSegment(PROGRESSIVE_VIDEO_URL), '/progressive/');
+  assert.equal(matchTelegramStreamSegment('https://web.telegram.org/k/#@zipaiqun888'), '');
+});
+
 test('isTelegramWebPageUrl: matches Telegram Web hosts only', () => {
   const { isTelegramWebPageUrl } = loadModule();
   assert.equal(isTelegramWebPageUrl('https://web.telegram.org/k/#@zipaiqun888'), true);

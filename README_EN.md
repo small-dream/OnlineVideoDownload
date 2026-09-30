@@ -95,9 +95,11 @@ Or download and extract the ZIP.
 
 ### Telegram Web downloads
 
-- Supports videos and audio played inside `web.telegram.org` (WebK, e.g. `https://web.telegram.org/k/#@channel`)
-- Telegram serves media from its own page Service Worker (a same-origin `…/stream/…` endpoint), so the extension pulls it in the page with `Range` requests, streams the bytes into an OPFS temp file, and hands the finished file to the browser download API — large files never blow up page memory
+- Supports videos and audio played inside `web.telegram.org` — both WebK (`https://web.telegram.org/k/#@channel`) and WebA (`https://web.telegram.org/a/#-100…`)
+- Telegram serves media from its own page Service Worker (a same-origin `…/stream/…` or `…/progressive/…` endpoint), so the extension pulls it in the page with `Range` requests, streams the bytes into an OPFS temp file, and hands the finished file to the browser download API — large files never blow up page memory
 - The filename is assembled from the page: `<chat> #<messageId>`, falling back to the tab title
+- Only full media is listed: WebA cover images and preview clips (`?size=…`) are never mistaken for videos
+- Detection covers the video bubbles currently rendered on the page: Telegram reclaims messages scrolled out of view, so scroll to the video before downloading
 - The container follows the media MIME type (`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3`, …)
 - Keep the tab open until fetching finishes; cancelling at any time cleans up the temp file
 

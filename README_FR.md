@@ -87,9 +87,11 @@ Ou téléchargez et extrayez le ZIP.
 
 ### Téléchargements Telegram Web
 
-- Prend en charge les vidéos et l'audio lus dans `web.telegram.org` (WebK, ex. `https://web.telegram.org/k/#@canal`)
-- Telegram sert les médias depuis le Service Worker de la page (un point de terminaison same-origin `…/stream/…`) : l'extension les récupère donc dans la page via des requêtes `Range`, écrit les octets dans un fichier temporaire OPFS, puis confie le fichier final à l'API de téléchargement du navigateur — les gros fichiers ne saturent jamais la mémoire de la page
+- Prend en charge les vidéos et l'audio lus dans `web.telegram.org` : WebK (`https://web.telegram.org/k/#@canal`) et WebA (`https://web.telegram.org/a/#-100…`)
+- Telegram sert les médias depuis le Service Worker de la page (un point de terminaison same-origin `…/stream/…` ou `…/progressive/…`) : l'extension les récupère donc dans la page via des requêtes `Range`, écrit les octets dans un fichier temporaire OPFS, puis confie le fichier final à l'API de téléchargement du navigateur — les gros fichiers ne saturent jamais la mémoire de la page
 - Le nom du fichier est assemblé depuis la page : `<nom du chat> #<id du message>`, avec repli sur le titre de l'onglet
+- Seuls les médias complets sont listés : les couvertures et les clips d'aperçu de WebA (`?size=…`) ne sont jamais pris pour des vidéos
+- La détection couvre les bulles vidéo actuellement rendues : Telegram recycle les messages sortis de l'écran, faites donc défiler jusqu'à la vidéo avant de télécharger
 - Le conteneur suit le type MIME du média (`.mp4` / `.webm` / `.mov` / `.m4a` / `.mp3`, …)
 - Gardez l'onglet ouvert jusqu'à la fin de la récupération ; une annulation nettoie le fichier temporaire
 

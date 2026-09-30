@@ -289,7 +289,7 @@
       }
 
       const title = telegramUtils.buildTelegramTitle?.({
-        chatTitle: readTelegramChatTitle(),
+        chatTitle: readTelegramChatTitle() || readTelegramPageTitle(),
         messageId: readTelegramMessageId(videoElement),
       });
       if (title) {
@@ -301,23 +301,27 @@
     return extra;
   }
 
-  /** 气泡上的 data-mid 就是消息 ID（WebK 用它做高亮/定位） */
+  /** 气泡上的消息 ID：新版 tweb（WebA / 新版 WebK）用 data-message-id，旧版 WebK 用 data-mid */
   function readTelegramMessageId(videoElement) {
     try {
-      const bubble = videoElement?.closest?.('[data-mid]');
-      return bubble?.getAttribute?.('data-mid') || '';
+      const bubble = videoElement?.closest?.('[data-message-id], [data-mid]');
+      if (!bubble) {
+        return '';
+      }
+      return bubble.getAttribute('data-message-id') || bubble.getAttribute('data-mid') || '';
     } catch (_err) {
       return '';
     }
   }
 
-  /** 当前会话标题：WebK 各版本的容器类名不同，按优先级依次尝试 */
+  /** 当前会话标题：Telegram Web 各版本的容器类名不同，按优先级依次尝试 */
   function readTelegramChatTitle() {
     const selectors = [
       '.chat .peer-title',
       '.chat-info .peer-title',
       '#column-center .peer-title',
       '.sidebar-header .peer-title',
+      '.MiddleHeader .title',
     ];
 
     for (const selector of selectors) {
@@ -331,6 +335,17 @@
       }
     }
     return '';
+  }
+
+  /**
+   * 会话标题兜底：Telegram Web 会把当前会话名写进 document.title（tweb `setPageTitle`），
+   * DOM 选择器随版本改名认不出时至少还能拿到它。纯应用名（还没进入会话）直接丢弃。
+   */
+  const TELEGRAM_APP_TITLES = new Set(['telegram', 'telegram web', 'telegram web a', 'telegram web k', 'telegram web z']);
+
+  function readTelegramPageTitle() {
+    const title = String(frameDisplayTitle() || '').replace(/\s+/g, ' ').trim();
+    return TELEGRAM_APP_TITLES.has(title.toLowerCase()) ? '' : title;
   }
 
   function scanVideoElements() {

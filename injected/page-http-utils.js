@@ -734,9 +734,10 @@
   );
 
   // ---- Telegram Web 页面侧抓流（PAGE_STREAM_FETCH_*） ----
-  // WebK 的 `/stream/` 端点由页面自己的 Service Worker 生成，而该 SW 只服务带 clientId 的
-  // 页面请求（`self.clients.get(e.clientId)`）；内容脚本的 fetch 没有 clientId，SW 不接管，
-  // 请求会落到真实服务器并拿到 302。因此字节必须在页面上下文抓，再分块回传内容侧。
+  // Telegram 的 `/stream/`（WebK）、`/progressive/`（WebA）端点由页面自己的 Service Worker
+  // 生成，而该 SW 只服务带 clientId 的页面请求（`self.clients.get(e.clientId)`）；内容脚本/
+  // 扩展后台的 fetch 没有 clientId，SW 不接管，请求会落到真实服务器并拿到 302。
+  // 因此字节必须在页面上下文抓，再分块回传内容侧。
   const telegramUtils = window.__OVD_TELEGRAM_UTILS__ || {};
   const PAGE_STREAM_RANGE_CHUNK_BYTES = 2 * 1024 * 1024;
   const PAGE_STREAM_RELAY_CHUNK_BYTES = 512 * 1024;
