@@ -381,12 +381,17 @@
           continue;
         }
 
+        // 已知是 MediaSource 建出来的对象 URL 时明确标记，避免下载侧再徒劳 fetch；
+        // 未知（扩展注入前就已创建）时不带这个字段，仍按普通 Blob 尝试读取。
+        const objectUrlKind = isBlobSource ? (core.getObjectUrlKind?.(fullUrl) || '') : '';
+
         const duration = (videoElement?.duration && Number.isFinite(videoElement.duration))
           ? Math.round(videoElement.duration)
           : null;
         const extra = {
           duration,
           source: 'video-element',
+          ...(objectUrlKind ? { mse: objectUrlKind === 'mse' } : {}),
           ...(isTelegramStream ? collectTelegramMetadata(videoElement, fullUrl) : {}),
           ...takeThumbnailPayload(videoElement, fullUrl, soleVideoElement),
         };
@@ -440,6 +445,34 @@
       return;
     }
     state.installed = true;
+
+    // 记录页面建对象 URL 时传的是 MediaSource 还是 Blob：
+    // MSE 的 blob: 地址没有文件数据，fetch 必然失败（下载时据此改走清单）；
+    // 普通 Blob 则可以正常读取，不该被误判。
+    try {
+      const createObjectURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = function (object) {
+        const url = createObjectURL(object);
+        try {
+          core.rememberObjectUrl(url, core.isMediaSourceLike?.(object) ? 'mse' : 'blob');
+        } catch (_err) {
+          // 记账失败不能影响页面自身的对象 URL 创建
+        }
+        return url;
+      };
+
+      const revokeObjectURL = URL.revokeObjectURL.bind(URL);
+      URL.revokeObjectURL = function (url) {
+        try {
+          core.forgetObjectUrl(url);
+        } catch (_err) {
+          // 同上：清理失败不阻塞页面
+        }
+        return revokeObjectURL(url);
+      };
+    } catch (err) {
+      console.warn(`[OVD][PAGE] failed to hook object URL creation: ${err.message}`);
+    }
 
     const xhrOpen = XMLHttpRequest.prototype.open;
     const xhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -586,6 +619,9 @@
                 }
                 sendToExtension({
                   mimeType,
+                  // addSourceBuffer 只可能来自 MSE：这个 blob 地址没法 fetch 成文件，
+                  // 下载侧据此改走同页嗅探到的 HLS / DASH 清单。
+                  mse: true,
                   source: 'mediasource',
                   title: frameDisplayTitle(),
                   type: 'blob',

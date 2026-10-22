@@ -23,6 +23,56 @@
   const messageHandlers = new Map();
   const resetters = new Set();
 
+  // 对象 URL 类型表（URL → 'mse' | 'blob'），由 page-interceptor 的 createObjectURL 钩子维护。
+  // MSE 的 blob URL 只是播放器喂数据的管道，fetch 它一定失败（Chrome 报 net::ERR_FILE_NOT_FOUND），
+  // 内容脚本据此在下载前改走同页嗅探到的 HLS / DASH 清单，而不是徒劳地 fetch 一次。
+  const OBJECT_URL_KIND_LIMIT = 256;
+  const objectUrlKinds = new Map();
+
+  /** MediaSource 可能来自别的 realm（播放器 iframe），instanceof 会失效，因此补鸭子类型判断 */
+  function isMediaSourceLike(value) {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+
+    try {
+      if (typeof MediaSource !== 'undefined' && value instanceof MediaSource) {
+        return true;
+      }
+    } catch (_err) {
+      // 跨 realm 的 instanceof 可能抛错，继续用结构判断
+    }
+
+    return typeof value.addSourceBuffer === 'function'
+      && typeof value.endOfStream === 'function';
+  }
+
+  function rememberObjectUrl(url, kind = '') {
+    const value = typeof url === 'string' ? url : '';
+    if (!value) {
+      return;
+    }
+
+    if (objectUrlKinds.size >= OBJECT_URL_KIND_LIMIT && !objectUrlKinds.has(value)) {
+      const oldest = objectUrlKinds.keys().next().value;
+      if (oldest) {
+        objectUrlKinds.delete(oldest);
+      }
+    }
+
+    objectUrlKinds.set(value, kind === 'mse' ? 'mse' : 'blob');
+  }
+
+  function forgetObjectUrl(url) {
+    if (typeof url === 'string' && url) {
+      objectUrlKinds.delete(url);
+    }
+  }
+
+  function getObjectUrlKind(url) {
+    return (typeof url === 'string' && objectUrlKinds.get(url)) || '';
+  }
+
   function sendToExtension(payload) {
     if (
       payload?.type === (MSG.YOUTUBE_MEDIA_STREAM_CHUNK || 'YOUTUBE_MEDIA_STREAM_CHUNK') ||
@@ -106,8 +156,12 @@
     YOUTUBE_PARALLEL_MIN_BYTES,
     YOUTUBE_PARALLEL_CHUNK_BYTES,
     YOUTUBE_PARALLEL_MAX_CONCURRENCY,
+    forgetObjectUrl,
+    getObjectUrlKind,
+    isMediaSourceLike,
     registerMessageHandler,
     registerResetter,
+    rememberObjectUrl,
     resetForUrlChange,
     sendToExtension,
   };

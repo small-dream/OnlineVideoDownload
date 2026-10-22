@@ -53,6 +53,7 @@
     }
 
     function emitSourceLifecycleMessage({
+      code = '',
       downloadId = null,
       error = '',
       filename = '',
@@ -75,7 +76,7 @@
         sourceId,
         strategyId,
         title,
-        ...(phase === 'RESULT' ? { downloadId, error, filename, ok, size } : {}),
+        ...(phase === 'RESULT' ? { code, downloadId, error, filename, ok, size } : {}),
       };
 
       emitRuntimeMessage({
@@ -175,6 +176,7 @@
         .catch((err) => {
           const aborted = err?.code === 'DOWNLOAD_ABORTED';
           emitSourceLifecycleMessage({
+            code: err?.code || '',
             error: aborted ? '已取消' : err.message,
             ok: false,
             phase: 'RESULT',

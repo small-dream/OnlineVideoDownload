@@ -50,8 +50,27 @@
       }
     }
   },
+  "blob_mseUnsupported": {
+    "message": "This blob URL belongs to MSE streaming playback and holds no file data, so it cannot be saved directly. Use the HLS / DASH entry from the same page instead."
+  },
   "blob_started": {
     "message": "Blob video download started"
+  },
+  "blob_switchedToManifest": {
+    "message": "This entry is MSE streaming playback; downloading via the $1 URL found on the same page instead.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "blob_unreadable": {
+    "message": "Blob download failed: $1 (the blob URL may have been revoked by the page, or belongs to MSE streaming playback and cannot be read)",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
   },
   "dash_fetchManifest": {
     "message": "Fetching DASH manifest..."
@@ -164,6 +183,12 @@
   },
   "err_bilibili": {
     "message": "Bilibili download failed. Make sure you are logged in to Bilibili and retry."
+  },
+  "err_blobMse": {
+    "message": "This blob URL is MSE streaming playback, which the browser does not allow to be read. Use the HLS / DASH entry from the same page instead."
+  },
+  "err_blobUnreadable": {
+    "message": "Could not read the blob URL: it may have been revoked by the page, or it belongs to MSE streaming playback. Refresh the page and retry, or use an HLS / DASH entry."
   },
   "err_streamUnreachable": {
     "message": "Could not reach the video CDN servers (both the primary and backup hosts failed). Check your network or proxy and retry."
@@ -401,6 +426,12 @@
   },
   "note_blob": {
     "message": "Blob sources are extracted first, then saved."
+  },
+  "note_blobMseBlocked": {
+    "message": "MSE streaming blob URLs hold no file data and cannot be saved directly. Use an HLS / DASH entry from the same page if available."
+  },
+  "note_blobMseFallback": {
+    "message": "MSE streaming blob URLs hold no file data; the download automatically falls back to the HLS / DASH URL found on the same page."
   },
   "note_drm": {
     "message": "This source is DRM protected and cannot be downloaded."

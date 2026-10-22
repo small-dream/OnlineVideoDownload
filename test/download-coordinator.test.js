@@ -82,3 +82,20 @@ test('没有匹配任务时取消请求返回失败而不是抛错', () => {
   assert.equal(result.cancelled, false);
   assert.equal(messages.filter((message) => message.type === 'SOURCE_DOWNLOAD_RESULT').length, 0);
 });
+
+test('内容侧失败时把错误码透传到 SOURCE_DOWNLOAD_RESULT', async () => {
+  const { coordinator, messages } = createHarness({
+    onDownload: () => Promise.reject(Object.assign(new Error('MSE 流式播放无法直接保存'), {
+      code: 'BLOB_MSE_UNSUPPORTED',
+    })),
+  });
+
+  coordinator.startSourceDownload({ type: 'blob', url: 'blob:https://example.com/mse' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const result = messages.find((message) => message.type === 'SOURCE_DOWNLOAD_RESULT');
+  assert.ok(result, '失败必须广播 SOURCE_DOWNLOAD_RESULT');
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'BLOB_MSE_UNSUPPORTED');
+  assert.match(result.error, /MSE/);
+});

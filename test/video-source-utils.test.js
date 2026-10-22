@@ -258,3 +258,140 @@ test('getSourceLabel: empty type returns "Video"', () => {
   const { getSourceLabel } = mod();
   assert.equal(getSourceLabel({ type: '' }), 'Video');
 });
+
+// --- findBlobFallbackVideo ---
+
+test('findBlobFallbackVideo: 非 blob 条目不做替换', () => {
+  const { findBlobFallbackVideo } = mod();
+  assert.equal(
+    findBlobFallbackVideo(
+      { type: 'direct', url: 'https://cdn.example.com/v.mp4' },
+      [{ type: 'hls', url: 'https://cdn.example.com/index.m3u8' }],
+    ),
+    null,
+  );
+});
+
+test('findBlobFallbackVideo: 同 frame + 同标题的清单优先', () => {
+  const { findBlobFallbackVideo } = mod();
+  const fallback = findBlobFallbackVideo(
+    { frameId: 2, title: '正片', type: 'blob', url: 'blob:https://example.com/a' },
+    [
+      { frameId: 0, title: '正片', type: 'hls', url: 'https://cdn.example.com/main.m3u8' },
+      { frameId: 2, title: '正片', type: 'hls', url: 'https://cdn.example.com/player.m3u8' },
+    ],
+  );
+  assert.equal(fallback.url, 'https://cdn.example.com/player.m3u8');
+});
+
+test('findBlobFallbackVideo: 同标题优先于同 frame（避免借到同 frame 的广告清单）', () => {
+  const { findBlobFallbackVideo } = mod();
+  const fallback = findBlobFallbackVideo(
+    { frameId: 2, title: '正片', type: 'blob', url: 'blob:https://example.com/a' },
+    [
+      { frameId: 2, title: '广告', type: 'hls', url: 'https://cdn.example.com/ad.m3u8' },
+      { frameId: 0, title: '正片', type: 'hls', url: 'https://cdn.example.com/main.m3u8' },
+    ],
+  );
+  assert.equal(fallback.url, 'https://cdn.example.com/main.m3u8');
+});
+
+test('findBlobFallbackVideo: 没有同标题候选时退回同 frame', () => {
+  const { findBlobFallbackVideo } = mod();
+  const fallback = findBlobFallbackVideo(
+    { frameId: 2, title: '正片', type: 'blob', url: 'blob:https://example.com/a' },
+    [
+      { frameId: 2, timestamp: 10, title: '广告', type: 'hls', url: 'https://cdn.example.com/ad.m3u8' },
+      { frameId: 0, title: '别的视频', type: 'hls', url: 'https://cdn.example.com/other.m3u8' },
+    ],
+  );
+  assert.equal(fallback.url, 'https://cdn.example.com/ad.m3u8');
+});
+
+test('findBlobFallbackVideo: 跨 frame 时按标题匹配', () => {
+  const { findBlobFallbackVideo } = mod();
+  const fallback = findBlobFallbackVideo(
+    { frameId: 3, title: '  Movie  ', type: 'blob', url: 'blob:https://example.com/a' },
+    [
+      { frameId: 0, title: 'movie', type: 'dash', url: 'https://cdn.example.com/main.mpd' },
+      { frameId: 0, title: 'other', type: 'hls', url: 'https://cdn.example.com/other.m3u8' },
+    ],
+  );
+  assert.equal(fallback.url, 'https://cdn.example.com/main.mpd');
+});
+
+test('findBlobFallbackVideo: 跨 frame 且标题对不上时只在全页唯一候选时借用', () => {
+  const { findBlobFallbackVideo } = mod();
+  const blob = { frameId: 3, title: '主视频', type: 'blob', url: 'blob:https://example.com/a' };
+
+  assert.equal(
+    findBlobFallbackVideo(blob, [
+      { frameId: 0, title: '别的视频', type: 'hls', url: 'https://cdn.example.com/other.m3u8' },
+      { frameId: 0, title: '另一个', type: 'dash', url: 'https://cdn.example.com/other.mpd' },
+    ]),
+    null,
+  );
+  assert.equal(
+    findBlobFallbackVideo(blob, [
+      { frameId: 0, title: '别的视频', type: 'hls', url: 'https://cdn.example.com/other.m3u8' },
+    ]).url,
+    'https://cdn.example.com/other.m3u8',
+  );
+});
+
+test('findBlobFallbackVideo: 没有清单类候选时返回 null', () => {
+  const { findBlobFallbackVideo } = mod();
+  assert.equal(
+    findBlobFallbackVideo(
+      { frameId: 0, type: 'blob', url: 'blob:https://example.com/a' },
+      [{ type: 'direct', url: 'https://cdn.example.com/v.mp4' }],
+    ),
+    null,
+  );
+});
+
+// --- dropShadowedMseBlobs ---
+
+test('dropShadowedMseBlobs: 同页有清单时隐藏 MSE blob 行', () => {
+  const { dropShadowedMseBlobs } = mod();
+  const hls = { frameId: 1, title: '正片', type: 'hls', url: 'https://cdn.example.com/main.m3u8' };
+  const result = dropShadowedMseBlobs([
+    { frameId: 1, mse: true, title: '正片', type: 'blob', url: 'blob:https://example.com/mse' },
+    hls,
+  ]);
+  assert.deepEqual(result, [hls]);
+});
+
+test('dropShadowedMseBlobs: 没有清单 / 普通 Blob / 未知类型时保留', () => {
+  const { dropShadowedMseBlobs } = mod();
+  const mseNoManifest = { frameId: 1, mse: true, title: 'A', type: 'blob', url: 'blob:https://example.com/a' };
+  const plainBlob = { frameId: 1, mse: false, title: 'B', type: 'blob', url: 'blob:https://example.com/b' };
+  const unknownBlob = { frameId: 1, title: 'C', type: 'blob', url: 'blob:https://example.com/c' };
+
+  assert.deepEqual(
+    dropShadowedMseBlobs([mseNoManifest, plainBlob, unknownBlob, { type: 'direct', url: 'https://cdn.example.com/v.mp4' }]),
+    [mseNoManifest, plainBlob, unknownBlob, { type: 'direct', url: 'https://cdn.example.com/v.mp4' }],
+  );
+});
+
+test('dropShadowedMseBlobs: 普通 Blob 不因存在清单而被隐藏', () => {
+  const { dropShadowedMseBlobs } = mod();
+  const plainBlob = { frameId: 1, mse: false, title: '正片', type: 'blob', url: 'blob:https://example.com/blob' };
+  const hls = { frameId: 1, title: '正片', type: 'hls', url: 'https://cdn.example.com/main.m3u8' };
+  assert.deepEqual(dropShadowedMseBlobs([plainBlob, hls]), [plainBlob, hls]);
+});
+
+test('dropShadowedMseBlobs: 跨 frame 有多个候选时保守保留（避免隐藏错视频）', () => {
+  const { dropShadowedMseBlobs } = mod();
+  const blob = { frameId: 3, mse: true, title: '正片', type: 'blob', url: 'blob:https://example.com/mse' };
+  const otherHls = { frameId: 0, title: '广告', type: 'hls', url: 'https://cdn.example.com/ad.m3u8' };
+  const otherDash = { frameId: 5, title: '其它', type: 'dash', url: 'https://cdn.example.com/other.mpd' };
+  assert.deepEqual(dropShadowedMseBlobs([blob, otherHls, otherDash]), [blob, otherHls, otherDash]);
+});
+
+test('dropShadowedMseBlobs: 跨 frame 但全页只有一个清单候选时隐藏', () => {
+  const { dropShadowedMseBlobs } = mod();
+  const blob = { frameId: 3, mse: true, title: '正片', type: 'blob', url: 'blob:https://example.com/mse' };
+  const hls = { frameId: 0, title: '正片', type: 'hls', url: 'https://cdn.example.com/main.m3u8' };
+  assert.deepEqual(dropShadowedMseBlobs([blob, hls]), [hls]);
+});

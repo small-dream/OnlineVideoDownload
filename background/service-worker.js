@@ -38,6 +38,7 @@ import '../lib/download-path.js';
 import '../lib/message-types.js';
 import '../lib/settings-store.js';
 import '../lib/video-filter.js';
+import '../lib/video-source-utils.js';
 import '../lib/opfs-sink.js';
 import '../lib/page-message-guard.js';
 import '../lib/download-artifact-utils.js';
@@ -56,6 +57,7 @@ const toMessageResponse = messageRuntime.toMessageResponse || ((result) => ({ ok
 const MSG = messageTypes;
 const downloadArtifactUtils = globalThis.__OVD_DOWNLOAD_ARTIFACT_UTILS__ || {};
 const isBrokenTextStubDownload = downloadArtifactUtils.isBrokenTextStubDownload || (() => false);
+const sourceUtils = globalThis.__OVD_VIDEO_SOURCE_UTILS__ || {};
 
 function parseContentRangeTotalFallback(contentRange) {
   const match = String(contentRange || '').match(/\/(\d+)$/);
@@ -1107,9 +1109,14 @@ async function getVisibleVideosForTab(tabId) {
   const mergeYouTubeHls = videoFilter.mergeYouTubeHlsEntries || ((list) => list);
   const shouldHide = videoFilter.shouldHideRedundantDetection || (() => false);
   const backfillFrameMetadata = videoFilter.backfillFrameMetadata || ((list) => list);
+  const dropShadowedMseBlobs = sourceUtils.dropShadowedMseBlobs || ((list) => list);
   // 同一视频的 YouTube HLS 条目先并入 youtube-adaptive 条目（一条 = 一行）
-  // 之后把页面元素量出的封面 / 时长补到缺字段的兄弟条目（m3u8 / mpd 清单条目本身没有画面）
-  const mergedVideos = backfillFrameMetadata(mergeYouTubeHls(collapseBlobs(videos)));
+  // 之后把页面元素量出的封面 / 时长补到缺字段的兄弟条目（m3u8 / mpd 清单条目本身没有画面），
+  // 最后隐藏「同页已有可下载清单」的 MSE blob 行：它的封面/时长已先被清单条目借走，
+  // 留着只会让同一个视频出现两行、批量下载时下两遍。
+  const mergedVideos = dropShadowedMseBlobs(
+    backfillFrameMetadata(mergeYouTubeHls(collapseBlobs(videos)))
+  );
   // 过滤上下文必须基于**合并后**的列表：否则被吸收掉的 HLS 条目仍会让
   // "隐藏 youtube-adaptive 行"的规则生效，导致带"需合并"选项的那一行整体消失
   const detectionFilterContext = buildDetectionFilterContext(tabUrl, mergedVideos);

@@ -122,6 +122,24 @@ test('新增错误码（体积超限 / OPFS 写入 / 取消）都有友好文案
   }
 });
 
+test('MSE blob 相关错误码与原始文案都有可操作的友好提示', () => {
+  const { buildFriendlyErrorMessage } = mod();
+
+  const mseByCode = buildFriendlyErrorMessage({ code: 'BLOB_MSE_UNSUPPORTED', message: 'raw' });
+  assert.equal(mseByCode.friendly, true);
+  assert.match(mseByCode.text, /HLS/);
+
+  const unreadable = buildFriendlyErrorMessage({ code: 'BLOB_UNREADABLE', message: 'Failed to fetch' });
+  assert.equal(unreadable.friendly, true);
+  assert.match(unreadable.text, /刷新页面/);
+
+  const mseByKeyword = buildFriendlyErrorMessage({
+    message: '该条目的 blob 地址属于 MSE 流式播放（没有文件数据），无法直接保存',
+  });
+  assert.equal(mseByKeyword.friendly, true);
+  assert.match(mseByKeyword.text, /HLS/);
+});
+
 test('关键词兜底同时覆盖中文与英文原始错误', () => {
   const { buildFriendlyErrorMessage } = mod();
 

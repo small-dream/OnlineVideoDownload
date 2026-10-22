@@ -32,6 +32,8 @@
     HLS_CONTENT_SIZE_SKIP: { key: 'err_hls_sizeSkip', text: '该视频体积超出浏览器内合并上限，已改为后台落盘下载。' },
     HLS_OUTPUT_TOO_LARGE: { key: 'err_hls_tooLarge', text: '视频体积超出浏览器内合并上限，已中止下载，可尝试降低清晰度。' },
     DASH_OUTPUT_TOO_LARGE: { key: 'err_dash_tooLarge', text: 'DASH 流体积超出浏览器内合并上限，将分别保存视频与音频文件。' },
+    BLOB_MSE_UNSUPPORTED: { key: 'err_blobMse', text: '该 blob 地址属于 MSE 流式播放，浏览器不允许读取；请改用同页的 HLS / DASH 条目下载。' },
+    BLOB_UNREADABLE: { key: 'err_blobUnreadable', text: '无法读取 blob 地址：它可能已被页面回收，或属于 MSE 流式播放。请刷新页面后重试，或改用 HLS / DASH 条目。' },
     OPFS_WRITE_FAILED: { key: 'err_diskFull', text: '写入临时文件失败（可能是磁盘空间或存储配额不足），已中止下载。' },
     DOWNLOAD_ABORTED: { key: 'err_aborted', text: '下载已取消。' },
   });
@@ -59,6 +61,11 @@
       key: 'err_loginRequired',
       pattern: /未登录|请登录|login required|not logged in/i,
       text: '该视频需要登录后才能下载，请先登录站点账号。',
+    },
+    {
+      key: 'err_blobMse',
+      pattern: /MSE 流式播放|MSE streaming playback/i,
+      text: '该 blob 地址属于 MSE 流式播放，浏览器不允许读取；请改用同页的 HLS / DASH 条目下载。',
     },
     {
       key: 'err_drm',

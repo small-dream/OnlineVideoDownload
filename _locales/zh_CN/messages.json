@@ -50,8 +50,27 @@
       }
     }
   },
+  "blob_mseUnsupported": {
+    "message": "该条目的 blob 地址属于 MSE 流式播放（没有文件数据），无法直接保存；请改用同页的 HLS / DASH 条目下载。"
+  },
   "blob_started": {
     "message": "Blob 视频下载已开始"
+  },
+  "blob_switchedToManifest": {
+    "message": "该条目是 MSE 流式播放，已自动改用同页的 $1 地址下载。",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "blob_unreadable": {
+    "message": "Blob 下载失败: $1（该 blob 地址可能已被页面回收，或属于 MSE 流式播放，无法直接读取）",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
   },
   "dash_fetchManifest": {
     "message": "正在获取 DASH manifest..."
@@ -167,6 +186,12 @@
   },
   "err_streamUnreachable": {
     "message": "无法连接视频 CDN 服务器（主地址与备用地址均不可达），请检查网络或代理后重试。"
+  },
+  "err_blobMse": {
+    "message": "该 blob 地址属于 MSE 流式播放，浏览器不允许读取；请改用同页的 HLS / DASH 条目下载。"
+  },
+  "err_blobUnreadable": {
+    "message": "无法读取 blob 地址：它可能已被页面回收，或属于 MSE 流式播放。请刷新页面后重试，或改用 HLS / DASH 条目。"
   },
   "err_dashNoRepresentation": {
     "message": "未找到可用的视频表示"
@@ -401,6 +426,12 @@
   },
   "note_blob": {
     "message": "Blob 资源会先提取真实数据，再触发保存。"
+  },
+  "note_blobMseBlocked": {
+    "message": "MSE 播放流的 blob 地址没有文件数据，无法直接保存；请改用同页的 HLS / DASH 条目（如有）。"
+  },
+  "note_blobMseFallback": {
+    "message": "MSE 播放流的 blob 地址没有文件数据；下载时会自动改用同页的 HLS / DASH 地址。"
   },
   "note_drm": {
     "message": "该资源受 DRM 保护，无法下载。"

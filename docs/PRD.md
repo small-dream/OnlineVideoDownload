@@ -1,7 +1,7 @@
 # Online Video Downloader 产品需求文档
 
-> **版本**：1.22.0
-> **最后更新**：2026-09-30
+> **版本**：1.22.1
+> **最后更新**：2026-10-22
 > **维护要求**：修改功能、下载策略、运行时分工或消息模型后，必须同步更新本文档与 `docs/ARCHITECTURE.md`。
 
 ---
@@ -69,6 +69,8 @@ Online Video Downloader 是一个 Manifest V3 浏览器扩展，用于检测并�
 - MediaSource / blob URL 捕获
 - 页面侧封面采集：扫描 `<video>` 时优先取作者提供的 `poster`，没有 poster 才用 canvas 截当前帧（JPEG，宽 ≤320px）当缩略图；跨域且未声明 CORS 的视频会污染 canvas，此时跳过截帧，元素级封面都拿不到时再退回页面 `og:image` / `twitter:image`（仅限本 frame 只有一个 `<video>`），否则交给 Popup 侧的带请求头补全
 - blob:（MSE 播放流 / `createObjectURL` 自建播放器）同样参与 `<video>` 扫描并附带封面
+- MSE blob 识别：页面注入脚本记录 `URL.createObjectURL` 的实参类型，MediaSource 建出来的 blob 条目带 `mse: true` 上报（`addSourceBuffer` 路径直接视为 MSE）。MSE 地址只是播放器喂数据的管道、没有文件数据，浏览器不允许 fetch（`net::ERR_FILE_NOT_FOUND`），下载时据此改走同页嗅探到的 HLS / DASH 清单，见 4.7
+- MSE blob 行隐藏：同 frame 已有 HLS / DASH 清单、或全页只有一个清单候选时，列表不再展示这条无法下载的 blob 行——同一个视频只留一行，批量下载不会把同一条视频下两遍；清单条目会先借用它的封面与真实时长。没有把握替代时仍然展示（点下载会走更宽松的同标题匹配，或给出明确提示）
 - 单 `<video>` frame 的封面共享：同一 frame 只有一个 `<video>` 时（典型 hls.js / dash.js 播放器），它的封面会补到同 frame 的 m3u8 / mpd / 直链 / MSE blob 条目，列表里不再只有一行有图
 - blob 条目去重：blob: URL 随 MSE 播放器重建/切流不断变化，同一播放器被嵌在多份 iframe（多线路预加载、弹幕播放器）时会出现多行同标题重复项；现在按标题跨 frame 只保留最新一条，无标题时才退回按 frame 去重
 - 子框架上报的通用/ blob 检测不再使用 iframe 自己的 `document.title`（现场表现为整列标题都是「弹幕播放器」），留空由 background 用标签页标题（视频名）补全；顶层页面维持原行为
@@ -193,6 +195,12 @@ UI 要求：
 
 - content script 读取 blob URL
 - 在页面内重新创建可下载对象并触发浏览器保存
+- 普通 Blob（页面用 `createObjectURL(new Blob(...))` 建出来的、可读取的地址）照旧读取并保存
+- MSE 播放流（`createObjectURL(mediaSource)`）的 blob 地址**不含文件数据**，fetch 必然失败（Chrome 报 `net::ERR_FILE_NOT_FOUND`）。页面侧已标记 `mse: true`，因此：
+  - 列表读取时先隐藏「同 frame 已有清单 / 全页只有一个清单候选」的 MSE blob 行，同一个视频只留清单那一行（清单条目已借用它的封面与时长），避免重复行与批量下载重复文件；没有把握替代时保留该行
+  - 点击仍可见的这类条目时（没有清单可替代），Popup 优先改用同一标签页里同 frame / 同标题的 HLS / DASH 清单下载（自动替换，并提示「该条目是 MSE 流式播放，已自动改用同页的 HLS / DASH 地址下载」）
+  - 没有可用清单时提前报错并给出可操作文案（错误码 `BLOB_MSE_UNSUPPORTED`），提示改用同页的 HLS / DASH 条目；条目下方注释也会说明原因
+  - 清单下载中途才暴露的「blob 已被页面回收 / 未知类型 MSE 地址」同样映射为友好文案（`BLOB_UNREADABLE`），不再只显示浏览器原生的 `Failed to fetch`
 
 ### 4.8 批量下载
 
@@ -300,6 +308,7 @@ UI 要求：
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| 1.22.1 | 2026-10-22 | 修复「MSE 播放页点 Blob 条目下载失败（`GET blob:https://… net::ERR_FILE_NOT_FOUND`）」。MSE 的 blob 地址是 `URL.createObjectURL(mediaSource)` 建出来的数据管道，本身没有文件数据，`fetch` 它必然失败，此前 blob 策略仍会尝试读取并把浏览器原生错误抛给用户。①`injected/page-core.js` / `injected/page-interceptor.js`：新增对象 URL 类型表，钩住 `URL.createObjectURL` / `revokeObjectURL`，`MediaSource`（含跨 realm 鸭子类型判断）建出的地址记为 `mse`；`<video>` 扫描与 `addSourceBuffer` 上报都带 `mse: true`（普通 Blob 带 `mse: false`）。②`lib/video-source-utils.js`：`findBlobFallbackVideo` 为 blob 条目在同页检测结果里找 HLS / DASH 清单替代下载（同 frame + 同标题 → 同标题 → 同 frame → 全页唯一候选，避免跨播放器借错清单）；`dropShadowedMseBlobs` 在 `getVisibleVideosForTab` 读取时隐藏已有清单可替代的 MSE blob 行（只认同 frame 或全页唯一候选），同一视频只留一行、批量下载不会重复。③`popup/popup.js#triggerDownload`：仍可见的 blob 条目（`mse !== false`）命中替代清单时自动换源下载并提示；条目注释区分「会自动改用 HLS/DASH」与「无法直接保存」两种情形。④`content/strategies/blob-strategy.js`：MSE 条目在 fetch 之前直接失败（`BLOB_MSE_UNSUPPORTED`），读取失败映射为 `BLOB_UNREADABLE`；`content/download-coordinator.js` 把错误码透传到 `SOURCE_DOWNLOAD_RESULT`，`popup/popup-error-messages.js` + `_locales` 补齐两条友好文案（含关键词兜底，后台路径无错误码时也能命中）。新增用例 17 条，全量 841 项通过。 |
 | 1.22.0 | 2026-09-30 | 支持 Telegram Web A（web.telegram.org/a）。WebA 与 WebK 同源同代码库（tweb），但流式媒体端点不同：`./progressive/document<id>?fileSize=…&mimeType=…&account=…`（`src/serviceWorker/progressive.ts`），而扩展此前只认 `stream/`，于是 WebA 的 `<video src>` 一律识别不出，只有少数回退到 blob 播放的条目（典型是 6 秒左右的 GIF/webDocument）能出现。①`lib/telegram-utils.js`：新增 `PROGRESSIVE_PATH_SEGMENT` / `TELEGRAM_STREAM_PATH_SEGMENTS` / `matchTelegramStreamSegment`，`isTelegramStreamUrl` 同时认 `/stream/` 与 `/progressive/`；新增 `isTelegramProgressiveMediaUrl` 把封面图（`?size=x`/`?size=m`）、视频预览小片（`?size=v`）与页面自带下载入口（`?download`）挡在媒体之外；`parseTelegramStreamInfo` 对 WebA 直接读 query（`docId` 取自 `document<id>`，另有 `fileSize`/`mimeType`/`account`）。②`injected/page-interceptor.js`：消息 ID 改读 `data-message-id`（新版 tweb），旧版 `data-mid` 仍兼容；会话名新增 `.MiddleHeader .title` 选择器，并新增 `readTelegramPageTitle` 兜底（取 `document.title`，纯应用名如 `Telegram Web A` 直接丢弃）。③下载链路无需改动：WebA 的 SW 同样用 `self.clients.get(e.clientId)` 找页面客户端，既有 `PAGE_STREAM_FETCH_*` 中继 / 完整性校验 / OPFS 落盘全部复用。新增用例 8 条，全量 824 项通过。 |
 | 1.21.0 | 2026-09-30 | 新增 Telegram Web（web.telegram.org/k）视频下载。①新增 `lib/telegram-utils.js`：识别 `stream/` 流式媒体地址与 Telegram blob（`isTelegramStreamUrl` / `isTelegramMediaUrl`）、解析 DownloadOptions JSON 取 `docId`/`mimeType`/`size`（`parseTelegramStreamInfo`）、按 MIME 猜扩展名（`guessMediaExtension`）、从 DOM 信息拼标题（`buildTelegramTitle` → `<会话名> #<消息ID>`），并提供共享的 Range 读取器 `readTelegramStream`。②新增页面↔内容侧抓流协议 `PAGE_STREAM_FETCH_REQUEST/START/PROGRESS/CHUNK/FINISH/ERROR/ABORT/ACK`：WebK 的 `/stream/` 端点由页面自己的 Service Worker 提供，而该 SW 用 `self.clients.get(e.clientId)` 找页面客户端——内容脚本/后台的 fetch 没有 clientId、不被接管，会落到真实服务器拿到 302（实测），所以字节必须在**页面上下文**抓取。`injected/page-http-utils.js` 按 2 MB Range 循环取数、每 512 KB 分块回传并等待逐块 ack（背压，内存里始终只有一块），读完以 `Content-Range` 总长校验完整性，截断/空流都报错而不是保存残片。③内容侧 `content/stream-transfer-manager.js#fetchPageStreamInPage` 把分片转交后台落盘；`content/strategies/telegram-strategy.js` 只负责文件名/taskMeta/进度/结果。④新增 `background/page-stream-download.js`（`PageStreamDownloadManager`）：顺序写 OPFS → offscreen 生成对象 URL → 浏览器下载 API 保存，并把 `downloadId` 挂回内容侧同一条任务；标签页关闭时清理残留传输，零字节流直接拒绝。⑤探测链路单列 `telegram` 类型：`injected/page-interceptor.js` 扫描 `<video src=…/stream/…>` 时采集标题/消息 ID/MIME/体积并跳过无意义的 HEAD 体积探测，`background/request-interceptor.js` 同样识别，`lib/video-source-utils.js` / `lib/video-utils.js` / `lib/page-message-guard.js` 增加类型与执行模式（content）。新增用例 34 条，全量 816 项通过。 |
 | 1.20.0 | 2026-09-27 | 下载队列统一并发 + 断点续传（暂停/继续）。①`background/download-queue.js` 改为「按条目管理」：每个等待/进行中的下载是一个带 `id`/`label`/`owner`/`videoUrl` 的条目，新增 `snapshot()`（含排队位次）、`cancelQueued()`、`releaseOwner()` 与 `onChange()`；队列变化即时广播 `DOWNLOAD_QUEUE_UPDATE`。②内容侧下载（Bilibili / YouTube 页面内）不再绕过并发上限：Popup 通过新增的长连接端口 `ovd-download-slots` 申请槽位（`background/download-slot-port.js`，协议 ACQUIRE/RELEASE/CANCEL/PING），Popup 关闭时端口断开、后台按 owner 回收槽位，不会泄漏也不会让无人接收结果的任务偷偷开始；批量下载不再自带信号量，全部条目统一入队。③`DOWNLOAD_VIDEO` 与「重试」也改为条目化入队，任务视图把排队条目渲染成「排队中（第 N 位）」并支持「取消排队」。④断点续传：新增 `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`（`chrome.downloads.pause` / `resume`，仅对 `canResume` 的下载生效），任务状态新增 `paused`，`onChanged` 的 `paused` 增量同步任务状态；手动「重试」优先走 `resume` 从断点继续而不是从头重下；SW 重启核对任务时把 `paused` 一并纳入。⑤并发上限设置上限从 5 提到 10，与队列上限一致。新增用例 10 条，全量 780 项通过。 |

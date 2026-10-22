@@ -1,7 +1,7 @@
 # Online Video Downloader Architecture
 
-> Version: 1.22.0
-> Last Updated: 2026-09-30
+> Version: 1.22.1
+> Last Updated: 2026-10-22
 
 ## Goals
 
@@ -445,6 +445,28 @@ Public surface:
 - `takeOpfsTempFile(downloadId)`（取出即移除）
 - `listOpfsTempFiles()` / `clearOpfsTempFiles()`
 
+### `lib/video-source-utils.js`
+
+Responsibilities:
+
+- 统一的来源判定：`getSourceId` / `getExecutionMode` / `getSourceLabel` / `buildTaskKey`。
+- 为不可读取的 blob 条目寻找替代下载来源。
+
+Public surface:
+
+- `getSourceId(videoInfo)`
+- `getExecutionMode(videoInfo)`
+- `getSourceLabel(videoInfo)`
+- `buildTaskKey(videoInfo)`
+- `findBlobFallbackVideo(video, videos)` → `{ type: 'hls' | 'dash', url, ... } | null`
+- `dropShadowedMseBlobs(videos)` → `VideoInfo[]`（去掉已有清单可替代的 MSE blob 条目）
+
+Notes:
+
+- `findBlobFallbackVideo` 只在 `video.type === 'blob'` 时生效，候选必须是有 http(s) 地址的 `hls` / `dash` 条目；匹配顺序为「同 frame + 同标题 → 同标题（任意 frame）→ 同 frame（取最新）→ 全页唯一候选」，跨 frame 且标题对不上时不会硬借，避免把别的播放器的清单当成这条视频。
+- MSE blob 没有文件数据，Popup 在点下载时用它的返回值把请求改写成同页清单（见 Popup Runtime）；普通 Blob（`mse === false`）不参与替换。
+- `dropShadowedMseBlobs` 在 `getVisibleVideosForTab` 里对**合并/借用元数据之后**的列表执行（`background/service-worker.js`）：MSE blob 行先把自己的封面与时长借给清单条目，再从展示列表移除，所以同一个视频只出现一行、批量下载也不会重复。出于「隐藏不可逆」的考虑，它只认**同 frame 的清单**或**全页唯一的清单候选**，不跨 frame 按标题猜；匹配不到时保留该行，点下载仍会走 `findBlobFallbackVideo` 的宽松匹配（同标题 / 唯一候选）。
+
 ## Page Context Runtime
 
 ### Loader Entry
@@ -470,11 +492,13 @@ Files:
 
 Responsibilities:
 
-- `page-core`: own page-context constants, `postMessage` bridging, content-to-page message routing, and shared reset hooks.
+- `page-core`: own page-context constants, `postMessage` bridging, content-to-page message routing, shared reset hooks, and the object-URL kind table (`rememberObjectUrl` / `forgetObjectUrl` / `getObjectUrlKind` / `isMediaSourceLike`; capped at 256 entries, FIFO eviction).
 - `page-http-utils`: own page-side binary fetch helpers, resumable/ranged media fetches, direct-download handling, YouTube stream chunk transfer, and the Telegram page-side ranged transfer (`PAGE_STREAM_FETCH_REQUEST` → `readTelegramStream` → `PAGE_STREAM_FETCH_CHUNK` with per-chunk acks).
 - `page-youtube-parser`: own YouTube player-response extraction, dedupe state, watch-page validation, and Android fallback logic.
 - `page-bilibili-parser`: own Bilibili page metadata extraction and validation across `__INITIAL_STATE__`, `__playinfo__`, and player APIs. Extracts thumbnail from `videoData.pic`, `videoData.cover`, `initialState.pic`, and DOM `<meta>` / `<img>` elements.
 - `page-interceptor`: own XHR/fetch interception, `MediaSource` / blob detection, DRM detection, history hooks, and generic audio/video element scans.
+- `page-interceptor` 在 `install()` 里钩住 `URL.createObjectURL` / `URL.revokeObjectURL`，把每个对象 URL 记为 `mse`（实参是 `MediaSource`）或 `blob`（普通 Blob；跨 realm 的 MediaSource 用 `addSourceBuffer` + `endOfStream` 鸭子类型判断）。MSE 地址没有文件数据、`fetch` 必失败，下载侧据此改走同页清单。
+- `scanVideoElements` 与 `MediaSource.addSourceBuffer` 上报 blob 检测时附带 `mse: true`（MSE）或 `mse: false`（确认是普通 Blob）；扩展注入前就已创建的地址没有该字段，按未知处理。
 - `page-interceptor` 上报通用 / blob 检测时用 `frameDisplayTitle()`：顶层 frame 取 `document.title`，子框架留空（iframe 标题通常是播放器名，如「弹幕播放器」，交由 background 用标签页标题补全）。
 - `page-interceptor` 的通用扫描同时采集封面：`extractMediaThumbnail(mediaElement, src)` 优先取 `poster`，没有 poster 才 `captureFrameThumbnail` 用 canvas 截当前帧（JPEG，宽 ≤320px）。跨域未声明 CORS 的媒体会污染 canvas，`drawImage`/`toDataURL` 抛错时返回空串（`<video>` 元素与 src 组合各缓存一次，避免每次重扫都重新编码）。元素级封面都拿不到、且本 frame 只有一个 `<video>` 时，`resolvePageThumbnail()` 退回页面 `og:image` / `twitter:image` / `itemprop="thumbnailUrl"`，取得的结果按页面缓存（未命中不缓存，允许脚本稍后注入）。
 - `scanVideoElements` 现在也登记 `blob:` 源的 `<video>`（MSE 播放流与 `createObjectURL` 自建播放器），并在「本 frame 只有一个 `<video>`」时给带封面的上报加 `thumbnailScope: 'frame'`，授权 background 把该封面共享给同 frame 的其它条目。`takeThumbnailPayload()` 保证同一元素 + 同一 src 只上报一次 data URL（注册表合并时会保留已捕获的封面）。
@@ -538,7 +562,7 @@ Files:
 
 Responsibilities:
 
-- `blob-strategy`: read blob URLs in the page and trigger file downloads.
+- `blob-strategy`: read blob URLs in the page and trigger file downloads. MSE entries (`mse: true`, from `injected/page-interceptor.js`) fail fast with `BLOB_MSE_UNSUPPORTED` instead of a doomed `fetch`; read failures map to `BLOB_UNREADABLE` with the underlying browser reason. The Popup normally rewrites MSE blob items to a same-page HLS / DASH entry before this strategy runs (see `lib/video-source-utils.js#findBlobFallbackVideo`).
 - `youtube-capture-strategy`: keep the legacy page-recording workflow isolated and stable.
 - `youtube-parse-download-strategy`: select YouTube streams by requested mode/resolution and mux adaptive tracks in-page.
 - `bilibili-strategy`: call Bilibili APIs, sign WBI requests, fetch available qualities on demand, fetch DASH streams, relay merge progress, mux in-page, and save merged blob via browser download API with in-page blob fallback.
@@ -601,6 +625,7 @@ Responsibilities:
 - Emit unified lifecycle messages.
 - Generate a per-download `traceId` and attach it to source execution context and lifecycle payloads.
 - Attach a per-task progress reporter so page-side workflows can update the popup, and surface long-task progress/messages on the page via the float feedback bar (see `content/float-button.js`).
+- 失败结果携带策略抛出的错误码（`SOURCE_DOWNLOAD_RESULT.code`），Popup 据此映射友好文案（如 `BLOB_MSE_UNSUPPORTED` / `BLOB_UNREADABLE`）；`DOWNLOAD_ABORTED` 仍统一显示为「已取消」。
 
 Primary messages emitted:
 
@@ -655,6 +680,8 @@ Responsibilities:
 - 字幕控件：条目存在字幕轨时渲染「字幕」开关 + 语言下拉（默认「自动（推荐）」），`resolveSubtitleTrack` 按偏好挑轨，`triggerSubtitleDownload` 以 `DOWNLOAD_SUBTITLE` 与媒体下载并行发出（失败只提示）；YouTube 字幕轨来自检测结果，Bilibili / HLS 来自画质响应。
 - 下载队列 UI：打开时用长连接端口 `ovd-download-slots` 连接后台并同步一次 `GET_DOWNLOAD_QUEUE`，随后按 `DOWNLOAD_QUEUE_UPDATE` 广播更新；任务视图把排队条目渲染成「排队中（第 N 位）」并提供「取消排队」，列表头部显示「N 个排队中」，条目按钮显示「排队中 #N」。
 - 内容侧下载（`executionMode === 'content'`）在发 `SOURCE_DOWNLOAD` 前先 `reserveDownloadSlot()` 申请后台槽位，拿到才让页面开始；任务结束（`SOURCE_DOWNLOAD_RESULT`）或 Popup 关闭（端口断开）时归还槽位。批量下载不再自带信号量，全部条目统一入队。
+- MSE blob 条目自动改用同页清单：`triggerDownload` 在 `video.type === 'blob' && video.mse !== false` 时调用 `lib/video-source-utils.js#findBlobFallbackVideo(video, currentVideos)`，命中就把下载对象换成该 HLS / DASH 条目（重新走 `buildDownloadRequest`）并提示「已自动改用同页的 HLS / DASH 地址下载」；`mse === false` 的普通 Blob 保持原样读取。条目注释也按 `mse` 区分「会自动改用清单」与「无法直接保存」。
+- 失败提示优先使用错误码：`SOURCE_DOWNLOAD_RESULT.code` 经 `popup/popup-error-messages.js#buildFriendlyErrorMessage` 映射（含 `BLOB_MSE_UNSUPPORTED` / `BLOB_UNREADABLE`），无错误码时退回关键词匹配（同样覆盖 MSE 文案，兼容后台路径）。
 - 任务视图对可续传的浏览器下载提供「暂停」/「继续」（`PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK`），并在状态标签里区分 `queued` / `paused`。
 - Reflect background broadcast progress for HLS, YouTube, and Bilibili workflows in a unified popup progress bar.
 - Own the visible video list, per-item progress, global progress, and source workflow status messages.
@@ -701,6 +728,7 @@ Responsibilities:
 - `Map<tabId, Map<registryKey, VideoInfo>>` 内存注册表，并按去抖写入 `storage.session`（`SessionMirror`），SW 重启后 Popup 仍能看到检测列表。
 - `mergeVideoInfo` 合并同 URL 的多次上报：新值为空时保留旧值（requestHeaders、title、mimeType、filename、`thumbnail` / `poster` / `cover`、fileSize / size / duration）。封面必须一起保留——页面封面是一次性上报的，后续同 URL 的网络拦截上报不带 thumbnail，直接覆盖会让列表里的封面闪一下又变回占位图。
 - Frame 级封面共享：页面在本 frame 只有一个 `<video>` 时，用 `thumbnailScope: 'frame'` 授权把自己的封面共享给同 tab + 同 frameId 的 m3u8 / mpd / 直链 / MSE blob 条目（`_syncFrameThumbnail`，按 `${tabId}:${frameId}` 缓存，`clearTab` / `clearFrame` 时清理）。共享只补空缺，不覆盖条目自带封面；结构化来源（YouTube / Bilibili）与 audio 不参与。
+- 展示列表的去噪在 `service-worker.js#getVisibleVideosForTab`：`collapseDuplicateBlobEntries` → `mergeYouTubeHlsEntries` → `backfillFrameMetadata` → `dropShadowedMseBlobs` → `shouldHideRedundantDetection` → 用户过滤。`dropShadowedMseBlobs` 放在元数据借用之后，保证 MSE blob 行先贡献封面/时长再被隐藏（`mse === true` 且同页有匹配清单时才隐藏）。
 
 ### Background Strategy Registry
 
@@ -945,6 +973,8 @@ Notes:
 - `INJECT_PAGE_SCRIPTS` 字段为 `files`（`injected/*` 与 `lib/message-types.js` 的有序列表）；background 用 `sender.frameId` 定向到发起注入的 frame，CSP 严格站点不再依赖 `<script src>`（DOM 注入保留为回退）。
 - `INJECT_DOWNLOAD_HEADERS` 字段为 `url` / `headers` / `corsOrigin`，返回 `{ ok, token }`；`RELEASE_DOWNLOAD_HEADERS { token }` 触发对应 `declarativeNetRequest` 动态规则清理。未释放的会话保留在 `headerInjectionSessions` 中，避免下载中途规则被回收。
 - `VIDEO_DETECTED` 可选携带封面字段 `thumbnail` / `poster` / `cover`（页面侧采集，进入注册表前由 `lib/page-message-guard.js#sanitizeThumbnail` 清洗：仅 http(s) / 协议相对图片与 base64 图片，≤256KB）；`thumbnailScope: 'frame'` 表示该封面取自「本 frame 唯一的 `<video>`」，background 据此补全同 frame 的 hls / dash / direct / blob 条目。
+- `VIDEO_DETECTED` 的 blob 条目可选携带 `mse`（布尔）：`true` 表示该 blob: 地址由 `URL.createObjectURL(mediaSource)` 创建（没有文件数据、fetch 必失败），`false` 表示确认是普通 Blob。页面注入脚本在 `URL.createObjectURL` 钩子里记账，`<video>` 扫描与 `addSourceBuffer` 上报时带上；字段缺失表示扩展注入前就已创建，按未知处理（下载侧仍会尝试读取）。
+- `SOURCE_DOWNLOAD_RESULT` 可选携带 `code`（策略抛出的错误码，如 `BLOB_MSE_UNSUPPORTED` / `BLOB_UNREADABLE` / `DOWNLOAD_ABORTED`），Popup 优先按错误码显示友好文案；`DownloadStateStore` 只持久化 `error` 文案，不存 `code`。
 - `DOWNLOAD_SUBTITLE` 由 Popup 发出，字段为 `track`（`{ url, languageCode, languageName, isAsr, format }`）/ `sourceId` / `title` / `videoUrl`；background 的 `subtitle-downloader` 取流、转 `.srt` 并保存，返回 `{ ok, filename, downloadId, cues, format, size }`。它与媒体下载**并行**发出且为最佳努力：失败只提示，不回滚媒体文件。
 - `GET_DOWNLOAD_QUEUE` 返回 `{ queue: { limit, active, pending, entries } }`；`CANCEL_QUEUED_DOWNLOAD { queueId }` 只取消尚未开始的条目（返回 `{ cancelled }`）。`PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK { taskId }` 走 `chrome.downloads.pause` / `resume`：仅对 `canResume` 的下载生效，暂停后任务状态为 `paused`，继续时清空自动重试计数并从断点续传（返回 `{ ok, task }`，失败时 `{ ok:false, error }`）。`RETRY_DOWNLOAD_TASK` 现在优先 `resume` 续传，续传不可用才回退为重新发起下载。
 - `PAGE_STREAM_*` 是页面侧抓流的落盘协议（Telegram Web）：`START { transferId, filename, mimeType, fileSize, taskMeta }` 建传输，`CHUNK { transferId, seq, chunkBase64 }` 追加分片（页面每 512 KB 一块，内容脚本转交），`FINISH { transferId, taskMeta }` 落盘并保存（返回 `{ ok, downloadId, filename, size }`，零字节直接拒绝而不是保存空文件），`ABORT { transferId, error }` 清理半成品。传输按 `tabId`（取自 `sender`）隔离，标签页关闭时由 `tabs.onRemoved` 统一清理。字节由页面上下文取得（Telegram 的 SW 不服务没有 clientId 的内容脚本/后台请求），后台只负责落盘与任务登记。
@@ -1140,6 +1170,7 @@ When adding shared low-level helpers:
 ## Version History
 
 | Version | Date | Changes |
+| 1.22.1 | 2026-10-22 | Fix 「MSE playback pages fail when the Blob entry is downloaded」 (`GET blob:https://… net::ERR_FILE_NOT_FOUND`). An MSE blob URL comes from `URL.createObjectURL(mediaSource)`: it is only a pipe into the player and holds no file bytes, so `fetch` always fails; the blob strategy nevertheless attempted the read and surfaced the raw browser error. ①`injected/page-core.js` gains an object-URL kind table (`rememberObjectUrl` / `forgetObjectUrl` / `getObjectUrlKind`, `isMediaSourceLike` with a cross-realm duck-type fallback, 256-entry cap); `injected/page-interceptor.js` hooks `URL.createObjectURL` / `revokeObjectURL` in `install()` and reports `mse: true` for MediaSource-backed URLs (and `mse: false` for confirmed plain Blobs) from both `scanVideoElements` and the `addSourceBuffer` reporter. ②`lib/video-source-utils.js` adds `findBlobFallbackVideo(video, videos)` (same-frame+same-title → same-title → same-frame (newest) → sole candidate, so it never borrows another player's manifest) and `dropShadowedMseBlobs(videos)`, which removes MSE blob rows that a matched manifest can replace; `background/service-worker.js#getVisibleVideosForTab` applies it **after** `backfillFrameMetadata` so the manifest row inherits the blob's thumbnail/duration first, and one video keeps one row (batch downloads no longer save it twice). ③`popup/popup.js#triggerDownload` rewrites still-visible blob items (`mse !== false`) to the matched manifest, shows the i18n switch hint, and renders MSE-specific notes (auto-fallback vs. not directly downloadable). ④`content/strategies/blob-strategy.js` fails MSE entries before any `fetch` with `BLOB_MSE_UNSUPPORTED`, maps read failures to `BLOB_UNREADABLE`, `content/download-coordinator.js` passes `code` through `SOURCE_DOWNLOAD_RESULT`, and `popup/popup-error-messages.js` + both `_locales` bundles add the two friendly messages plus a keyword fallback for the code-less background path. 17 new test cases, 841 total passing. |
 | 1.22.0 | 2026-09-30 | Telegram Web A (web.telegram.org/a) support. WebA is the same tweb codebase as WebK but streams media from a different same-origin endpoint: `./progressive/document<id>?fileSize=…&mimeType=…&account=…` (`src/serviceWorker/progressive.ts` + `global/helpers/messageMedia.ts#getVideoMediaHash`), so `<video src>` was never classified and only the rare blob-backed item (e.g. a 6-second GIF/webDocument, which falls back to `ApiMediaFormat.BlobUrl`) showed up. `lib/telegram-utils.js` now matches both endpoints via `matchTelegramStreamSegment` / `isTelegramStreamUrl` and reads WebA metadata straight from the query (`parseTelegramStreamInfo` → `docId` from `document<id>`, `fileSize`, `mimeType`, `account`); the `/progressive/` path also serves cover images (`?size=x|m`), the video preview clip (`?size=v`) and the app's own download entry (`?download`), so a new `isTelegramProgressiveMediaUrl` gate keeps them out of the detection list. `injected/page-interceptor.js` reads the message id from `data-message-id` (new tweb) as well as the old `data-mid`, and falls back to `document.title` for the chat name (`setPageTitle` writes the chat name there; bare app titles such as "Telegram Web A" are dropped). No protocol changes: the existing `PAGE_STREAM_FETCH_*` relay, completion check and OPFS sink already work because WebA's SW resolves the page client the same way. 8 new test cases, 824 total passing. |
 | 1.21.0 | 2026-09-30 | Telegram Web (web.telegram.org/k) video downloads. WebK serves media from its own Service Worker as a same-origin `…/k/stream/<URL-encoded DownloadOptions JSON>` endpoint that answers Range requests. Critically, that SW resolves the requesting client with `self.clients.get(e.clientId)`, so a content-script (or background) fetch has no clientId and is never intercepted — it hits the real server, which 302s unknown `/k/` paths (verified live). The bytes therefore must be pulled in the **page context (MAIN world)**. New `lib/telegram-utils.js` (`isTelegramStreamUrl` / `isTelegramMediaUrl` / `isTelegramBlobUrl`, `parseTelegramStreamInfo` → `{ docId, mimeType, size }`, `guessMediaExtension`, `buildTelegramTitle` → `"<chat> #<messageId>"`, plus the shared ranged reader `readTelegramStream` → `{ bytes, ranged, totalBytes }`, `totalBytesFromContentRange`, `createStreamAbortError`). New page↔content protocol `PAGE_STREAM_FETCH_REQUEST` / `_START` / `_PROGRESS` / `_CHUNK` / `_FINISH` / `_ERROR` / `_ABORT` / `_ACK`: `injected/page-http-utils.js` handles `REQUEST` by looping 2 MB Range requests over `readTelegramStream` (which caps a single SW response at its own part size and follows `Content-Range` to the true total), base64-chunks every 512 KB and waits for a per-chunk `ACK` before reading on, so only one chunk is ever in flight; it also refuses to finish a truncated (`ranged && bytes < totalBytes`) or empty stream. `content/stream-transfer-manager.js#fetchPageStreamInPage` relays each chunk to the background and acks it, `content/message-router.js` routes the page messages, and `content/strategies/telegram-strategy.js` (`id: 'page-stream'`, source `telegram`, execution mode `content`) owns only filename/taskMeta/progress/result. `background/page-stream-download.js` (`PageStreamDownloadManager`) writes chunks sequentially to an OPFS sink (`ovd-page-stream`), finalizes via `submitOpfsDownloadFromOffscreen`, attaches the resulting `downloadId` back onto the content-side task (`registerDownload` + `updateTaskByVideoUrl`, no duplicate row), cleans up unfinished transfers with `abortForTab` on tab close, and rejects a zero-byte stream instead of saving an empty file. Detection is a first-class `telegram` type: `injected/page-interceptor.js` reports `<video src=…/stream/…>` with DOM-derived title/message id (`data-mid`) and skips the meaningless HEAD size probe, `background/request-interceptor.js` maps stream URLs to it, and `lib/video-source-utils.js` / `lib/video-utils.js` / `lib/page-message-guard.js` add the type, the `content` execution mode and the popup badge label. 34 new test cases, 816 total passing. |
 | 1.20.0 | 2026-09-27 | Unified download concurrency and resumable downloads. `background/download-queue.js` is now entry-based: every waiting/running download is a record (`id`/`label`/`owner`/`sourceId`/`tabId`/`videoUrl`/`enqueuedAt`) with `snapshot()` (1-based queue positions), `cancelQueued()`, `releaseOwner()` and `onChange()`; queue changes broadcast `DOWNLOAD_QUEUE_UPDATE`. Content-side downloads (Bilibili / YouTube in-page) no longer bypass the limit: the popup acquires a slot over a long-lived port (`ovd-download-slots`, protocol in new `background/download-slot-port.js`; ACQUIRE/RELEASE/CANCEL/PING → SLOT_ADMITTED/SLOT_ABORTED/SLOT_RELEASED/SLOT_CANCELLED/SLOT_READY) before sending `SOURCE_DOWNLOAD`, and the service worker releases everything the port owned on disconnect, so closing the popup can neither leak slots nor start a queued job nobody can receive. `DOWNLOAD_VIDEO` and `RETRY_DOWNLOAD_TASK` also enqueue entry-based; the popup renders queued entries as 「排队中（第 N 位）」 rows with a 「取消排队」 action (and 「排队中 #N」 on the item button) and drops its own batch semaphore. Resumable downloads: new `PAUSE_DOWNLOAD_TASK` / `RESUME_DOWNLOAD_TASK` (`chrome.downloads.pause` / `resume`, gated on `canResume`, plus `pauseDownloadAsync`/`supportsDownloadPause` in `lib/browser-compat.js`), a new `paused` task state kept in sync from `onChanged.paused`, retry that prefers `resume` over restarting, and SW-restart reconciliation that also verifies paused tasks. The concurrency setting ceiling moved from 5 to 10 to match the queue. 10 new test cases, 780 total passing. |

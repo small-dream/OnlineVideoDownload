@@ -2273,6 +2273,12 @@ function buildNoteHtml(video) {
   }
 
   if (video.type === 'blob') {
+    if (video.mse === true) {
+      const manifestFallback = sourceUtils.findBlobFallbackVideo?.(video, currentVideos) || null;
+      return manifestFallback
+        ? `<div class="note-text">${t('note_blobMseFallback', 'MSE 播放流的 blob 地址没有文件数据；下载时会自动改用同页的 HLS / DASH 地址。')}</div>`
+        : `<div class="note-text">${t('note_blobMseBlocked', 'MSE 播放流的 blob 地址没有文件数据，无法直接保存；请改用同页的 HLS / DASH 条目（如有）。')}</div>`;
+    }
     return `<div class="note-text">${t('note_blob', 'Blob 资源会先提取真实数据，再触发保存。')}</div>`;
   }
 
@@ -3202,6 +3208,28 @@ async function triggerDownload(video, btn) {
           mode: downloadVideo.downloadOptions.mode,
           resolution: downloadVideo.downloadOptions.resolution,
         }) || youtubePreferenceCache;
+      }
+    }
+
+    // MSE 播放流的 blob 地址没有文件数据（fetch 必然失败，Chrome 报 net::ERR_FILE_NOT_FOUND）：
+    // 同页已嗅探到 HLS / DASH 清单时直接改走清单，而不是让用户只看到一条「下载失败」。
+    // mse === false 表示页面确认这是可读取的普通 Blob，必须优先原样保存。
+    if (downloadVideo?.type === 'blob' && downloadVideo.mse !== false) {
+      const manifestFallback = sourceUtils.findBlobFallbackVideo?.(downloadVideo, currentVideos) || null;
+      if (manifestFallback) {
+        console.log(
+          `[OVD] blob 条目改用同页清单下载 type=${manifestFallback.type} url=${String(manifestFallback.url || '').slice(0, 120)}`
+        );
+        downloadVideo = buildDownloadRequest(manifestFallback);
+        showMessage(
+          t(
+            'blob_switchedToManifest',
+            '该条目是 MSE 流式播放，已自动改用同页的 $1 地址下载。',
+            [manifestFallback.type === 'dash' ? 'DASH' : 'HLS']
+          ),
+          'info',
+          { key: `blob-switch:${manifestFallback.url}` }
+        );
       }
     }
 
